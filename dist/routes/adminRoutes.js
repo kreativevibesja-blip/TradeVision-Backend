@@ -1,0 +1,22 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const auth_1 = require("../middleware/auth");
+const adminController_1 = require("../controllers/adminController");
+const router = (0, express_1.Router)();
+router.use(auth_1.authenticate, auth_1.requireAdmin);
+router.get('/dashboard', adminController_1.getDashboardStats);
+router.get('/users', adminController_1.getUsers);
+router.patch('/users/:id', adminController_1.updateUser);
+router.get('/analyses', adminController_1.getAnalysisLogs);
+router.get('/payments', adminController_1.getPayments);
+router.get('/analytics', adminController_1.getAnalytics);
+router.get('/pricing-plans', adminController_1.getPricingPlans);
+router.patch('/pricing-plans/:id', adminController_1.updatePricingPlan);
+router.get('/settings', adminController_1.getSystemSettings);
+router.post('/settings', adminController_1.updateSystemSetting);
+router.get('/announcements', adminController_1.getAnnouncements);
+router.post('/announcements', adminController_1.createAnnouncement);
+router.patch('/announcements/:id', adminController_1.updateAnnouncement);
+exports.default = router;
+//# sourceMappingURL=adminRoutes.js.map
