@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
+import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { config } from '../config';
 import prisma from '../config/database';
-import { supabase } from '../config/supabase';
 
 export interface AuthRequest extends Request {
   user?: {
@@ -21,48 +21,47 @@ type SupabaseIdentity = {
   userMetadata?: Record<string, unknown>;
 };
 
+type SupabaseJwtPayload = {
+  sub?: string;
+  email?: string;
+  aud?: string | string[];
+  iss?: string;
+  role?: string;
+  user_metadata?: Record<string, unknown>;
+};
+
+const supabaseIssuer = `${config.supabase.url.replace(/\/$/, '')}/auth/v1`;
+const supabaseJwks = createRemoteJWKSet(new URL(`${supabaseIssuer}/.well-known/jwks.json`));
+
 const getDisplayName = (userMetadata: Record<string, unknown> | undefined) => {
   const value = userMetadata?.name ?? userMetadata?.full_name;
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 };
 
 const getSupabaseIdentity = async (token: string): Promise<SupabaseIdentity | null> => {
-  const getClaims = (supabase.auth as {
-    getClaims?: (jwt: string) => Promise<{
-      data?: { claims?: Record<string, unknown> };
-      error?: { message?: string } | null;
-    }>;
-  }).getClaims;
+  try {
+    const { payload } = await jwtVerify(token, supabaseJwks, {
+      issuer: supabaseIssuer,
+      audience: 'authenticated',
+    });
 
-  if (getClaims) {
-    const claimsResult = await getClaims(token);
-    const claims = claimsResult.data?.claims;
-
-    const id = typeof claims?.sub === 'string' ? claims.sub : null;
-    const email = typeof claims?.email === 'string' ? claims.email : null;
+    const claims = payload as SupabaseJwtPayload;
+    const id = typeof claims.sub === 'string' ? claims.sub : null;
+    const email = typeof claims.email === 'string' ? claims.email : null;
     const userMetadata =
-      claims?.user_metadata && typeof claims.user_metadata === 'object'
-        ? (claims.user_metadata as Record<string, unknown>)
+      claims.user_metadata && typeof claims.user_metadata === 'object'
+        ? claims.user_metadata
         : undefined;
 
-    if (id && email) {
-      return { id, email, userMetadata };
+    if (!id || !email) {
+      return null;
     }
-  }
 
-  const { data, error } = await supabase.auth.getUser(token);
-  if (error || !data.user?.email) {
+    return { id, email, userMetadata };
+  } catch (error) {
+    console.error('Supabase JWT verification failed:', error);
     return null;
   }
-
-  return {
-    id: data.user.id,
-    email: data.user.email,
-    userMetadata:
-      data.user.user_metadata && typeof data.user.user_metadata === 'object'
-        ? (data.user.user_metadata as Record<string, unknown>)
-        : undefined,
-  };
 };
 
 export const authenticate = async (req: AuthRequest, res: Response, next: NextFunction) => {
