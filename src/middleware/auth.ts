@@ -15,9 +15,54 @@ export interface AuthRequest extends Request {
 const isAdminEmail = (email: string) => config.admin.emails.includes(email.trim().toLowerCase());
 const SUPABASE_PASSWORD_PLACEHOLDER = '__supabase_managed_account__';
 
+type SupabaseIdentity = {
+  id: string;
+  email: string;
+  userMetadata?: Record<string, unknown>;
+};
+
 const getDisplayName = (userMetadata: Record<string, unknown> | undefined) => {
   const value = userMetadata?.name ?? userMetadata?.full_name;
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+};
+
+const getSupabaseIdentity = async (token: string): Promise<SupabaseIdentity | null> => {
+  const getClaims = (supabase.auth as {
+    getClaims?: (jwt: string) => Promise<{
+      data?: { claims?: Record<string, unknown> };
+      error?: { message?: string } | null;
+    }>;
+  }).getClaims;
+
+  if (getClaims) {
+    const claimsResult = await getClaims(token);
+    const claims = claimsResult.data?.claims;
+
+    const id = typeof claims?.sub === 'string' ? claims.sub : null;
+    const email = typeof claims?.email === 'string' ? claims.email : null;
+    const userMetadata =
+      claims?.user_metadata && typeof claims.user_metadata === 'object'
+        ? (claims.user_metadata as Record<string, unknown>)
+        : undefined;
+
+    if (id && email) {
+      return { id, email, userMetadata };
+    }
+  }
+
+  const { data, error } = await supabase.auth.getUser(token);
+  if (error || !data.user?.email) {
+    return null;
+  }
+
+  return {
+    id: data.user.id,
+    email: data.user.email,
+    userMetadata:
+      data.user.user_metadata && typeof data.user.user_metadata === 'object'
+        ? (data.user.user_metadata as Record<string, unknown>)
+        : undefined,
+  };
 };
 
 export const authenticate = async (req: AuthRequest, res: Response, next: NextFunction) => {
@@ -28,12 +73,12 @@ export const authenticate = async (req: AuthRequest, res: Response, next: NextFu
     }
 
     const token = authHeader.substring(7);
-    const { data, error } = await supabase.auth.getUser(token);
-    if (error || !data.user?.email) {
+    const identity = await getSupabaseIdentity(token);
+    if (!identity) {
       return res.status(401).json({ error: 'Invalid token' });
     }
 
-    const normalizedEmail = data.user.email.trim().toLowerCase();
+    const normalizedEmail = identity.email.trim().toLowerCase();
     let user = await prisma.user.findUnique({ where: { email: normalizedEmail } });
 
     if (user?.banned) {
@@ -42,7 +87,7 @@ export const authenticate = async (req: AuthRequest, res: Response, next: NextFu
 
     const shouldBeAdmin = isAdminEmail(normalizedEmail) || user?.role === 'ADMIN';
     const role = shouldBeAdmin ? 'ADMIN' : 'USER';
-    const name = getDisplayName(data.user.user_metadata);
+    const name = getDisplayName(identity.userMetadata);
 
     if (!user) {
       user = await prisma.user.create({
