@@ -27,19 +27,23 @@ const getDisplayName = (userMetadata: Record<string, unknown> | undefined) => {
 };
 
 const getSupabaseIdentity = async (token: string): Promise<SupabaseIdentity | null> => {
+  console.log('[auth] validating token, length:', token.length, 'prefix:', token.slice(0, 20) + '...');
+  console.log('[auth] SUPABASE_URL configured:', !!config.supabase.url, '| SERVICE_ROLE_KEY set:', !!config.supabase.serviceRoleKey, '| ANON_KEY set:', !!config.supabase.anonKey);
+
   try {
     const { data, error } = await supabase.auth.getUser(token);
 
     if (error) {
-      console.error('[auth] supabase.auth.getUser error:', error.message);
+      console.error('[auth] supabase.auth.getUser error:', error.message, '| status:', (error as any).status);
       return null;
     }
 
     if (!data.user?.id || !data.user?.email) {
-      console.error('[auth] supabase.auth.getUser returned no id/email');
+      console.error('[auth] supabase.auth.getUser returned no id/email, data:', JSON.stringify(data));
       return null;
     }
 
+    console.log('[auth] token valid for user:', data.user.email);
     return {
       id: data.user.id,
       email: data.user.email,
