@@ -7,6 +7,8 @@ import { config } from '../config';
 import { enqueueAnalysisJob } from '../queues/analysisQueue';
 import { inferAssetClass } from '../utils/volatilityDetector';
 
+const prismaAnalysis = prisma.analysis as any;
+
 const needsUsageReset = (date: Date) => new Date().toDateString() !== new Date(date).toDateString();
 
 const hydrateUsageCounter = async (userId: string) => {
@@ -62,7 +64,7 @@ export const submitAnalysisJob = async (req: AuthRequest, res: Response) => {
     const imageUrl = `/uploads/${req.file.filename}`;
     const analysisId = randomUUID();
 
-    await prisma.analysis.create({
+    await prismaAnalysis.create({
       data: {
         id: analysisId,
         jobId: analysisId,
@@ -101,7 +103,7 @@ export const submitAnalysisJob = async (req: AuthRequest, res: Response) => {
 
 export const getAnalysisJob = async (req: AuthRequest, res: Response) => {
   try {
-    const analysis = await prisma.analysis.findFirst({
+    const analysis = await prismaAnalysis.findFirst({
       where: { jobId: req.params.jobId, userId: req.user!.id },
     });
 
