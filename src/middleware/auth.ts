@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { config } from '../config';
 import prisma from '../config/database';
+import { supabase } from '../config/supabase';
 
 export interface AuthRequest extends Request {
   user?: {
@@ -26,48 +27,29 @@ const getDisplayName = (userMetadata: Record<string, unknown> | undefined) => {
 };
 
 const getSupabaseIdentity = async (token: string): Promise<SupabaseIdentity | null> => {
-  const supabaseApiKey = config.supabase.serviceRoleKey || config.supabase.anonKey;
-
-  if (!config.supabase.url || !supabaseApiKey) {
-    console.error('Supabase auth validation skipped because backend credentials are missing.');
-    return null;
-  }
-
   try {
-    const response = await fetch(`${config.supabase.url.replace(/\/$/, '')}/auth/v1/user`, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        apikey: supabaseApiKey,
-        'Content-Type': 'application/json',
-      },
-    });
+    const { data, error } = await supabase.auth.getUser(token);
 
-    if (!response.ok) {
-      console.error('Supabase token validation failed:', response.status, response.statusText);
+    if (error) {
+      console.error('[auth] supabase.auth.getUser error:', error.message);
       return null;
     }
 
-    const user = (await response.json()) as {
-      id?: string;
-      email?: string;
-      user_metadata?: Record<string, unknown>;
-    };
-
-    if (!user.id || !user.email) {
+    if (!data.user?.id || !data.user?.email) {
+      console.error('[auth] supabase.auth.getUser returned no id/email');
       return null;
     }
 
     return {
-      id: user.id,
-      email: user.email,
+      id: data.user.id,
+      email: data.user.email,
       userMetadata:
-        user.user_metadata && typeof user.user_metadata === 'object'
-          ? user.user_metadata
+        data.user.user_metadata && typeof data.user.user_metadata === 'object'
+          ? data.user.user_metadata
           : undefined,
     };
   } catch (error) {
-    console.error('Supabase getUser request failed:', error);
+    console.error('[auth] supabase.auth.getUser threw:', error);
     return null;
   }
 };
