@@ -72,45 +72,52 @@ export const authenticate = async (req: AuthRequest, res: Response, next: NextFu
     }
 
     const normalizedEmail = identity.email.trim().toLowerCase();
-    let user = await prisma.user.findUnique({ where: { email: normalizedEmail } });
+    let user;
 
-    if (user?.banned) {
-      return res.status(403).json({ error: 'Account has been suspended' });
-    }
+    try {
+      user = await prisma.user.findUnique({ where: { email: normalizedEmail } });
 
-    const shouldBeAdmin = isAdminEmail(normalizedEmail) || user?.role === 'ADMIN';
-    const role = shouldBeAdmin ? 'ADMIN' : 'USER';
-    const name = getDisplayName(identity.userMetadata);
+      if (user?.banned) {
+        return res.status(403).json({ error: 'Account has been suspended' });
+      }
 
-    if (!user) {
-      user = await prisma.user.create({
-        data: {
-          supabaseId: identity.id,
-          email: normalizedEmail,
-          name,
-          password: SUPABASE_PASSWORD_PLACEHOLDER,
-          role,
-        },
-      });
-    } else {
-      const nextName = user.name ?? name;
-      const needsUpdate =
-        user.supabaseId !== identity.id ||
-        user.email !== normalizedEmail ||
-        user.role !== role ||
-        user.name !== nextName;
+      const shouldBeAdmin = isAdminEmail(normalizedEmail) || user?.role === 'ADMIN';
+      const role = shouldBeAdmin ? 'ADMIN' : 'USER';
+      const name = getDisplayName(identity.userMetadata);
 
-      if (needsUpdate) {
-        user = await prisma.user.update({
-          where: { id: user.id },
+      if (!user) {
+        user = await prisma.user.create({
           data: {
             supabaseId: identity.id,
             email: normalizedEmail,
-            name: nextName,
+            name,
+            password: SUPABASE_PASSWORD_PLACEHOLDER,
             role,
           },
         });
+      } else {
+        const nextName = user.name ?? name;
+        const needsUpdate =
+          user.supabaseId !== identity.id ||
+          user.email !== normalizedEmail ||
+          user.role !== role ||
+          user.name !== nextName;
+
+        if (needsUpdate) {
+          user = await prisma.user.update({
+            where: { id: user.id },
+            data: {
+              supabaseId: identity.id,
+              email: normalizedEmail,
+              name: nextName,
+              role,
+            },
+          });
+        }
       }
+    } catch (databaseError) {
+      console.error('[auth] database sync failed after token validation:', databaseError);
+      return res.status(503).json({ error: 'Authentication succeeded, but the profile database is unavailable' });
     }
 
     req.user = {
@@ -123,7 +130,7 @@ export const authenticate = async (req: AuthRequest, res: Response, next: NextFu
     next();
   } catch (error) {
     console.error('Authentication error:', error);
-    return res.status(401).json({ error: 'Invalid token' });
+    return res.status(500).json({ error: 'Authentication failed' });
   }
 };
 
