@@ -85,6 +85,7 @@ export const authenticate = async (req: AuthRequest, res: Response, next: NextFu
     if (!user) {
       user = await prisma.user.create({
         data: {
+          supabaseId: identity.id,
           email: normalizedEmail,
           name,
           password: SUPABASE_PASSWORD_PLACEHOLDER,
@@ -94,6 +95,7 @@ export const authenticate = async (req: AuthRequest, res: Response, next: NextFu
     } else {
       const nextName = user.name ?? name;
       const needsUpdate =
+        user.supabaseId !== identity.id ||
         user.email !== normalizedEmail ||
         user.role !== role ||
         user.name !== nextName;
@@ -102,6 +104,7 @@ export const authenticate = async (req: AuthRequest, res: Response, next: NextFu
         user = await prisma.user.update({
           where: { id: user.id },
           data: {
+            supabaseId: identity.id,
             email: normalizedEmail,
             name: nextName,
             role,
