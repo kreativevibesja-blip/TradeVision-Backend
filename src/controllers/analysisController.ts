@@ -1,113 +1,125 @@
+import path from 'path';
+import { randomUUID } from 'crypto';
 import { Response } from 'express';
 import { AuthRequest } from '../middleware/auth';
 import prisma from '../config/database';
 import { config } from '../config';
-import { analyzeChart } from '../services/aiService';
-import { processChartImage } from '../services/imageService';
+import { enqueueAnalysisJob } from '../queues/analysisQueue';
+import { inferAssetClass } from '../utils/volatilityDetector';
 
-export const uploadChart = async (req: AuthRequest, res: Response) => {
+const needsUsageReset = (date: Date) => new Date().toDateString() !== new Date(date).toDateString();
+
+const hydrateUsageCounter = async (userId: string) => {
+  const user = await prisma.user.findUnique({ where: { id: userId } });
+  if (!user) {
+    return null;
+  }
+
+  if (needsUsageReset(user.lastUsageReset)) {
+    return prisma.user.update({
+      where: { id: user.id },
+      data: { dailyUsage: 0, lastUsageReset: new Date() },
+    });
+  }
+
+  return user;
+};
+
+const serializeAnalysis = (analysis: any) => ({
+  ...analysis,
+  takeProfits:
+    Array.isArray(analysis.takeProfits) && analysis.takeProfits.length > 0
+      ? analysis.takeProfits
+      : [analysis.tp1, analysis.tp2].filter((value) => typeof value === 'number'),
+});
+
+export const submitAnalysisJob = async (req: AuthRequest, res: Response) => {
   try {
     if (!req.file) {
-      return res.status(400).json({ error: 'No chart image uploaded' });
+      return res.status(400).json({ error: 'Chart image is required' });
     }
 
     const { pair, timeframe } = req.body;
+
     if (!pair || !timeframe) {
       return res.status(400).json({ error: 'Pair and timeframe are required' });
     }
 
-    // Check daily usage limits
-    const user = await prisma.user.findUnique({ where: { id: req.user!.id } });
-    if (!user) return res.status(404).json({ error: 'User not found' });
-
-    const now = new Date();
-    const lastReset = new Date(user.lastUsageReset);
-    const isNewDay = now.toDateString() !== lastReset.toDateString();
-
-    let currentUsage = user.dailyUsage;
-    if (isNewDay) {
-      currentUsage = 0;
-      await prisma.user.update({
-        where: { id: user.id },
-        data: { dailyUsage: 0, lastUsageReset: now },
-      });
+    const user = await hydrateUsageCounter(req.user!.id);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
     }
 
     const limit = user.subscription === 'PRO' ? config.limits.proDaily : config.limits.freeDaily;
-    if (currentUsage >= limit) {
+    if (user.dailyUsage >= limit) {
       return res.status(429).json({
         error: 'Daily analysis limit reached',
         limit,
-        usage: currentUsage,
+        usage: user.dailyUsage,
       });
     }
 
     const imageUrl = `/uploads/${req.file.filename}`;
+    const analysisId = randomUUID();
 
-    return res.json({
-      imageUrl,
-      filename: req.file.filename,
-      pair,
-      timeframe,
-    });
-  } catch (error) {
-    console.error('Upload error:', error);
-    return res.status(500).json({ error: 'Upload failed' });
-  }
-};
-
-export const analyzeChartController = async (req: AuthRequest, res: Response) => {
-  try {
-    const { imageUrl, pair, timeframe } = req.body;
-    if (!imageUrl || !pair || !timeframe) {
-      return res.status(400).json({ error: 'imageUrl, pair, and timeframe are required' });
-    }
-
-    const filePath = imageUrl.startsWith('/uploads/')
-      ? `${process.cwd()}${imageUrl.replace(/\//g, require('path').sep)}`
-      : imageUrl;
-
-    // Process image for better AI analysis
-    let processedPath: string;
-    try {
-      processedPath = await processChartImage(filePath);
-    } catch {
-      processedPath = filePath;
-    }
-
-    // Run AI analysis
-    const analysis = await analyzeChart(processedPath, pair, timeframe);
-
-    // Save analysis to database
-    const saved = await prisma.analysis.create({
+    await prisma.analysis.create({
       data: {
+        id: analysisId,
+        jobId: analysisId,
         userId: req.user!.id,
         imageUrl,
         pair,
         timeframe,
-        bias: analysis.bias,
-        entry: analysis.entry,
-        stopLoss: analysis.stopLoss,
-        takeProfits: analysis.takeProfits,
-        confidence: analysis.confidence,
-        analysisText: analysis.analysisText,
-        strategy: analysis.strategy,
-        structure: analysis.structure,
-        waitConditions: analysis.waitConditions,
-        rawResponse: analysis as any,
+        assetClass: inferAssetClass(pair),
+        status: 'QUEUED',
+        progress: 10,
+        currentStage: 'Scanning chart...',
       },
     });
 
-    // Increment daily usage
-    await prisma.user.update({
-      where: { id: req.user!.id },
-      data: { dailyUsage: { increment: 1 } },
+    await enqueueAnalysisJob({
+      analysisId,
+      userId: req.user!.id,
+      imageUrl,
+      filePath: path.join(process.cwd(), config.upload.dir, req.file.filename),
+      pair,
+      timeframe,
     });
 
-    return res.json({ analysis: { ...analysis, id: saved.id, imageUrl } });
+    return res.status(202).json({
+      jobId: analysisId,
+      analysisId,
+      status: 'QUEUED',
+      progress: 10,
+      currentStage: 'Scanning chart...',
+    });
   } catch (error) {
-    console.error('Analysis error:', error);
-    return res.status(500).json({ error: 'Analysis failed. Please try again.' });
+    console.error('Submit analysis job error:', error);
+    return res.status(500).json({ error: 'Failed to start analysis job' });
+  }
+};
+
+export const getAnalysisJob = async (req: AuthRequest, res: Response) => {
+  try {
+    const analysis = await prisma.analysis.findFirst({
+      where: { jobId: req.params.jobId, userId: req.user!.id },
+    });
+
+    if (!analysis) {
+      return res.status(404).json({ error: 'Analysis job not found' });
+    }
+
+    return res.json({
+      jobId: analysis.jobId,
+      status: analysis.status,
+      progress: analysis.progress,
+      currentStage: analysis.currentStage,
+      error: analysis.errorMessage,
+      analysis: analysis.status === 'COMPLETED' ? serializeAnalysis(analysis) : null,
+    });
+  } catch (error) {
+    console.error('Get analysis job error:', error);
+    return res.status(500).json({ error: 'Failed to retrieve analysis job' });
   }
 };
 
@@ -127,7 +139,7 @@ export const getAnalyses = async (req: AuthRequest, res: Response) => {
       prisma.analysis.count({ where: { userId: req.user!.id } }),
     ]);
 
-    return res.json({ analyses, total, page, pages: Math.ceil(total / limit) });
+    return res.json({ analyses: analyses.map(serializeAnalysis), total, page, pages: Math.ceil(total / limit) });
   } catch (error) {
     console.error('Get analyses error:', error);
     return res.status(500).json({ error: 'Failed to retrieve analyses' });
@@ -144,7 +156,7 @@ export const getAnalysisById = async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Analysis not found' });
     }
 
-    return res.json({ analysis });
+    return res.json({ analysis: serializeAnalysis(analysis) });
   } catch (error) {
     console.error('Get analysis error:', error);
     return res.status(500).json({ error: 'Failed to retrieve analysis' });
