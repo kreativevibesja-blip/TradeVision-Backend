@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { config } from '../config';
 import prisma from '../config/database';
+import { supabase } from '../config/supabase';
 
 export interface AuthRequest extends Request {
   user?: {
@@ -32,6 +33,7 @@ type SupabaseJwtPayload = {
 
 const supabaseIssuer = `${config.supabase.url.replace(/\/$/, '')}/auth/v1`;
 const supabaseJwks = createRemoteJWKSet(new URL(`${supabaseIssuer}/.well-known/jwks.json`));
+const supabaseJwtSecret = config.supabase.jwtSecret ? new TextEncoder().encode(config.supabase.jwtSecret) : null;
 
 const getDisplayName = (userMetadata: Record<string, unknown> | undefined) => {
   const value = userMetadata?.name ?? userMetadata?.full_name;
@@ -39,10 +41,31 @@ const getDisplayName = (userMetadata: Record<string, unknown> | undefined) => {
 };
 
 const getSupabaseIdentity = async (token: string): Promise<SupabaseIdentity | null> => {
+  if (supabaseJwtSecret) {
+    try {
+      const { payload } = await jwtVerify(token, supabaseJwtSecret, {
+        issuer: supabaseIssuer,
+      });
+
+      const claims = payload as SupabaseJwtPayload;
+      const id = typeof claims.sub === 'string' ? claims.sub : null;
+      const email = typeof claims.email === 'string' ? claims.email : null;
+      const userMetadata =
+        claims.user_metadata && typeof claims.user_metadata === 'object'
+          ? claims.user_metadata
+          : undefined;
+
+      if (id && email) {
+        return { id, email, userMetadata };
+      }
+    } catch (error) {
+      console.error('Supabase JWT secret verification failed:', error);
+    }
+  }
+
   try {
     const { payload } = await jwtVerify(token, supabaseJwks, {
       issuer: supabaseIssuer,
-      audience: 'authenticated',
     });
 
     const claims = payload as SupabaseJwtPayload;
@@ -60,6 +83,25 @@ const getSupabaseIdentity = async (token: string): Promise<SupabaseIdentity | nu
     return { id, email, userMetadata };
   } catch (error) {
     console.error('Supabase JWT verification failed:', error);
+  }
+
+  try {
+    const { data, error } = await supabase.auth.getUser(token);
+
+    if (error || !data.user?.email) {
+      return null;
+    }
+
+    return {
+      id: data.user.id,
+      email: data.user.email,
+      userMetadata:
+        data.user.user_metadata && typeof data.user.user_metadata === 'object'
+          ? (data.user.user_metadata as Record<string, unknown>)
+          : undefined,
+    };
+  } catch (error) {
+    console.error('Supabase getUser fallback failed:', error);
     return null;
   }
 };
