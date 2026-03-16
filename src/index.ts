@@ -63,6 +63,18 @@ app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// Diagnostic endpoint – reveals whether env vars are set (never exposes actual values)
+app.get('/api/debug/config', (_req, res) => {
+  const mask = (v?: string) => (v && v.length > 4 ? `${v.slice(0, 4)}...${v.slice(-4)} (${v.length} chars)` : v ? '(set but short)' : '(MISSING)');
+  res.json({
+    SUPABASE_URL: mask(config.supabase.url),
+    SUPABASE_ANON_KEY: mask(config.supabase.anonKey),
+    SUPABASE_SERVICE_ROLE_KEY: mask(config.supabase.serviceRoleKey),
+    FRONTEND_URLS: config.frontend.urls,
+    NODE_ENV: config.nodeEnv,
+  });
+});
+
 // Start server
 app.listen(config.port, () => {
   console.log(`🚀 TradeVision AI API running on port ${config.port}`);
