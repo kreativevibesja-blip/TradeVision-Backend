@@ -1,8 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
-import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { config } from '../config';
 import prisma from '../config/database';
-import { supabase } from '../config/supabase';
 
 export interface AuthRequest extends Request {
   user?: {
@@ -13,27 +11,14 @@ export interface AuthRequest extends Request {
   };
 }
 
-const isAdminEmail = (email: string) => config.admin.emails.includes(email.trim().toLowerCase());
-const SUPABASE_PASSWORD_PLACEHOLDER = '__supabase_managed_account__';
-
 type SupabaseIdentity = {
   id: string;
   email: string;
   userMetadata?: Record<string, unknown>;
 };
 
-type SupabaseJwtPayload = {
-  sub?: string;
-  email?: string;
-  aud?: string | string[];
-  iss?: string;
-  role?: string;
-  user_metadata?: Record<string, unknown>;
-};
-
-const supabaseIssuer = `${config.supabase.url.replace(/\/$/, '')}/auth/v1`;
-const supabaseJwks = createRemoteJWKSet(new URL(`${supabaseIssuer}/.well-known/jwks.json`));
-const supabaseJwtSecret = config.supabase.jwtSecret ? new TextEncoder().encode(config.supabase.jwtSecret) : null;
+const isAdminEmail = (email: string) => config.admin.emails.includes(email.trim().toLowerCase());
+const SUPABASE_PASSWORD_PLACEHOLDER = '__supabase_managed_account__';
 
 const getDisplayName = (userMetadata: Record<string, unknown> | undefined) => {
   const value = userMetadata?.name ?? userMetadata?.full_name;
@@ -41,67 +26,48 @@ const getDisplayName = (userMetadata: Record<string, unknown> | undefined) => {
 };
 
 const getSupabaseIdentity = async (token: string): Promise<SupabaseIdentity | null> => {
-  if (supabaseJwtSecret) {
-    try {
-      const { payload } = await jwtVerify(token, supabaseJwtSecret, {
-        issuer: supabaseIssuer,
-      });
+  const supabaseApiKey = config.supabase.serviceRoleKey || config.supabase.anonKey;
 
-      const claims = payload as SupabaseJwtPayload;
-      const id = typeof claims.sub === 'string' ? claims.sub : null;
-      const email = typeof claims.email === 'string' ? claims.email : null;
-      const userMetadata =
-        claims.user_metadata && typeof claims.user_metadata === 'object'
-          ? claims.user_metadata
-          : undefined;
-
-      if (id && email) {
-        return { id, email, userMetadata };
-      }
-    } catch (error) {
-      console.error('Supabase JWT secret verification failed:', error);
-    }
+  if (!config.supabase.url || !supabaseApiKey) {
+    console.error('Supabase auth validation skipped because backend credentials are missing.');
+    return null;
   }
 
   try {
-    const { payload } = await jwtVerify(token, supabaseJwks, {
-      issuer: supabaseIssuer,
+    const response = await fetch(`${config.supabase.url.replace(/\/$/, '')}/auth/v1/user`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        apikey: supabaseApiKey,
+        'Content-Type': 'application/json',
+      },
     });
 
-    const claims = payload as SupabaseJwtPayload;
-    const id = typeof claims.sub === 'string' ? claims.sub : null;
-    const email = typeof claims.email === 'string' ? claims.email : null;
-    const userMetadata =
-      claims.user_metadata && typeof claims.user_metadata === 'object'
-        ? claims.user_metadata
-        : undefined;
-
-    if (!id || !email) {
+    if (!response.ok) {
+      console.error('Supabase token validation failed:', response.status, response.statusText);
       return null;
     }
 
-    return { id, email, userMetadata };
-  } catch (error) {
-    console.error('Supabase JWT verification failed:', error);
-  }
+    const user = (await response.json()) as {
+      id?: string;
+      email?: string;
+      user_metadata?: Record<string, unknown>;
+    };
 
-  try {
-    const { data, error } = await supabase.auth.getUser(token);
-
-    if (error || !data.user?.email) {
+    if (!user.id || !user.email) {
       return null;
     }
 
     return {
-      id: data.user.id,
-      email: data.user.email,
+      id: user.id,
+      email: user.email,
       userMetadata:
-        data.user.user_metadata && typeof data.user.user_metadata === 'object'
-          ? (data.user.user_metadata as Record<string, unknown>)
+        user.user_metadata && typeof user.user_metadata === 'object'
+          ? user.user_metadata
           : undefined,
     };
   } catch (error) {
-    console.error('Supabase getUser fallback failed:', error);
+    console.error('Supabase getUser request failed:', error);
     return null;
   }
 };
@@ -157,7 +123,6 @@ export const authenticate = async (req: AuthRequest, res: Response, next: NextFu
         });
       }
     }
-
 
     req.user = {
       id: user.id,
