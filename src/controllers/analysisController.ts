@@ -2,26 +2,28 @@ import path from 'path';
 import { randomUUID } from 'crypto';
 import { Response } from 'express';
 import { AuthRequest } from '../middleware/auth';
-import prisma from '../config/database';
 import { config } from '../config';
 import { enqueueAnalysisJob } from '../queues/analysisQueue';
 import { inferAssetClass } from '../utils/volatilityDetector';
+import {
+  createAnalysis,
+  getAnalysisByIdForUser,
+  getAnalysisByJobIdForUser,
+  getUserById,
+  listAnalysesForUser,
+  updateUser,
+} from '../lib/supabase';
 
-const prismaAnalysis = prisma.analysis as any;
-
-const needsUsageReset = (date: Date) => new Date().toDateString() !== new Date(date).toDateString();
+const needsUsageReset = (date: string | Date) => new Date().toDateString() !== new Date(date).toDateString();
 
 const hydrateUsageCounter = async (userId: string) => {
-  const user = await prisma.user.findUnique({ where: { id: userId } });
+  const user = await getUserById(userId);
   if (!user) {
     return null;
   }
 
   if (needsUsageReset(user.lastUsageReset)) {
-    return prisma.user.update({
-      where: { id: user.id },
-      data: { dailyUsage: 0, lastUsageReset: new Date() },
-    });
+    return updateUser(user.id, { dailyUsage: 0, lastUsageReset: new Date().toISOString() });
   }
 
   return user;
@@ -64,19 +66,17 @@ export const submitAnalysisJob = async (req: AuthRequest, res: Response) => {
     const imageUrl = `/uploads/${req.file.filename}`;
     const analysisId = randomUUID();
 
-    await prismaAnalysis.create({
-      data: {
-        id: analysisId,
-        jobId: analysisId,
-        userId: req.user!.id,
-        imageUrl,
-        pair,
-        timeframe,
-        assetClass: inferAssetClass(pair),
-        status: 'QUEUED',
-        progress: 10,
-        currentStage: 'Scanning chart...',
-      },
+    await createAnalysis({
+      id: analysisId,
+      jobId: analysisId,
+      userId: req.user!.id,
+      imageUrl,
+      pair,
+      timeframe,
+      assetClass: inferAssetClass(pair),
+      status: 'QUEUED',
+      progress: 10,
+      currentStage: 'Scanning chart...',
     });
 
     await enqueueAnalysisJob({
@@ -103,9 +103,7 @@ export const submitAnalysisJob = async (req: AuthRequest, res: Response) => {
 
 export const getAnalysisJob = async (req: AuthRequest, res: Response) => {
   try {
-    const analysis = await prismaAnalysis.findFirst({
-      where: { jobId: req.params.jobId, userId: req.user!.id },
-    });
+    const analysis = await getAnalysisByJobIdForUser(req.params.jobId, req.user!.id);
 
     if (!analysis) {
       return res.status(404).json({ error: 'Analysis job not found' });
@@ -129,19 +127,9 @@ export const getAnalyses = async (req: AuthRequest, res: Response) => {
   try {
     const page = parseInt(req.query.page as string) || 1;
     const limit = Math.min(parseInt(req.query.limit as string) || 10, 50);
-    const skip = (page - 1) * limit;
+    const analyses = await listAnalysesForUser(req.user!.id, page, limit);
 
-    const [analyses, total] = await Promise.all([
-      prisma.analysis.findMany({
-        where: { userId: req.user!.id },
-        orderBy: { createdAt: 'desc' },
-        skip,
-        take: limit,
-      }),
-      prisma.analysis.count({ where: { userId: req.user!.id } }),
-    ]);
-
-    return res.json({ analyses: analyses.map(serializeAnalysis), total, page, pages: Math.ceil(total / limit) });
+    return res.json({ analyses: analyses.analyses.map(serializeAnalysis), total: analyses.total, page, pages: Math.ceil(analyses.total / limit) });
   } catch (error) {
     console.error('Get analyses error:', error);
     return res.status(500).json({ error: 'Failed to retrieve analyses' });
@@ -150,9 +138,7 @@ export const getAnalyses = async (req: AuthRequest, res: Response) => {
 
 export const getAnalysisById = async (req: AuthRequest, res: Response) => {
   try {
-    const analysis = await prisma.analysis.findFirst({
-      where: { id: req.params.id, userId: req.user!.id },
-    });
+    const analysis = await getAnalysisByIdForUser(req.params.id, req.user!.id);
 
     if (!analysis) {
       return res.status(404).json({ error: 'Analysis not found' });

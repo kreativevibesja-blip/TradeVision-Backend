@@ -1,7 +1,12 @@
 import { Request, Response, NextFunction } from 'express';
 import { config } from '../config';
-import prisma from '../config/database';
-import { supabase } from '../config/supabase';
+import { 
+  supabase,
+  getUserByEmail,
+  createUser,
+  updateUser,
+  type UserRecord,
+} from '../lib/supabase';
 
 export interface AuthRequest extends Request {
   user?: {
@@ -72,10 +77,10 @@ export const authenticate = async (req: AuthRequest, res: Response, next: NextFu
     }
 
     const normalizedEmail = identity.email.trim().toLowerCase();
-    let user;
+    let user: UserRecord | null;
 
     try {
-      user = await prisma.user.findUnique({ where: { email: normalizedEmail } });
+      user = await getUserByEmail(normalizedEmail);
 
       if (user?.banned) {
         return res.status(403).json({ error: 'Account has been suspended' });
@@ -86,14 +91,12 @@ export const authenticate = async (req: AuthRequest, res: Response, next: NextFu
       const name = getDisplayName(identity.userMetadata);
 
       if (!user) {
-        user = await prisma.user.create({
-          data: {
-            supabaseId: identity.id,
-            email: normalizedEmail,
-            name,
-            password: SUPABASE_PASSWORD_PLACEHOLDER,
-            role,
-          },
+        user = await createUser({
+          supabaseId: identity.id,
+          email: normalizedEmail,
+          name,
+          password: SUPABASE_PASSWORD_PLACEHOLDER,
+          role,
         });
       } else {
         const nextName = user.name ?? name;
@@ -104,14 +107,11 @@ export const authenticate = async (req: AuthRequest, res: Response, next: NextFu
           user.name !== nextName;
 
         if (needsUpdate) {
-          user = await prisma.user.update({
-            where: { id: user.id },
-            data: {
-              supabaseId: identity.id,
-              email: normalizedEmail,
-              name: nextName,
-              role,
-            },
+          user = await updateUser(user.id, {
+            supabaseId: identity.id,
+            email: normalizedEmail,
+            name: nextName,
+            role,
           });
         }
       }

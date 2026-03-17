@@ -1,7 +1,13 @@
-import { Request, Response } from 'express';
+import { Response } from 'express';
 import { AuthRequest } from '../middleware/auth';
-import prisma from '../config/database';
 import { createOrder, captureOrder } from '../services/paypalService';
+import {
+  createPaymentRecord,
+  getPricingPlanByTier,
+  listPaymentsForUserId,
+  updatePaymentByOrderId,
+  updateUser,
+} from '../lib/supabase';
 
 export const createPayment = async (req: AuthRequest, res: Response) => {
   try {
@@ -10,20 +16,18 @@ export const createPayment = async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: 'Invalid plan' });
     }
 
-    const pricing = await prisma.pricingPlan.findUnique({ where: { tier: plan } });
+    const pricing = await getPricingPlanByTier(plan);
     const amount = pricing ? pricing.price.toString() : '19.00';
     const planName = pricing ? pricing.name : 'Pro';
 
     const order = await createOrder(amount, planName);
 
-    await prisma.payment.create({
-      data: {
-        userId: req.user!.id,
-        paypalOrderId: order.id,
-        amount: parseFloat(amount),
-        status: 'PENDING',
-        plan: 'PRO',
-      },
+    await createPaymentRecord({
+      userId: req.user!.id,
+      paypalOrderId: order.id,
+      amount: parseFloat(amount),
+      status: 'PENDING',
+      plan: 'PRO',
     });
 
     const approveLink = order.links?.find((l) => l.rel === 'approve')?.href;
@@ -45,15 +49,9 @@ export const handlePaymentSuccess = async (req: AuthRequest, res: Response) => {
     const capture = await captureOrder(orderId);
 
     if (capture.status === 'COMPLETED') {
-      await prisma.payment.update({
-        where: { paypalOrderId: orderId },
-        data: { status: 'COMPLETED' },
-      });
+      await updatePaymentByOrderId(orderId, { status: 'COMPLETED' });
 
-      await prisma.user.update({
-        where: { id: req.user!.id },
-        data: { subscription: 'PRO' },
-      });
+      await updateUser(req.user!.id, { subscription: 'PRO' });
 
       return res.json({ success: true, message: 'Subscription activated' });
     }
@@ -67,10 +65,7 @@ export const handlePaymentSuccess = async (req: AuthRequest, res: Response) => {
 
 export const getPaymentHistory = async (req: AuthRequest, res: Response) => {
   try {
-    const payments = await prisma.payment.findMany({
-      where: { userId: req.user!.id },
-      orderBy: { createdAt: 'desc' },
-    });
+    const payments = await listPaymentsForUserId(req.user!.id);
 
     return res.json({ payments });
   } catch (error) {

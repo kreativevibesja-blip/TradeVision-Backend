@@ -1,17 +1,10 @@
 import { Worker } from 'bullmq';
-import prisma from '../config/database';
 import { config } from '../config';
 import { analysisQueueConnection, type AnalysisJobData } from '../queues/analysisQueue';
 import { analyzeChartVision } from '../services/imageProcessing/chartVision';
 import { deriveMarketStructure } from '../services/structureEngine/marketStructure';
 import { generateTradeReasoning } from '../services/aiEngine/reasoningEngine';
-
-const updateAnalysis = async (analysisId: string, data: Record<string, unknown>) => {
-  await prisma.analysis.update({
-    where: { id: analysisId },
-    data,
-  });
-};
+import { incrementUserDailyUsage, updateAnalysis } from '../lib/supabase';
 
 export const startAnalysisWorker = () => {
   const worker = new Worker<AnalysisJobData>(
@@ -67,10 +60,7 @@ export const startAnalysisWorker = () => {
         errorMessage: null,
       });
 
-      await prisma.user.update({
-        where: { id: userId },
-        data: { dailyUsage: { increment: 1 } },
-      });
+      await incrementUserDailyUsage(userId);
 
       return { analysisId };
     },
