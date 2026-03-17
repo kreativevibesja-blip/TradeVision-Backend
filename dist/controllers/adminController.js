@@ -1,26 +1,20 @@
 "use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.updateAnnouncement = exports.createAnnouncement = exports.getAnnouncements = exports.updateSystemSetting = exports.getSystemSettings = exports.updatePricingPlan = exports.getPricingPlans = exports.getAnalytics = exports.getPayments = exports.getAnalysisLogs = exports.updateUser = exports.getUsers = exports.getDashboardStats = void 0;
-const database_1 = __importDefault(require("../config/database"));
+const supabase_1 = require("../lib/supabase");
 const getDashboardStats = async (_req, res) => {
     try {
         const [totalUsers, activeSubscribers, totalAnalyses, payments] = await Promise.all([
-            database_1.default.user.count(),
-            database_1.default.user.count({ where: { subscription: 'PRO' } }),
-            database_1.default.analysis.count(),
-            database_1.default.payment.aggregate({
-                where: { status: 'COMPLETED' },
-                _sum: { amount: true },
-            }),
+            (0, supabase_1.countUsers)(),
+            (0, supabase_1.countUsers)('PRO'),
+            (0, supabase_1.countAnalyses)(),
+            (0, supabase_1.getCompletedRevenue)(),
         ]);
         return res.json({
             totalUsers,
             activeSubscribers,
             totalAnalyses,
-            totalRevenue: payments._sum.amount || 0,
+            totalRevenue: payments || 0,
         });
     }
     catch (error) {
@@ -34,35 +28,7 @@ const getUsers = async (req, res) => {
         const search = req.query.search;
         const page = parseInt(req.query.page) || 1;
         const limit = Math.min(parseInt(req.query.limit) || 20, 100);
-        const skip = (page - 1) * limit;
-        const where = search
-            ? {
-                OR: [
-                    { email: { contains: search, mode: 'insensitive' } },
-                    { name: { contains: search, mode: 'insensitive' } },
-                ],
-            }
-            : {};
-        const [users, total] = await Promise.all([
-            database_1.default.user.findMany({
-                where,
-                select: {
-                    id: true,
-                    email: true,
-                    name: true,
-                    role: true,
-                    subscription: true,
-                    banned: true,
-                    dailyUsage: true,
-                    createdAt: true,
-                    _count: { select: { analyses: true, payments: true } },
-                },
-                orderBy: { createdAt: 'desc' },
-                skip,
-                take: limit,
-            }),
-            database_1.default.user.count({ where }),
-        ]);
+        const { users, total } = await (0, supabase_1.listUsersPage)(search, page, limit);
         return res.json({ users, total, page, pages: Math.ceil(total / limit) });
     }
     catch (error) {
@@ -75,14 +41,10 @@ const updateUser = async (req, res) => {
     try {
         const { id } = req.params;
         const { subscription, banned, role } = req.body;
-        const user = await database_1.default.user.update({
-            where: { id },
-            data: {
-                ...(subscription && { subscription }),
-                ...(typeof banned === 'boolean' && { banned }),
-                ...(role && { role }),
-            },
-            select: { id: true, email: true, subscription: true, banned: true, role: true },
+        const user = await (0, supabase_1.updateUser)(id, {
+            ...(subscription && { subscription }),
+            ...(typeof banned === 'boolean' ? { banned } : {}),
+            ...(role && { role }),
         });
         return res.json({ user });
     }
@@ -96,16 +58,7 @@ const getAnalysisLogs = async (req, res) => {
     try {
         const page = parseInt(req.query.page) || 1;
         const limit = Math.min(parseInt(req.query.limit) || 20, 100);
-        const skip = (page - 1) * limit;
-        const [analyses, total] = await Promise.all([
-            database_1.default.analysis.findMany({
-                include: { user: { select: { email: true, name: true } } },
-                orderBy: { createdAt: 'desc' },
-                skip,
-                take: limit,
-            }),
-            database_1.default.analysis.count(),
-        ]);
+        const { analyses, total } = await (0, supabase_1.listAllAnalysesPage)(page, limit);
         return res.json({ analyses, total, page, pages: Math.ceil(total / limit) });
     }
     catch (error) {
@@ -118,16 +71,7 @@ const getPayments = async (req, res) => {
     try {
         const page = parseInt(req.query.page) || 1;
         const limit = Math.min(parseInt(req.query.limit) || 20, 100);
-        const skip = (page - 1) * limit;
-        const [payments, total] = await Promise.all([
-            database_1.default.payment.findMany({
-                include: { user: { select: { email: true, name: true } } },
-                orderBy: { createdAt: 'desc' },
-                skip,
-                take: limit,
-            }),
-            database_1.default.payment.count(),
-        ]);
+        const { payments, total } = await (0, supabase_1.listAllPaymentsPage)(page, limit);
         return res.json({ payments, total, page, pages: Math.ceil(total / limit) });
     }
     catch (error) {
@@ -140,26 +84,7 @@ const getAnalytics = async (_req, res) => {
     try {
         const thirtyDaysAgo = new Date();
         thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-        const [userGrowth, analysesPerDay, revenueData] = await Promise.all([
-            database_1.default.user.groupBy({
-                by: ['createdAt'],
-                _count: true,
-                where: { createdAt: { gte: thirtyDaysAgo } },
-                orderBy: { createdAt: 'asc' },
-            }),
-            database_1.default.analysis.groupBy({
-                by: ['createdAt'],
-                _count: true,
-                where: { createdAt: { gte: thirtyDaysAgo } },
-                orderBy: { createdAt: 'asc' },
-            }),
-            database_1.default.payment.groupBy({
-                by: ['createdAt'],
-                _sum: { amount: true },
-                where: { createdAt: { gte: thirtyDaysAgo }, status: 'COMPLETED' },
-                orderBy: { createdAt: 'asc' },
-            }),
-        ]);
+        const { userGrowth, analysesPerDay, revenueData } = await (0, supabase_1.getAnalyticsBuckets)(thirtyDaysAgo.toISOString());
         return res.json({ userGrowth, analysesPerDay, revenueData });
     }
     catch (error) {
@@ -170,7 +95,7 @@ const getAnalytics = async (_req, res) => {
 exports.getAnalytics = getAnalytics;
 const getPricingPlans = async (_req, res) => {
     try {
-        const plans = await database_1.default.pricingPlan.findMany({ orderBy: { price: 'asc' } });
+        const plans = await (0, supabase_1.listPricingPlans)();
         return res.json({ plans });
     }
     catch (error) {
@@ -182,14 +107,11 @@ const updatePricingPlan = async (req, res) => {
     try {
         const { id } = req.params;
         const { price, features, dailyLimit, isActive } = req.body;
-        const plan = await database_1.default.pricingPlan.update({
-            where: { id },
-            data: {
-                ...(price !== undefined && { price }),
-                ...(features && { features }),
-                ...(dailyLimit !== undefined && { dailyLimit }),
-                ...(typeof isActive === 'boolean' && { isActive }),
-            },
+        const plan = await (0, supabase_1.updatePricingPlan)(id, {
+            ...(price !== undefined ? { price } : {}),
+            ...(features ? { features } : {}),
+            ...(dailyLimit !== undefined ? { dailyLimit } : {}),
+            ...(typeof isActive === 'boolean' ? { isActive } : {}),
         });
         return res.json({ plan });
     }
@@ -200,7 +122,7 @@ const updatePricingPlan = async (req, res) => {
 exports.updatePricingPlan = updatePricingPlan;
 const getSystemSettings = async (_req, res) => {
     try {
-        const settings = await database_1.default.systemSettings.findMany();
+        const settings = await (0, supabase_1.listSystemSettings)();
         return res.json({ settings });
     }
     catch (error) {
@@ -211,11 +133,7 @@ exports.getSystemSettings = getSystemSettings;
 const updateSystemSetting = async (req, res) => {
     try {
         const { key, value } = req.body;
-        const setting = await database_1.default.systemSettings.upsert({
-            where: { key },
-            update: { value },
-            create: { key, value },
-        });
+        const setting = await (0, supabase_1.upsertSystemSetting)(key, value);
         return res.json({ setting });
     }
     catch (error) {
@@ -225,7 +143,7 @@ const updateSystemSetting = async (req, res) => {
 exports.updateSystemSetting = updateSystemSetting;
 const getAnnouncements = async (_req, res) => {
     try {
-        const announcements = await database_1.default.announcement.findMany({ orderBy: { createdAt: 'desc' } });
+        const announcements = await (0, supabase_1.listAnnouncements)();
         return res.json({ announcements });
     }
     catch (error) {
@@ -236,7 +154,7 @@ exports.getAnnouncements = getAnnouncements;
 const createAnnouncement = async (req, res) => {
     try {
         const { title, content } = req.body;
-        const announcement = await database_1.default.announcement.create({ data: { title, content } });
+        const announcement = await (0, supabase_1.createAnnouncementRecord)({ title, content });
         return res.json({ announcement });
     }
     catch (error) {
@@ -248,13 +166,10 @@ const updateAnnouncement = async (req, res) => {
     try {
         const { id } = req.params;
         const { title, content, isActive } = req.body;
-        const announcement = await database_1.default.announcement.update({
-            where: { id },
-            data: {
-                ...(title && { title }),
-                ...(content && { content }),
-                ...(typeof isActive === 'boolean' && { isActive }),
-            },
+        const announcement = await (0, supabase_1.updateAnnouncementRecord)(id, {
+            ...(title ? { title } : {}),
+            ...(content ? { content } : {}),
+            ...(typeof isActive === 'boolean' ? { isActive } : {}),
         });
         return res.json({ announcement });
     }

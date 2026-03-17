@@ -1,29 +1,24 @@
 "use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.getPaymentHistory = exports.handlePaymentSuccess = exports.createPayment = void 0;
-const database_1 = __importDefault(require("../config/database"));
 const paypalService_1 = require("../services/paypalService");
+const supabase_1 = require("../lib/supabase");
 const createPayment = async (req, res) => {
     try {
         const { plan } = req.body;
         if (!plan || !['PRO'].includes(plan)) {
             return res.status(400).json({ error: 'Invalid plan' });
         }
-        const pricing = await database_1.default.pricingPlan.findUnique({ where: { tier: plan } });
+        const pricing = await (0, supabase_1.getPricingPlanByTier)(plan);
         const amount = pricing ? pricing.price.toString() : '19.00';
         const planName = pricing ? pricing.name : 'Pro';
         const order = await (0, paypalService_1.createOrder)(amount, planName);
-        await database_1.default.payment.create({
-            data: {
-                userId: req.user.id,
-                paypalOrderId: order.id,
-                amount: parseFloat(amount),
-                status: 'PENDING',
-                plan: 'PRO',
-            },
+        await (0, supabase_1.createPaymentRecord)({
+            userId: req.user.id,
+            paypalOrderId: order.id,
+            amount: parseFloat(amount),
+            status: 'PENDING',
+            plan: 'PRO',
         });
         const approveLink = order.links?.find((l) => l.rel === 'approve')?.href;
         return res.json({ orderId: order.id, approveUrl: approveLink });
@@ -42,14 +37,8 @@ const handlePaymentSuccess = async (req, res) => {
         }
         const capture = await (0, paypalService_1.captureOrder)(orderId);
         if (capture.status === 'COMPLETED') {
-            await database_1.default.payment.update({
-                where: { paypalOrderId: orderId },
-                data: { status: 'COMPLETED' },
-            });
-            await database_1.default.user.update({
-                where: { id: req.user.id },
-                data: { subscription: 'PRO' },
-            });
+            await (0, supabase_1.updatePaymentByOrderId)(orderId, { status: 'COMPLETED' });
+            await (0, supabase_1.updateUser)(req.user.id, { subscription: 'PRO' });
             return res.json({ success: true, message: 'Subscription activated' });
         }
         return res.status(400).json({ error: 'Payment not completed' });
@@ -62,10 +51,7 @@ const handlePaymentSuccess = async (req, res) => {
 exports.handlePaymentSuccess = handlePaymentSuccess;
 const getPaymentHistory = async (req, res) => {
     try {
-        const payments = await database_1.default.payment.findMany({
-            where: { userId: req.user.id },
-            orderBy: { createdAt: 'desc' },
-        });
+        const payments = await (0, supabase_1.listPaymentsForUserId)(req.user.id);
         return res.json({ payments });
     }
     catch (error) {
