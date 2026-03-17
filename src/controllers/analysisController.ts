@@ -3,16 +3,15 @@ import { randomUUID } from 'crypto';
 import { Response } from 'express';
 import { AuthRequest } from '../middleware/auth';
 import { config } from '../config';
-import { enqueueAnalysisJob } from '../queues/analysisQueue';
 import { inferAssetClass } from '../utils/volatilityDetector';
 import {
   createAnalysis,
   getAnalysisByIdForUser,
-  getAnalysisByJobIdForUser,
   getUserById,
   listAnalysesForUser,
   updateUser,
 } from '../lib/supabase';
+import { runAnalysisPipeline } from '../services/analysis/runAnalysisPipeline';
 
 const needsUsageReset = (date: string | Date) => new Date().toDateString() !== new Date(date).toDateString();
 
@@ -37,7 +36,7 @@ const serializeAnalysis = (analysis: any) => ({
       : [analysis.tp1, analysis.tp2].filter((value) => typeof value === 'number'),
 });
 
-export const submitAnalysisJob = async (req: AuthRequest, res: Response) => {
+export const analyzeChart = async (req: AuthRequest, res: Response) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'Chart image is required' });
@@ -74,52 +73,23 @@ export const submitAnalysisJob = async (req: AuthRequest, res: Response) => {
       pair,
       timeframe,
       assetClass: inferAssetClass(pair),
-      status: 'QUEUED',
-      progress: 10,
-      currentStage: 'Scanning chart...',
+      status: 'PROCESSING',
+      progress: 5,
+      currentStage: 'Preparing analysis...',
     });
 
-    await enqueueAnalysisJob({
+    const analysis = await runAnalysisPipeline({
       analysisId,
       userId: req.user!.id,
-      imageUrl,
       filePath: path.join(process.cwd(), config.upload.dir, req.file.filename),
       pair,
       timeframe,
     });
 
-    return res.status(202).json({
-      jobId: analysisId,
-      analysisId,
-      status: 'QUEUED',
-      progress: 10,
-      currentStage: 'Scanning chart...',
-    });
+    return res.json({ analysis: serializeAnalysis(analysis) });
   } catch (error) {
-    console.error('Submit analysis job error:', error);
-    return res.status(500).json({ error: 'Failed to start analysis job' });
-  }
-};
-
-export const getAnalysisJob = async (req: AuthRequest, res: Response) => {
-  try {
-    const analysis = await getAnalysisByJobIdForUser(req.params.jobId, req.user!.id);
-
-    if (!analysis) {
-      return res.status(404).json({ error: 'Analysis job not found' });
-    }
-
-    return res.json({
-      jobId: analysis.jobId,
-      status: analysis.status,
-      progress: analysis.progress,
-      currentStage: analysis.currentStage,
-      error: analysis.errorMessage,
-      analysis: analysis.status === 'COMPLETED' ? serializeAnalysis(analysis) : null,
-    });
-  } catch (error) {
-    console.error('Get analysis job error:', error);
-    return res.status(500).json({ error: 'Failed to retrieve analysis job' });
+    console.error('Analyze chart error:', error);
+    return res.status(500).json({ error: 'Failed to analyze chart' });
   }
 };
 

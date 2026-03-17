@@ -67,7 +67,6 @@ app.get('/api/debug/config', (_req, res) => {
     SUPABASE_URL: mask(config.supabase.url),
     SUPABASE_ANON_KEY: mask(config.supabase.anonKey),
     SUPABASE_SERVICE_ROLE_KEY: mask(config.supabase.serviceRoleKey),
-    REDIS_URL: mask(config.redis.url),
     FRONTEND_URLS: config.frontend.urls,
     NODE_ENV: config.nodeEnv,
   });

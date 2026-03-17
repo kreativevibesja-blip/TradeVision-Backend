@@ -1,7 +1,6 @@
 import { Router } from 'express';
 import {
-  submitAnalysisJob,
-  getAnalysisJob,
+  analyzeChart,
   getAnalyses,
   getAnalysisById,
 } from '../controllers/analysisController';
@@ -11,8 +10,7 @@ import { analysisLimiter } from '../middleware/rateLimiter';
 
 const router = Router();
 
-router.post('/analyze-chart', authenticate, analysisLimiter, upload.single('chart'), submitAnalysisJob);
-router.get('/analysis/:jobId', authenticate, getAnalysisJob);
+router.post('/analyze-chart', authenticate, analysisLimiter, upload.single('chart'), analyzeChart);
 router.get('/analyses', authenticate, getAnalyses);
 router.get('/analyses/:id', authenticate, getAnalysisById);
 
