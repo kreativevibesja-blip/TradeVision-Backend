@@ -3,13 +3,13 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getAnalysisById = exports.getAnalyses = exports.getAnalysisJob = exports.submitAnalysisJob = void 0;
+exports.getAnalysisById = exports.getAnalyses = exports.analyzeChart = void 0;
 const path_1 = __importDefault(require("path"));
 const crypto_1 = require("crypto");
 const config_1 = require("../config");
-const analysisQueue_1 = require("../queues/analysisQueue");
 const volatilityDetector_1 = require("../utils/volatilityDetector");
 const supabase_1 = require("../lib/supabase");
+const runAnalysisPipeline_1 = require("../services/analysis/runAnalysisPipeline");
 const needsUsageReset = (date) => new Date().toDateString() !== new Date(date).toDateString();
 const hydrateUsageCounter = async (userId) => {
     const user = await (0, supabase_1.getUserById)(userId);
@@ -27,7 +27,7 @@ const serializeAnalysis = (analysis) => ({
         ? analysis.takeProfits
         : [analysis.tp1, analysis.tp2].filter((value) => typeof value === 'number'),
 });
-const submitAnalysisJob = async (req, res) => {
+const analyzeChart = async (req, res) => {
     try {
         if (!req.file) {
             return res.status(400).json({ error: 'Chart image is required' });
@@ -58,53 +58,25 @@ const submitAnalysisJob = async (req, res) => {
             pair,
             timeframe,
             assetClass: (0, volatilityDetector_1.inferAssetClass)(pair),
-            status: 'QUEUED',
-            progress: 10,
-            currentStage: 'Scanning chart...',
+            status: 'PROCESSING',
+            progress: 5,
+            currentStage: 'Preparing analysis...',
         });
-        await (0, analysisQueue_1.enqueueAnalysisJob)({
+        const analysis = await (0, runAnalysisPipeline_1.runAnalysisPipeline)({
             analysisId,
             userId: req.user.id,
-            imageUrl,
             filePath: path_1.default.join(process.cwd(), config_1.config.upload.dir, req.file.filename),
             pair,
             timeframe,
         });
-        return res.status(202).json({
-            jobId: analysisId,
-            analysisId,
-            status: 'QUEUED',
-            progress: 10,
-            currentStage: 'Scanning chart...',
-        });
+        return res.json({ analysis: serializeAnalysis(analysis) });
     }
     catch (error) {
-        console.error('Submit analysis job error:', error);
-        return res.status(500).json({ error: 'Failed to start analysis job' });
+        console.error('Analyze chart error:', error);
+        return res.status(500).json({ error: 'Failed to analyze chart' });
     }
 };
-exports.submitAnalysisJob = submitAnalysisJob;
-const getAnalysisJob = async (req, res) => {
-    try {
-        const analysis = await (0, supabase_1.getAnalysisByJobIdForUser)(req.params.jobId, req.user.id);
-        if (!analysis) {
-            return res.status(404).json({ error: 'Analysis job not found' });
-        }
-        return res.json({
-            jobId: analysis.jobId,
-            status: analysis.status,
-            progress: analysis.progress,
-            currentStage: analysis.currentStage,
-            error: analysis.errorMessage,
-            analysis: analysis.status === 'COMPLETED' ? serializeAnalysis(analysis) : null,
-        });
-    }
-    catch (error) {
-        console.error('Get analysis job error:', error);
-        return res.status(500).json({ error: 'Failed to retrieve analysis job' });
-    }
-};
-exports.getAnalysisJob = getAnalysisJob;
+exports.analyzeChart = analyzeChart;
 const getAnalyses = async (req, res) => {
     try {
         const page = parseInt(req.query.page) || 1;

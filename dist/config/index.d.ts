@@ -14,14 +14,6 @@ export declare const config: {
         apiKey: string;
         analysisModel: string;
     };
-    redis: {
-        url: string;
-        tls: boolean;
-    };
-    analysis: {
-        queueName: string;
-        pollIntervalMs: number;
-    };
     paypal: {
         clientId: string;
         clientSecret: string;

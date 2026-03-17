@@ -31,14 +31,6 @@ exports.config = {
         apiKey: process.env.OPENAI_API_KEY || '',
         analysisModel: process.env.OPENAI_ANALYSIS_MODEL || 'gpt-4o-mini',
     },
-    redis: {
-        url: process.env.REDIS_URL || 'redis://127.0.0.1:6379',
-        tls: process.env.REDIS_TLS === 'true',
-    },
-    analysis: {
-        queueName: process.env.ANALYSIS_QUEUE_NAME || 'chart-analysis',
-        pollIntervalMs: parseInt(process.env.ANALYSIS_POLL_INTERVAL_MS || '2000', 10),
-    },
     paypal: {
         clientId: process.env.PAYPAL_CLIENT_ID || '',
         clientSecret: process.env.PAYPAL_CLIENT_SECRET || '',
