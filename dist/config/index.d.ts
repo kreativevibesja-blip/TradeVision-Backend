@@ -1,22 +1,26 @@
 export declare const config: {
     port: number;
     nodeEnv: string;
-    database: {
-        url: string;
-    };
     supabase: {
         url: string;
         anonKey: string;
-    };
-    jwt: {
-        secret: string;
-        expiresIn: string;
+        serviceRoleKey: string;
+        jwtSecret: string;
     };
     admin: {
         emails: string[];
     };
     openai: {
         apiKey: string;
+        analysisModel: string;
+    };
+    redis: {
+        url: string;
+        tls: boolean;
+    };
+    analysis: {
+        queueName: string;
+        pollIntervalMs: number;
     };
     paypal: {
         clientId: string;
