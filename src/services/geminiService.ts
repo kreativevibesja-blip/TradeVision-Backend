@@ -9,6 +9,9 @@ export interface GeminiAnalysisResult {
   takeProfits: number[];
   liquidityZones: string[];
   recommendation: string;
+  confidence: number | null;
+  reasoning: string;
+  riskReward: string | null;
 }
 
 const parseJsonObject = (value: string) => {
@@ -60,6 +63,15 @@ const normalizeStringList = (value: unknown) =>
     ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim())
     : [];
 
+const normalizeConfidence = (value: unknown) => {
+  const parsed = parseNumber(value);
+  if (parsed === null) {
+    return null;
+  }
+
+  return Math.max(0, Math.min(100, Math.round(parsed)));
+};
+
 export async function analyzeWithGemini(base64Image: string, mimeType: string, pair: string, timeframe: string): Promise<GeminiAnalysisResult> {
   if (!config.gemini.apiKey) {
     throw new Error('Gemini API key is not configured');
@@ -78,19 +90,24 @@ Timeframe: ${timeframe}
 Return ONLY valid JSON with this exact schema:
 {
   "bias": "bullish | bearish | neutral",
-  "structure_summary": "short description",
+  "structure_summary": "clear structure summary",
   "entry": "price or null",
   "stop_loss": "price or null",
-  "take_profits": ["tp1", "tp2"],
+  "take_profits": ["tp1", "tp2", "tp3"],
   "liquidity_zones": ["levels"],
-  "recommendation": "enter now | wait"
+  "recommendation": "enter now | wait",
+  "confidence": 0,
+  "reasoning": "detailed professional reasoning",
+  "risk_reward": "ratio or null"
 }
 
 Rules:
 - No markdown
 - No extra text
 - Base the answer only on the image
-- Keep structure_summary short and specific
+- Keep structure_summary specific and useful
+- Keep reasoning detailed, professional, and structured
+- Confidence must be 0 to 100
 - If an exact price is unclear, return null instead of guessing`;
 
   const result = await model.generateContent([
@@ -119,5 +136,14 @@ Rules:
       typeof parsed.recommendation === 'string' && parsed.recommendation.trim()
         ? parsed.recommendation.trim().toLowerCase()
         : 'wait',
+    confidence: normalizeConfidence(parsed.confidence),
+    reasoning:
+      typeof parsed.reasoning === 'string' && parsed.reasoning.trim()
+        ? parsed.reasoning.trim()
+        : 'Gemini identified the setup but did not provide a full professional explanation.',
+    riskReward:
+      typeof parsed.risk_reward === 'string' && parsed.risk_reward.trim()
+        ? parsed.risk_reward.trim()
+        : null,
   };
 }

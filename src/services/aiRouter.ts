@@ -2,7 +2,6 @@ import { getUserById } from '../lib/supabase';
 import type { ChartVisionOutput } from './imageProcessing/chartVision';
 import type { MarketStructureOutput } from './structureEngine/marketStructure';
 import { analyzeWithGemini, type GeminiAnalysisResult } from './geminiService';
-import { buildOpenAIFallback, refineWithOpenAI } from './openaiService';
 
 export interface AIAnalysisResult {
   bias: 'bullish' | 'bearish' | 'neutral';
@@ -16,7 +15,7 @@ export interface AIAnalysisResult {
   reasoning: string;
   riskReward: string | null;
   isProFeatureLocked: boolean;
-  provider: 'gemini' | 'gemini+openai';
+  provider: 'gemini';
 }
 
 interface AnalyzeChartAIInput {
@@ -56,7 +55,7 @@ const buildFreeResponse = (geminiResult: GeminiAnalysisResult): AIAnalysisResult
   liquidityZones: geminiResult.liquidityZones,
   recommendation: geminiResult.recommendation,
   confidence: null,
-  reasoning: 'Upgrade to Pro to unlock detailed reasoning, confidence, and refined trade management.',
+  reasoning: 'Upgrade to Pro to unlock Gemini detailed reasoning, confidence, and full trade management.',
   riskReward: null,
   isProFeatureLocked: true,
   provider: 'gemini',
@@ -72,48 +71,20 @@ export async function analyzeChartAI({ userId, base64Image, mimeType, pair, time
     return buildFreeResponse(geminiResult);
   }
 
-  try {
-    const refined = await refineWithOpenAI({
-      pair,
-      timeframe,
-      gemini: geminiResult,
-      layer1,
-      layer2,
-    });
+  const takeProfits = normalizeTakeProfits(geminiResult.takeProfits);
 
-    const takeProfits = normalizeTakeProfits(refined.takeProfits.length ? refined.takeProfits : geminiResult.takeProfits);
-
-    return {
-      bias: refined.bias || geminiResult.bias,
-      structureSummary: geminiResult.structureSummary,
-      entry: refined.entry ?? geminiResult.entry,
-      stopLoss: refined.stopLoss ?? geminiResult.stopLoss,
-      takeProfits,
-      liquidityZones: geminiResult.liquidityZones,
-      recommendation: refined.recommendation || geminiResult.recommendation,
-      confidence: refined.confidence,
-      reasoning: refined.reasoning,
-      riskReward: refined.riskReward || calculateRiskReward(refined.entry ?? geminiResult.entry, refined.stopLoss ?? geminiResult.stopLoss, takeProfits),
-      isProFeatureLocked: false,
-      provider: 'gemini+openai',
-    };
-  } catch (error) {
-    console.error('OpenAI refinement failed, returning Gemini result:', error);
-
-    const fallback = buildOpenAIFallback(geminiResult);
-    return {
-      bias: fallback.bias,
-      structureSummary: geminiResult.structureSummary,
-      entry: fallback.entry,
-      stopLoss: fallback.stopLoss,
-      takeProfits: fallback.takeProfits,
-      liquidityZones: geminiResult.liquidityZones,
-      recommendation: fallback.recommendation,
-      confidence: fallback.confidence,
-      reasoning: fallback.reasoning,
-      riskReward: calculateRiskReward(fallback.entry, fallback.stopLoss, fallback.takeProfits),
-      isProFeatureLocked: false,
-      provider: 'gemini',
-    };
-  }
+  return {
+    bias: geminiResult.bias,
+    structureSummary: geminiResult.structureSummary,
+    entry: geminiResult.entry,
+    stopLoss: geminiResult.stopLoss,
+    takeProfits,
+    liquidityZones: geminiResult.liquidityZones,
+    recommendation: geminiResult.recommendation,
+    confidence: geminiResult.confidence,
+    reasoning: geminiResult.reasoning,
+    riskReward: geminiResult.riskReward || calculateRiskReward(geminiResult.entry, geminiResult.stopLoss, takeProfits),
+    isProFeatureLocked: false,
+    provider: 'gemini',
+  };
 }
