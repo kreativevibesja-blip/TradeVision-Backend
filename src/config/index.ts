@@ -27,11 +27,6 @@ export const config = {
   admin: {
     emails: adminEmails,
   },
-  
-  openai: {
-    apiKey: process.env.OPENAI_API_KEY || '',
-    analysisModel: process.env.OPENAI_ANALYSIS_MODEL || 'gpt-4o-mini',
-  },
 
   gemini: {
     apiKey: process.env.GEMINI_API_KEY || '',
