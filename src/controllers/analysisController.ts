@@ -29,10 +29,29 @@ const hydrateUsageCounter = async (userId: string) => {
 };
 
 const serializeAnalysis = (analysis: any) => ({
+  ...(analysis.rawResponse && typeof analysis.rawResponse === 'object' ? analysis.rawResponse : {}),
   ...analysis,
+  reasoning:
+    analysis.rawResponse && typeof analysis.rawResponse === 'object' && typeof analysis.rawResponse.reasoning === 'string'
+      ? analysis.rawResponse.reasoning
+      : analysis.explanation || analysis.analysisText || null,
+  riskReward:
+    analysis.rawResponse && typeof analysis.rawResponse === 'object' && typeof analysis.rawResponse.riskReward === 'string'
+      ? analysis.rawResponse.riskReward
+      : null,
+  recommendation:
+    analysis.rawResponse && typeof analysis.rawResponse === 'object' && typeof analysis.rawResponse.recommendation === 'string'
+      ? analysis.rawResponse.recommendation
+      : null,
+  isProFeatureLocked:
+    analysis.rawResponse && typeof analysis.rawResponse === 'object' && typeof analysis.rawResponse.isProFeatureLocked === 'boolean'
+      ? analysis.rawResponse.isProFeatureLocked
+      : false,
   takeProfits:
     Array.isArray(analysis.takeProfits) && analysis.takeProfits.length > 0
       ? analysis.takeProfits
+      : analysis.rawResponse && typeof analysis.rawResponse === 'object' && Array.isArray(analysis.rawResponse.takeProfits)
+        ? analysis.rawResponse.takeProfits
       : [analysis.tp1, analysis.tp2].filter((value) => typeof value === 'number'),
 });
 
