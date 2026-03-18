@@ -1,7 +1,9 @@
+import fs from 'fs/promises';
+import path from 'path';
 import { analyzeChartVision } from '../imageProcessing/chartVision';
 import { deriveMarketStructure } from '../structureEngine/marketStructure';
-import { generateTradeReasoning } from '../aiEngine/reasoningEngine';
 import { incrementUserDailyUsage, updateAnalysis } from '../../lib/supabase';
+import { analyzeChartAI } from '../aiRouter';
 
 interface RunAnalysisPipelineInput {
   analysisId: string;
@@ -10,6 +12,13 @@ interface RunAnalysisPipelineInput {
   timeframe: string;
   filePath: string;
 }
+
+const getMimeType = (filePath: string) => {
+  const extension = path.extname(filePath).toLowerCase();
+  if (extension === '.png') return 'image/png';
+  if (extension === '.webp') return 'image/webp';
+  return 'image/jpeg';
+};
 
 export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe, filePath }: RunAnalysisPipelineInput) {
   try {
@@ -33,33 +42,47 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
 
     await updateAnalysis(analysisId, {
       progress: 60,
-      currentStage: 'Analyzing liquidity zones...',
+      currentStage: 'Mapping structure context...',
       layer2Output: layer2,
       structure: layer2.smcSignals,
       strategy: `${layer2.marketBias.toUpperCase()} ${layer2.tradeSetup.type.toUpperCase()} setup`,
     });
 
-    const reasoning = await generateTradeReasoning(pair, timeframe, layer1, layer2);
+    await updateAnalysis(analysisId, {
+      progress: 80,
+      currentStage: 'Running AI analysis...',
+    });
+
+    const imageBuffer = await fs.readFile(filePath);
+    const aiResult = await analyzeChartAI({
+      userId,
+      base64Image: imageBuffer.toString('base64'),
+      mimeType: getMimeType(filePath),
+      pair,
+      timeframe,
+      layer1,
+      layer2,
+    });
 
     const analysis = await updateAnalysis(analysisId, {
       status: 'COMPLETED',
       progress: 100,
-      currentStage: 'Generating AI reasoning...',
+      currentStage: 'Finalizing trade plan...',
       assetClass: layer1.assetClass,
-      bias: reasoning.bias.toUpperCase(),
-      entry: reasoning.entry,
-      stopLoss: reasoning.stopLoss,
-      tp1: reasoning.tp1,
-      tp2: reasoning.tp2,
-      takeProfits: [reasoning.tp1, reasoning.tp2],
-      confidence: reasoning.confidence,
-      explanation: reasoning.explanation,
-      analysisText: reasoning.explanation,
-      rawResponse: reasoning,
+      bias: aiResult.bias.toUpperCase(),
+      entry: aiResult.entry,
+      stopLoss: aiResult.stopLoss,
+      tp1: aiResult.takeProfits[0] ?? null,
+      tp2: aiResult.takeProfits[1] ?? null,
+      takeProfits: aiResult.takeProfits,
+      confidence: aiResult.confidence,
+      explanation: aiResult.reasoning,
+      analysisText: aiResult.reasoning,
+      rawResponse: aiResult,
       waitConditions:
-        layer2.marketBias === 'neutral'
-          ? 'Wait for a clear break of range or a sweep-and-reclaim at a major zone.'
-          : `Wait for confirmation inside the ${layer2.tradeSetup.type} entry zone before executing.`,
+        aiResult.recommendation === 'enter now'
+          ? 'Execution can be considered now if your own checklist is aligned.'
+          : 'Wait for confirmation before executing this setup.',
       errorMessage: null,
     });
 
