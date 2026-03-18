@@ -1,4 +1,5 @@
 import path from 'path';
+import fs from 'fs/promises';
 import { randomUUID } from 'crypto';
 import { Response } from 'express';
 import { AuthRequest } from '../middleware/auth';
@@ -14,6 +15,41 @@ import {
 import { runAnalysisPipeline } from '../services/analysis/runAnalysisPipeline';
 
 const needsUsageReset = (date: string | Date) => new Date().toDateString() !== new Date(date).toDateString();
+
+const parseCurrentPrice = (value: unknown) => {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    const normalized = Number(value.replace(/,/g, '').trim());
+    if (Number.isFinite(normalized) && normalized > 0) {
+      return normalized;
+    }
+  }
+
+  return null;
+};
+
+const parseInlineImage = (value: unknown) => {
+  if (typeof value !== 'string' || !value.trim()) {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  const dataUrlMatch = trimmed.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+  if (dataUrlMatch) {
+    return {
+      mimeType: dataUrlMatch[1],
+      base64Image: dataUrlMatch[2],
+    };
+  }
+
+  return {
+    mimeType: 'image/jpeg',
+    base64Image: trimmed,
+  };
+};
 
 const hydrateUsageCounter = async (userId: string) => {
   const user = await getUserById(userId);
@@ -43,10 +79,6 @@ const serializeAnalysis = (analysis: any) => ({
     analysis.rawResponse && typeof analysis.rawResponse === 'object' && typeof analysis.rawResponse.recommendation === 'string'
       ? analysis.rawResponse.recommendation
       : null,
-  isProFeatureLocked:
-    analysis.rawResponse && typeof analysis.rawResponse === 'object' && typeof analysis.rawResponse.isProFeatureLocked === 'boolean'
-      ? analysis.rawResponse.isProFeatureLocked
-      : false,
   takeProfits:
     Array.isArray(analysis.takeProfits) && analysis.takeProfits.length > 0
       ? analysis.takeProfits
@@ -57,14 +89,21 @@ const serializeAnalysis = (analysis: any) => ({
 
 export const analyzeChart = async (req: AuthRequest, res: Response) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'Chart image is required' });
-    }
-
     const { pair, timeframe } = req.body;
+    const currentPrice = parseCurrentPrice(req.body.currentPrice);
 
     if (!pair || !timeframe) {
       return res.status(400).json({ error: 'Pair and timeframe are required' });
+    }
+
+    if (currentPrice === null) {
+      return res.status(400).json({ error: 'Current price is required and must be a positive number' });
+    }
+
+    const inlineImage = parseInlineImage(req.body.image);
+
+    if (!req.file && !inlineImage) {
+      return res.status(400).json({ error: 'Chart image is required' });
     }
 
     const user = await hydrateUsageCounter(req.user!.id);
@@ -81,7 +120,7 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const imageUrl = `/uploads/${req.file.filename}`;
+    const imageUrl = req.file ? `/uploads/${req.file.filename}` : 'inline-upload';
     const analysisId = randomUUID();
 
     await createAnalysis({
@@ -100,9 +139,18 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
     const analysis = await runAnalysisPipeline({
       analysisId,
       userId: req.user!.id,
-      filePath: path.join(process.cwd(), config.upload.dir, req.file.filename),
       pair,
       timeframe,
+      currentPrice,
+      ...(req.file
+        ? {
+            base64Image: (await fs.readFile(path.join(process.cwd(), config.upload.dir, req.file.filename))).toString('base64'),
+            mimeType: req.file.mimetype || 'image/jpeg',
+          }
+        : {
+            base64Image: inlineImage!.base64Image,
+            mimeType: inlineImage!.mimeType,
+          }),
     });
 
     return res.json({ analysis: serializeAnalysis(analysis) });
