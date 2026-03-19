@@ -6,6 +6,10 @@ interface PayPalTokenResponse {
   expires_in: number;
 }
 
+interface PayPalClientTokenResponse {
+  client_token: string;
+}
+
 interface PayPalOrder {
   id: string;
   status: string;
@@ -28,6 +32,22 @@ async function getAccessToken(): Promise<string> {
 
   const data = (await response.json()) as PayPalTokenResponse;
   return data.access_token;
+}
+
+export async function generateClientToken(): Promise<string> {
+  const accessToken = await getAccessToken();
+
+  const response = await fetch(`${config.paypal.baseUrl}/v1/identity/generate-token`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Accept-Language': 'en_US',
+      'Content-Type': 'application/json',
+    },
+  });
+
+  const data = (await response.json()) as PayPalClientTokenResponse;
+  return data.client_token;
 }
 
 export async function createOrder(amount: string, planName: string): Promise<PayPalOrder> {

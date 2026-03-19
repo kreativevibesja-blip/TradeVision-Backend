@@ -1,6 +1,6 @@
 import { Response } from 'express';
 import { AuthRequest } from '../middleware/auth';
-import { createOrder, captureOrder } from '../services/paypalService';
+import { createOrder, captureOrder, generateClientToken } from '../services/paypalService';
 import {
   createPaymentRecord,
   getPricingPlanByTier,
@@ -36,6 +36,16 @@ export const createPayment = async (req: AuthRequest, res: Response) => {
   } catch (error) {
     console.error('Create payment error:', error);
     return res.status(500).json({ error: 'Payment creation failed' });
+  }
+};
+
+export const getPayPalClientToken = async (_req: AuthRequest, res: Response) => {
+  try {
+    const clientToken = await generateClientToken();
+    return res.json({ clientToken });
+  } catch (error) {
+    console.error('PayPal client token error:', error);
+    return res.status(500).json({ error: 'Failed to initialize card payments' });
   }
 };
 
