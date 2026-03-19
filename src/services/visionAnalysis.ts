@@ -99,8 +99,47 @@ const normalizeClarity = (value: unknown): VisionAnalysisResult['clarity'] => {
 const normalizeText = (value: unknown, fallback: string) =>
   typeof value === 'string' && value.trim().length > 0 ? value.trim() : fallback;
 
+const normalizeGeminiModelName = (modelName: string) => {
+  const normalized = modelName.trim();
+
+  if (normalized === 'gemini-3-flash') {
+    return 'gemini-3-flash-preview';
+  }
+
+  return normalized;
+};
+
 const getGeminiModelForSubscription = (subscription: SubscriptionTier) =>
-  subscription === 'PRO' ? config.gemini.proModel : config.gemini.freeModel;
+  normalizeGeminiModelName(subscription === 'PRO' ? config.gemini.proModel : config.gemini.freeModel);
+
+const isUnsupportedModelError = (error: unknown) => {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const message = error.message.toLowerCase();
+
+  return message.includes('not found') || message.includes('not supported for generatecontent') || message.includes('models/');
+};
+
+const generateVisionResponse = async (
+  genAI: GoogleGenerativeAI,
+  modelName: string,
+  prompt: string,
+  base64Image: string,
+  mimeType: string
+) => {
+  const model = genAI.getGenerativeModel({ model: modelName });
+  return model.generateContent([
+    { text: prompt },
+    {
+      inlineData: {
+        mimeType,
+        data: base64Image,
+      },
+    },
+  ]);
+};
 
 export async function analyzeVisionStructure(
   base64Image: string,
@@ -114,7 +153,8 @@ export async function analyzeVisionStructure(
   }
 
   const genAI = new GoogleGenerativeAI(config.gemini.apiKey);
-  const model = genAI.getGenerativeModel({ model: getGeminiModelForSubscription(subscription) });
+  const primaryModel = getGeminiModelForSubscription(subscription);
+  const fallbackModel = normalizeGeminiModelName(config.gemini.freeModel);
 
   const prompt = `You are a trading chart vision analyst.
 
@@ -145,15 +185,18 @@ Rules:
 - No markdown
 - No extra text`;
 
-  const result = await model.generateContent([
-    { text: prompt },
-    {
-      inlineData: {
-        mimeType,
-        data: base64Image,
-      },
-    },
-  ]);
+  let result;
+
+  try {
+    result = await generateVisionResponse(genAI, primaryModel, prompt, base64Image, mimeType);
+  } catch (error) {
+    if (subscription === 'PRO' && primaryModel !== fallbackModel && isUnsupportedModelError(error)) {
+      console.warn(`[visionAnalysis] Pro model \"${primaryModel}\" is unavailable. Falling back to \"${fallbackModel}\".`);
+      result = await generateVisionResponse(genAI, fallbackModel, prompt, base64Image, mimeType);
+    } else {
+      throw error;
+    }
+  }
 
   const parsed = parseJsonObject(result.response.text());
   const clarity = normalizeClarity(parsed.clarity);
