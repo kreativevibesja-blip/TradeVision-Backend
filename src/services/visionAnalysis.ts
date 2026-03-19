@@ -101,12 +101,14 @@ const normalizeText = (value: unknown, fallback: string) =>
 
 const normalizeGeminiModelName = (modelName: string) => {
   const normalized = modelName.trim();
+  const withoutPrefix = normalized.replace(/^models\//i, '');
+  const lower = withoutPrefix.toLowerCase();
 
-  if (normalized === 'gemini-3-flash') {
+  if (lower === 'gemini-3-flash') {
     return 'gemini-3-flash-preview';
   }
 
-  return normalized;
+  return withoutPrefix;
 };
 
 const getGeminiModelForSubscription = (subscription: SubscriptionTier) =>
