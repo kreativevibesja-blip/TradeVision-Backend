@@ -56,7 +56,7 @@ export const config = {
   },
   
   limits: {
-    freeDaily: 3,
+    freeDaily: 2,
     proDaily: 999999,
   },
 };
