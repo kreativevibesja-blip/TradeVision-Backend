@@ -56,10 +56,7 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
       rawResponse: signal,
       structure: signal.structure,
       strategy: `${signal.bias.toUpperCase()} ${signal.entryType.toUpperCase()} setup`,
-      waitConditions:
-        signal.recommendation === 'wait'
-          ? 'Wait for clearer confirmation before executing this setup.'
-          : 'Use the anchored entry only if price confirms the expected structure.',
+      waitConditions: signal.waitConditions,
       errorMessage: null,
     });
 
