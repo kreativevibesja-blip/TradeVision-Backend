@@ -12,11 +12,15 @@ import {
   getSystemSettings,
   updateSystemSetting,
   getAnnouncements,
+  getActiveAnnouncements,
   createAnnouncement,
   updateAnnouncement,
+  deleteAnnouncement,
 } from '../controllers/adminController';
 
 const router = Router();
+
+router.get('/public-announcements', getActiveAnnouncements);
 
 router.use(authenticate, requireAdmin);
 
@@ -33,5 +37,6 @@ router.post('/settings', updateSystemSetting);
 router.get('/announcements', getAnnouncements);
 router.post('/announcements', createAnnouncement);
 router.patch('/announcements/:id', updateAnnouncement);
+router.delete('/announcements/:id', deleteAnnouncement);
 
 export default router;

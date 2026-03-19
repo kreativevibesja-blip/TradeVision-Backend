@@ -2,9 +2,12 @@ import { Request, Response } from 'express';
 import {
   countAnalyses,
   countUsers,
+  deleteAnnouncementRecord,
+  deleteAnnouncementRecords,
   getAnalyticsBuckets,
   getCompletedRevenue,
   listAllAnalysesPage,
+  listActiveAnnouncements,
   listAllPaymentsPage,
   listAnnouncements,
   listPricingPlans,
@@ -15,7 +18,87 @@ import {
   updateUser as updateUserRecord,
   upsertSystemSetting,
   createAnnouncementRecord,
+  type AnnouncementContentPayload,
+  type AnnouncementRecord,
 } from '../lib/supabase';
+
+const ANNOUNCEMENT_CONTENT_VERSION = 1;
+
+const parseAnnouncementContent = (content: string): AnnouncementContentPayload => {
+  try {
+    const parsed = JSON.parse(content) as { version?: number; body?: unknown; expiresAt?: unknown };
+
+    if (parsed.version === ANNOUNCEMENT_CONTENT_VERSION && typeof parsed.body === 'string') {
+      return {
+        body: parsed.body,
+        expiresAt: typeof parsed.expiresAt === 'string' && parsed.expiresAt.trim().length > 0 ? parsed.expiresAt : null,
+      };
+    }
+  } catch {
+  }
+
+  return {
+    body: content,
+    expiresAt: null,
+  };
+};
+
+const serializeAnnouncementContent = (payload: AnnouncementContentPayload) =>
+  JSON.stringify({
+    version: ANNOUNCEMENT_CONTENT_VERSION,
+    body: payload.body,
+    expiresAt: payload.expiresAt,
+  });
+
+const mapAnnouncementRecord = (announcement: AnnouncementRecord) => {
+  const parsedContent = parseAnnouncementContent(announcement.content);
+  const expiresAt = parsedContent.expiresAt;
+  const isExpired = expiresAt ? new Date(expiresAt).getTime() <= Date.now() : false;
+
+  return {
+    ...announcement,
+    content: parsedContent.body,
+    expiresAt,
+    isExpired,
+  };
+};
+
+const cleanupExpiredAnnouncements = async (announcements: AnnouncementRecord[]) => {
+  const expiredIds = announcements
+    .filter((announcement) => {
+      const { expiresAt } = parseAnnouncementContent(announcement.content);
+      return Boolean(expiresAt && new Date(expiresAt).getTime() <= Date.now());
+    })
+    .map((announcement) => announcement.id);
+
+  if (expiredIds.length > 0) {
+    await deleteAnnouncementRecords(expiredIds);
+  }
+
+  return announcements.filter((announcement) => !expiredIds.includes(announcement.id));
+};
+
+const getExpiryFromRequest = (durationValue: unknown, durationUnit: unknown) => {
+  if (durationValue === undefined || durationValue === null || durationValue === '') {
+    return null;
+  }
+
+  const parsedValue = Number(durationValue);
+  if (!Number.isFinite(parsedValue) || parsedValue <= 0) {
+    return null;
+  }
+
+  const unit = typeof durationUnit === 'string' && durationUnit.toLowerCase() === 'days' ? 'days' : 'hours';
+  const expiresAt = new Date();
+
+  if (unit === 'days') {
+    expiresAt.setHours(expiresAt.getHours() + parsedValue * 24);
+  } else {
+    expiresAt.setHours(expiresAt.getHours() + parsedValue);
+  }
+
+  return expiresAt.toISOString();
+};
 
 export const getDashboardStats = async (_req: Request, res: Response) => {
   try {
@@ -195,18 +278,33 @@ export const updateSystemSetting = async (req: Request, res: Response) => {
 
 export const getAnnouncements = async (_req: Request, res: Response) => {
   try {
-    const announcements = await listAnnouncements();
-    return res.json({ announcements });
+    const announcements = await cleanupExpiredAnnouncements(await listAnnouncements());
+    return res.json({ announcements: announcements.map(mapAnnouncementRecord) });
   } catch (error) {
     return res.status(500).json({ error: 'Failed to get announcements' });
   }
 };
 
+export const getActiveAnnouncements = async (_req: Request, res: Response) => {
+  try {
+    const announcements = await cleanupExpiredAnnouncements(await listActiveAnnouncements());
+    return res.json({ announcements: announcements.map(mapAnnouncementRecord) });
+  } catch (error) {
+    return res.status(500).json({ error: 'Failed to get active announcements' });
+  }
+};
+
 export const createAnnouncement = async (req: Request, res: Response) => {
   try {
-    const { title, content } = req.body;
-    const announcement = await createAnnouncementRecord({ title, content });
-    return res.json({ announcement });
+    const { title, content, durationValue, durationUnit } = req.body;
+    const announcement = await createAnnouncementRecord({
+      title,
+      content: serializeAnnouncementContent({
+        body: content,
+        expiresAt: getExpiryFromRequest(durationValue, durationUnit),
+      }),
+    });
+    return res.json({ announcement: mapAnnouncementRecord(announcement) });
   } catch (error) {
     return res.status(500).json({ error: 'Failed to create announcement' });
   }
@@ -215,14 +313,30 @@ export const createAnnouncement = async (req: Request, res: Response) => {
 export const updateAnnouncement = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { title, content, isActive } = req.body;
+    const { title, content, isActive, durationValue, durationUnit, clearExpiry } = req.body;
+    const nextContent =
+      typeof content === 'string' || durationValue !== undefined || clearExpiry
+        ? serializeAnnouncementContent({
+            body: typeof content === 'string' ? content : '',
+            expiresAt: clearExpiry ? null : getExpiryFromRequest(durationValue, durationUnit),
+          })
+        : undefined;
     const announcement = await updateAnnouncementRecord(id, {
       ...(title ? { title } : {}),
-      ...(content ? { content } : {}),
+      ...(nextContent ? { content: nextContent } : {}),
       ...(typeof isActive === 'boolean' ? { isActive } : {}),
     });
-    return res.json({ announcement });
+    return res.json({ announcement: mapAnnouncementRecord(announcement) });
   } catch (error) {
     return res.status(500).json({ error: 'Failed to update announcement' });
+  }
+};
+
+export const deleteAnnouncement = async (req: Request, res: Response) => {
+  try {
+    await deleteAnnouncementRecord(req.params.id);
+    return res.json({ success: true });
+  } catch (error) {
+    return res.status(500).json({ error: 'Failed to delete announcement' });
   }
 };

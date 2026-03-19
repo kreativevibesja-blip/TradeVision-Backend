@@ -110,6 +110,11 @@ export interface AnnouncementRecord {
   updatedAt: string;
 }
 
+export interface AnnouncementContentPayload {
+  body: string;
+  expiresAt: string | null;
+}
+
 const logDbError = (context: string, error: unknown) => {
   console.error(`Database error: ${context}`, error);
   throw new Error('Database operation failed');
@@ -392,11 +397,35 @@ export const upsertSystemSetting = async (key: string, value: any) => {
 export const listAnnouncements = () =>
   many<AnnouncementRecord>('listAnnouncements', supabase.from(ANNOUNCEMENT_TABLE).select('*').order('createdAt', { ascending: false }));
 
+export const listActiveAnnouncements = () =>
+  many<AnnouncementRecord>(
+    'listActiveAnnouncements',
+    supabase.from(ANNOUNCEMENT_TABLE).select('*').eq('isActive', true).order('createdAt', { ascending: false })
+  );
+
 export const createAnnouncementRecord = (values: Pick<AnnouncementRecord, 'title' | 'content'>) =>
   insertSingle<AnnouncementRecord>('createAnnouncementRecord', ANNOUNCEMENT_TABLE, values);
 
 export const updateAnnouncementRecord = (id: string, values: Partial<AnnouncementRecord>) =>
   updateSingle<AnnouncementRecord>('updateAnnouncementRecord', ANNOUNCEMENT_TABLE, values, (query) => query.eq('id', id));
+
+export const deleteAnnouncementRecord = async (id: string) => {
+  const { error } = await supabase.from(ANNOUNCEMENT_TABLE).delete().eq('id', id);
+  if (error) {
+    logDbError('deleteAnnouncementRecord', error);
+  }
+};
+
+export const deleteAnnouncementRecords = async (ids: string[]) => {
+  if (!ids.length) {
+    return;
+  }
+
+  const { error } = await supabase.from(ANNOUNCEMENT_TABLE).delete().in('id', ids);
+  if (error) {
+    logDbError('deleteAnnouncementRecords', error);
+  }
+};
 
 const bucketByDay = <T>(rows: T[], getDate: (row: T) => string, getValue: (row: T) => number) => {
   const buckets = rows.reduce<Record<string, number>>((acc, row) => {
