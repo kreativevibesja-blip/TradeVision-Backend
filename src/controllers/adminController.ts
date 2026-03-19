@@ -99,13 +99,48 @@ export const getPayments = async (req: Request, res: Response) => {
   }
 };
 
-export const getAnalytics = async (_req: Request, res: Response) => {
-  try {
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    const { userGrowth, analysesPerDay, revenueData } = await getAnalyticsBuckets(thirtyDaysAgo.toISOString());
+const parseDateRange = (value: unknown, endOfDay = false) => {
+  if (typeof value !== 'string' || !value.trim()) {
+    return null;
+  }
 
-    return res.json({ userGrowth, analysesPerDay, revenueData });
+  const suffix = endOfDay ? 'T23:59:59.999Z' : 'T00:00:00.000Z';
+  const parsed = new Date(value.includes('T') ? value : `${value}${suffix}`);
+
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+
+  return parsed;
+};
+
+export const getAnalytics = async (req: Request, res: Response) => {
+  try {
+    const fromQuery = parseDateRange(req.query.from, false);
+    const toQuery = parseDateRange(req.query.to, true);
+
+    const defaultFrom = new Date();
+    defaultFrom.setDate(defaultFrom.getDate() - 30);
+    defaultFrom.setHours(0, 0, 0, 0);
+
+    const fromDate = fromQuery || defaultFrom;
+    const toDate = toQuery || new Date();
+
+    if (fromDate > toDate) {
+      return res.status(400).json({ error: 'Invalid date range' });
+    }
+
+    const { userGrowth, analysesPerDay, revenueData } = await getAnalyticsBuckets(fromDate.toISOString(), toDate.toISOString());
+
+    return res.json({
+      userGrowth,
+      analysesPerDay,
+      revenueData,
+      range: {
+        from: fromDate.toISOString(),
+        to: toDate.toISOString(),
+      },
+    });
   } catch (error) {
     console.error('Admin analytics error:', error);
     return res.status(500).json({ error: 'Failed to get analytics' });

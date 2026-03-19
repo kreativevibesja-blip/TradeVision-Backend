@@ -410,13 +410,21 @@ const bucketByDay = <T>(rows: T[], getDate: (row: T) => string, getValue: (row: 
     .map(([date, value]) => ({ date, value }));
 };
 
-export const getAnalyticsBuckets = async (fromIso: string) => {
+export const getAnalyticsBuckets = async (fromIso: string, toIso?: string) => {
+  const applyRange = (query: any) => {
+    let nextQuery = query.gte('createdAt', fromIso);
+    if (toIso) {
+      nextQuery = nextQuery.lte('createdAt', toIso);
+    }
+    return nextQuery;
+  };
+
   const [users, analyses, payments] = await Promise.all([
-    many<Pick<UserRecord, 'createdAt'>>('getAnalyticsBuckets users', supabase.from(USER_TABLE).select('createdAt').gte('createdAt', fromIso)),
-    many<Pick<AnalysisRecord, 'createdAt'>>('getAnalyticsBuckets analyses', supabase.from(ANALYSIS_TABLE).select('createdAt').gte('createdAt', fromIso)),
+    many<Pick<UserRecord, 'createdAt'>>('getAnalyticsBuckets users', applyRange(supabase.from(USER_TABLE).select('createdAt'))),
+    many<Pick<AnalysisRecord, 'createdAt'>>('getAnalyticsBuckets analyses', applyRange(supabase.from(ANALYSIS_TABLE).select('createdAt'))),
     many<Pick<PaymentRecord, 'createdAt' | 'amount'>>(
       'getAnalyticsBuckets payments',
-      supabase.from(PAYMENT_TABLE).select('createdAt,amount').eq('status', 'COMPLETED').gte('createdAt', fromIso)
+      applyRange(supabase.from(PAYMENT_TABLE).select('createdAt,amount').eq('status', 'COMPLETED'))
     ),
   ]);
 
