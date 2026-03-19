@@ -8,6 +8,7 @@ import {
   updatePaymentByOrderId,
   updateUser,
 } from '../lib/supabase';
+import { getBillingSummaryForUser } from '../services/billingService';
 
 export const createPayment = async (req: AuthRequest, res: Response) => {
   try {
@@ -71,5 +72,26 @@ export const getPaymentHistory = async (req: AuthRequest, res: Response) => {
   } catch (error) {
     console.error('Payment history error:', error);
     return res.status(500).json({ error: 'Failed to retrieve payments' });
+  }
+};
+
+export const getBillingSummary = async (req: AuthRequest, res: Response) => {
+  try {
+    const summary = await getBillingSummaryForUser(req.user!.id, req.user!.subscription as 'FREE' | 'PRO');
+    return res.json({ billing: summary });
+  } catch (error) {
+    console.error('Billing summary error:', error);
+    return res.status(500).json({ error: 'Failed to retrieve billing summary' });
+  }
+};
+
+export const cancelSubscription = async (req: AuthRequest, res: Response) => {
+  try {
+    await updateUser(req.user!.id, { subscription: 'FREE' });
+    const summary = await getBillingSummaryForUser(req.user!.id, 'FREE');
+    return res.json({ success: true, billing: summary });
+  } catch (error) {
+    console.error('Cancel subscription error:', error);
+    return res.status(500).json({ error: 'Failed to cancel subscription' });
   }
 };

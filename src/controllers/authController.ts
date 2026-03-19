@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import { AuthRequest } from '../middleware/auth';
 import { getUserById } from '../lib/supabase';
+import { getBillingSummaryForUser } from '../services/billingService';
 
 export const getProfile = async (req: AuthRequest, res: Response) => {
   try {
@@ -10,13 +11,15 @@ export const getProfile = async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
+    const billing = await getBillingSummaryForUser(user.id, user.subscription);
+
     return res.json({
       user: {
         id: user.id,
         email: user.email,
         name: user.name,
         role: user.role,
-        subscription: user.subscription,
+        subscription: billing.currentPlan,
         dailyUsage: user.dailyUsage,
         createdAt: user.createdAt,
       },
