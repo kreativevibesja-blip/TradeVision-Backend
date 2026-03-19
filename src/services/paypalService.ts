@@ -7,7 +7,7 @@ interface PayPalTokenResponse {
 }
 
 interface PayPalClientTokenResponse {
-  client_token: string;
+  access_token: string;
 }
 
 interface PayPalOrder {
@@ -35,19 +35,34 @@ async function getAccessToken(): Promise<string> {
 }
 
 export async function generateClientToken(): Promise<string> {
-  const accessToken = await getAccessToken();
+  const auth = Buffer.from(
+    `${config.paypal.clientId}:${config.paypal.clientSecret}`
+  ).toString('base64');
 
-  const response = await fetch(`${config.paypal.baseUrl}/v1/identity/generate-token`, {
+  const domains = config.frontend.urls
+    .map((url) => `domains[]=${encodeURIComponent(url)}`)
+    .join('&');
+
+  const body = [
+    'grant_type=client_credentials',
+    'response_type=client_token',
+    'intent=sdk_init',
+    domains,
+  ]
+    .filter(Boolean)
+    .join('&');
+
+  const response = await fetch(`${config.paypal.baseUrl}/v1/oauth2/token`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Accept-Language': 'en_US',
-      'Content-Type': 'application/json',
+      Authorization: `Basic ${auth}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
     },
+    body,
   });
 
   const data = (await response.json()) as PayPalClientTokenResponse;
-  return data.client_token;
+  return data.access_token;
 }
 
 export async function createOrder(amount: string, planName: string): Promise<PayPalOrder> {
