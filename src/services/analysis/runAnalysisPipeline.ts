@@ -2,18 +2,20 @@ import { incrementUserDailyUsage, updateAnalysis } from '../../lib/supabase';
 import { analyzeVisionStructure } from '../visionAnalysis';
 import { anchorTradeLevels } from '../priceAnchor';
 import { buildTradeSignal } from '../signalEngine';
+import type { SubscriptionTier } from '../../lib/supabase';
 
 interface RunAnalysisPipelineInput {
   analysisId: string;
   userId: string;
   pair: string;
   timeframe: string;
+  subscription: SubscriptionTier;
   currentPrice: number;
   base64Image: string;
   mimeType: string;
 }
 
-export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe, currentPrice, base64Image, mimeType }: RunAnalysisPipelineInput) {
+export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe, subscription, currentPrice, base64Image, mimeType }: RunAnalysisPipelineInput) {
   try {
     await updateAnalysis(analysisId, {
       status: 'PROCESSING',
@@ -22,7 +24,7 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
       errorMessage: null,
     });
 
-    const vision = await analyzeVisionStructure(base64Image, mimeType, pair, timeframe);
+    const vision = await analyzeVisionStructure(base64Image, mimeType, pair, timeframe, subscription);
 
     await updateAnalysis(analysisId, {
       progress: 45,

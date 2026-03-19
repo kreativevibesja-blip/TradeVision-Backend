@@ -141,6 +141,7 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
       userId: req.user!.id,
       pair,
       timeframe,
+      subscription: user.subscription,
       currentPrice,
       ...(req.file
         ? {

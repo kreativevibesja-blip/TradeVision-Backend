@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { config } from '../config';
+import type { SubscriptionTier } from '../lib/supabase';
 
 export interface VisionStructureZones {
   recentHighZone: string;
@@ -98,13 +99,22 @@ const normalizeClarity = (value: unknown): VisionAnalysisResult['clarity'] => {
 const normalizeText = (value: unknown, fallback: string) =>
   typeof value === 'string' && value.trim().length > 0 ? value.trim() : fallback;
 
-export async function analyzeVisionStructure(base64Image: string, mimeType: string, pair: string, timeframe: string): Promise<VisionAnalysisResult> {
+const getGeminiModelForSubscription = (subscription: SubscriptionTier) =>
+  subscription === 'PRO' ? config.gemini.proModel : config.gemini.freeModel;
+
+export async function analyzeVisionStructure(
+  base64Image: string,
+  mimeType: string,
+  pair: string,
+  timeframe: string,
+  subscription: SubscriptionTier
+): Promise<VisionAnalysisResult> {
   if (!config.gemini.apiKey) {
     throw new Error('Gemini API key is not configured');
   }
 
   const genAI = new GoogleGenerativeAI(config.gemini.apiKey);
-  const model = genAI.getGenerativeModel({ model: config.gemini.model });
+  const model = genAI.getGenerativeModel({ model: getGeminiModelForSubscription(subscription) });
 
   const prompt = `You are a trading chart vision analyst.
 
