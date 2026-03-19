@@ -21,6 +21,7 @@ import {
   type AnnouncementContentPayload,
   type AnnouncementRecord,
 } from '../lib/supabase';
+import { setBillingStateFromAdmin } from '../services/billing';
 
 const ANNOUNCEMENT_CONTENT_VERSION = 1;
 
@@ -141,11 +142,19 @@ export const updateUser = async (req: Request, res: Response) => {
     const { id } = req.params;
     const { subscription, banned, role } = req.body;
 
-    const user = await updateUserRecord(id, {
+    let user = await updateUserRecord(id, {
       ...(subscription && { subscription }),
       ...(typeof banned === 'boolean' ? { banned } : {}),
       ...(role && { role }),
     });
+
+    if (subscription === 'FREE' || subscription === 'PRO') {
+      await setBillingStateFromAdmin(id, subscription);
+      user = {
+        ...user,
+        subscription,
+      };
+    }
 
     return res.json({ user });
   } catch (error) {

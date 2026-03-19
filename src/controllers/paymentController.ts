@@ -6,9 +6,8 @@ import {
   getPricingPlanByTier,
   listPaymentsForUserId,
   updatePaymentByOrderId,
-  updateUser,
 } from '../lib/supabase';
-import { getBillingSummaryForUser } from '../services/billingService';
+import { getBillingSummaryForUser, setBillingStateFromCancellation, setBillingStateFromPayment } from '../services/billing';
 
 export const createPayment = async (req: AuthRequest, res: Response) => {
   try {
@@ -50,9 +49,9 @@ export const handlePaymentSuccess = async (req: AuthRequest, res: Response) => {
     const capture = await captureOrder(orderId);
 
     if (capture.status === 'COMPLETED') {
-      await updatePaymentByOrderId(orderId, { status: 'COMPLETED' });
+      const payment = await updatePaymentByOrderId(orderId, { status: 'COMPLETED' });
 
-      await updateUser(req.user!.id, { subscription: 'PRO' });
+      await setBillingStateFromPayment(req.user!.id, payment.createdAt);
 
       return res.json({ success: true, message: 'Subscription activated' });
     }
@@ -87,7 +86,7 @@ export const getBillingSummary = async (req: AuthRequest, res: Response) => {
 
 export const cancelSubscription = async (req: AuthRequest, res: Response) => {
   try {
-    await updateUser(req.user!.id, { subscription: 'FREE' });
+    await setBillingStateFromCancellation(req.user!.id);
     const summary = await getBillingSummaryForUser(req.user!.id, 'FREE');
     return res.json({ success: true, billing: summary });
   } catch (error) {

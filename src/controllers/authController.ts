@@ -1,7 +1,7 @@
 import { Response } from 'express';
 import { AuthRequest } from '../middleware/auth';
 import { getUserById } from '../lib/supabase';
-import { getBillingSummaryForUser } from '../services/billingService';
+import { getBillingSummaryForUser } from '../services/billing';
 
 export const getProfile = async (req: AuthRequest, res: Response) => {
   try {

@@ -380,6 +380,9 @@ export const getCompletedRevenue = async () => {
 export const listSystemSettings = () =>
   many<SystemSettingRecord>('listSystemSettings', supabase.from(SYSTEM_SETTINGS_TABLE).select('*').order('key', { ascending: true }));
 
+export const getSystemSetting = (key: string) =>
+  maybeSingle<SystemSettingRecord>('getSystemSetting', supabase.from(SYSTEM_SETTINGS_TABLE).select('*').eq('key', key).maybeSingle());
+
 export const upsertSystemSetting = async (key: string, value: any) => {
   const { data, error } = await supabase
     .from(SYSTEM_SETTINGS_TABLE)
