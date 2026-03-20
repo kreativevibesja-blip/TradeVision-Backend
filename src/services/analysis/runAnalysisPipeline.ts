@@ -1,6 +1,7 @@
 import { incrementUserDailyUsage, updateAnalysis } from '../../lib/supabase';
 import { analyzeVisionStructure } from '../visionAnalysis';
-import { anchorTradeLevels } from '../priceAnchor';
+import { buildPricePlan } from '../priceEngine';
+import { filterTradeSignal } from '../signalFilter';
 import { buildTradeSignal } from '../signalEngine';
 import type { SubscriptionTier } from '../../lib/supabase';
 
@@ -28,19 +29,20 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
 
     await updateAnalysis(analysisId, {
       progress: 45,
-      currentStage: 'Anchoring prices to live context...',
+      currentStage: 'Filtering signal quality...',
       layer1Output: vision,
     });
 
-    const anchoredLevels = anchorTradeLevels(currentPrice, pair, vision);
+    const filteredSignal = filterTradeSignal(vision);
 
     await updateAnalysis(analysisId, {
       progress: 75,
-      currentStage: 'Building final trade signal...',
-      layer2Output: anchoredLevels,
+      currentStage: 'Building execution plan...',
+      layer2Output: filteredSignal,
     });
 
-    const signal = buildTradeSignal(pair, vision, anchoredLevels);
+    const pricePlan = buildPricePlan(currentPrice, pair, filteredSignal);
+    const signal = buildTradeSignal(pair, filteredSignal, pricePlan);
 
     const analysis = await updateAnalysis(analysisId, {
       status: 'COMPLETED',
@@ -57,7 +59,7 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
       analysisText: signal.reasoning,
       rawResponse: signal,
       structure: signal.structure,
-      strategy: `${signal.bias.toUpperCase()} ${signal.entryType.toUpperCase()} setup`,
+      strategy: `${signal.bias.toUpperCase()} ${signal.signalType.toUpperCase()} ${signal.entryType.toUpperCase()} setup`,
       waitConditions: signal.waitConditions,
       errorMessage: null,
     });

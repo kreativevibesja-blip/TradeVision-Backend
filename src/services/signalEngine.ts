@@ -1,6 +1,6 @@
 import { getPricePrecision } from '../utils/volatilityDetector';
-import type { AnchoredPriceResult } from './priceAnchor';
-import type { VisionAnalysisResult } from './visionAnalysis';
+import type { PriceEngineResult } from './priceEngine';
+import type { FilteredSignalResult } from './signalFilter';
 
 interface SetupGuide {
   likelyEntryArea: string;
@@ -15,24 +15,33 @@ export interface TradeSignalResult {
   bias: 'bullish' | 'bearish' | 'neutral';
   confidence: number;
   currentPrice: number;
+  signalType: 'instant' | 'pending' | 'wait';
+  entryZone: { low: number; high: number } | null;
   entry: number | null;
   stopLoss: number | null;
   takeProfits: number[];
   riskReward: string | null;
-  entryType: VisionAnalysisResult['entryType'];
-  recommendation: VisionAnalysisResult['recommendation'];
+  entryType: FilteredSignalResult['entryType'];
+  recommendation: FilteredSignalResult['recommendation'];
   reasoning: string;
-  trendStrength: VisionAnalysisResult['trendStrength'];
-  structure: VisionAnalysisResult['structure'];
+  trendStrength: FilteredSignalResult['trendStrength'];
+  structure: FilteredSignalResult['structure'];
   structureSummary: string;
   liquidityContext: string;
-  clarity: VisionAnalysisResult['clarity'];
+  clarity: FilteredSignalResult['clarity'];
+  currentPriceRelation: FilteredSignalResult['currentPriceRelation'];
+  aiEntryZone: FilteredSignalResult['entryZone'];
+  confirmationNeeded: boolean;
+  confirmationDetails: string;
+  invalidationHint: string;
+  filterReason: string;
   range: number;
   buffer: number;
-  priceSource: AnchoredPriceResult['priceSource'];
+  priceSource: PriceEngineResult['priceSource'];
+  executionMode: PriceEngineResult['executionMode'];
   waitConditions: string;
   setupGuide: SetupGuide;
-  provider: 'gemini-vision+anchor';
+  provider: 'gemini-vision+filter';
 }
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
@@ -50,149 +59,99 @@ const formatZone = (low: number, high: number, pair: string) => {
   return `${formatPrice(zoneLow, pair)} - ${formatPrice(zoneHigh, pair)}`;
 };
 
-const getTeachingBias = (vision: VisionAnalysisResult): 'bullish' | 'bearish' | 'neutral' => {
-  if (vision.bias !== 'neutral') {
-    return vision.bias;
-  }
-
-  if (vision.liquidityContext.includes('below')) {
-    return 'bullish';
-  }
-
-  if (vision.liquidityContext.includes('above')) {
-    return 'bearish';
-  }
-
-  return 'neutral';
-};
-
-const buildBreakoutGuide = (pair: string, vision: VisionAnalysisResult, anchor: AnchoredPriceResult, direction: 'bullish' | 'bearish'): SetupGuide => {
-  const isBullish = direction === 'bullish';
-  const zoneLow = isBullish ? anchor.currentPrice + anchor.buffer * 0.4 : anchor.currentPrice - anchor.range * 0.65;
-  const zoneHigh = isBullish ? anchor.currentPrice + anchor.range * 0.65 : anchor.currentPrice - anchor.buffer * 0.4;
-  const zoneText = formatZone(zoneLow, zoneHigh, pair);
-  const structuralArea = isBullish ? vision.structure.recentHighZone : vision.structure.recentLowZone;
-  const retestSide = isBullish ? 'above' : 'below';
-  const oppositeSide = isBullish ? 'below' : 'above';
-  const triggerSide = isBullish ? 'higher' : 'lower';
+const buildSetupGuide = (pair: string, filtered: FilteredSignalResult, pricePlan: PriceEngineResult): SetupGuide => {
+  const zoneText = pricePlan.entryZone ? formatZone(pricePlan.entryZone.low, pricePlan.entryZone.high, pair) : filtered.entryZone.label;
+  const entryTrigger =
+    filtered.signalType === 'instant'
+      ? 'Execution can be taken now because price is already at the trade location and the confirmation condition is already present.'
+      : filtered.signalType === 'pending'
+        ? `Plan execution only when price reaches ${zoneText} and confirms there with the behavior described below.`
+        : 'Do not execute yet. Wait for price to move into the reaction area and prove intent there.';
 
   return {
-    likelyEntryArea: `Watch the breakout edge around ${structuralArea} and the anchored watch zone near ${zoneText}. The cleaner entry is usually the first retest that holds ${retestSide} the broken level instead of chasing the initial impulse candle.`,
-    whyThisArea: `A ${direction} breakout is higher quality when price proves acceptance beyond the range edge. That retest shows whether the breakout is real or just a brief liquidity run.`,
+    likelyEntryArea: `${filtered.entryZone.description}${pricePlan.entryZone ? ` Numeric watch zone: ${zoneText}.` : ''}`,
+    whyThisArea: `${filtered.structureSummary} Liquidity context is ${filtered.liquidityContext}, so the focus stays on a high-quality reaction rather than forcing a price close to the current candle.`,
     confirmationChecklist: [
-      `Wait for a decisive candle body to close ${retestSide} the breakout level with more displacement than the candles before it.`,
-      `Let price retest the broken level and reject back ${retestSide} it instead of immediately slipping back inside the range.`,
-      `Look for the next candle to continue ${triggerSide} rather than printing small overlapping bodies.`
+      filtered.confirmationDetails,
+      filtered.currentPriceRelation === 'far_from_zone'
+        ? 'Let price travel into the preferred zone before planning execution.'
+        : 'Avoid chasing candles that extend away from the preferred zone.',
+      filtered.signalType === 'instant'
+        ? 'If momentum stalls immediately after entry, reassess instead of averaging into a weaker setup.'
+        : 'Only participate if the first reaction from the zone shows clear follow-through.'
     ],
-    entryTrigger: `Enter on the confirmation close or on the first shallow retest that respects the breakout shelf ${retestSide} the level.`,
-    stopGuidance: `Place the stop ${oppositeSide} the retest low or high that validates the breakout. If price closes back through that shelf, the breakout thesis is weakening.`,
-    watchOut: `Skip the trade if the breakout candle is immediately retraced, if the retest cannot hold ${retestSide} the level, or if the move expands without follow-through.`
+    entryTrigger,
+    stopGuidance:
+      pricePlan.stopLoss !== null
+        ? `Risk is defined beyond ${formatPrice(pricePlan.stopLoss, pair)}. ${filtered.invalidationHint}`
+        : `No executable stop belongs here yet because the setup is still in wait mode. ${filtered.invalidationHint}`,
+    watchOut: filtered.filterReason,
   };
 };
 
-const buildSweepGuide = (pair: string, vision: VisionAnalysisResult, anchor: AnchoredPriceResult, direction: 'bullish' | 'bearish'): SetupGuide => {
-  const isBullish = direction === 'bullish';
-  const zoneLow = isBullish ? anchor.currentPrice - anchor.range : anchor.currentPrice + anchor.buffer * 0.4;
-  const zoneHigh = isBullish ? anchor.currentPrice - anchor.buffer * 0.4 : anchor.currentPrice + anchor.range;
-  const zoneText = formatZone(zoneLow, zoneHigh, pair);
-  const structuralArea = isBullish ? vision.structure.recentLowZone : vision.structure.recentHighZone;
-  const liquiditySide = isBullish ? 'lows' : 'highs';
-  const reclaimSide = isBullish ? 'above' : 'below';
-  const stopSide = isBullish ? 'below' : 'above';
-  const directionalEntry = isBullish ? 'long' : 'short';
-
-  return {
-    likelyEntryArea: `The most likely entry area is around ${structuralArea}, with the anchored reaction zone near ${zoneText}. Let price sweep the ${liquiditySide} first, then show that it can reclaim the level instead of entering in the middle of the range.`,
-    whyThisArea: `In a ${direction} context, better entries often come after weaker traders are trapped on the wrong side of the local swing. That sweep creates the liquidity needed for a cleaner ${directionalEntry} continuation or reversal response.`,
-    confirmationChecklist: [
-      `Wait for a sweep of the local ${liquiditySide} into the watch zone rather than entering before liquidity is taken.`,
-      `Look for a strong engulfing or displacement candle to close back ${reclaimSide} the reclaimed level.`,
-      `Make sure the next candle respects that level and does not immediately trade back through it.`
-    ],
-    entryTrigger: `Enter on the confirmation candle close or on the first retest that holds ${reclaimSide} the swept level.`,
-    stopGuidance: `Place the stop ${stopSide} the sweep wick or beyond the invalidation candle that reclaimed the zone.`,
-    watchOut: `Avoid the setup if price keeps chopping through the level, if the reclaim candle is weak, or if momentum stalls as soon as it retests the zone.`
-  };
-};
-
-const buildNeutralGuide = (pair: string, vision: VisionAnalysisResult, anchor: AnchoredPriceResult): SetupGuide => {
-  const zoneText = formatZone(anchor.currentPrice - anchor.buffer, anchor.currentPrice + anchor.buffer, pair);
-
-  return {
-    likelyEntryArea: `The chart is balanced, so do not force a directional bias yet. Watch either ${vision.structure.recentLowZone} or ${vision.structure.recentHighZone} for the first clean liquidity sweep, with the current working zone centered around ${zoneText}.`,
-    whyThisArea: `When structure is neutral, the edge is not in predicting direction early. The edge comes after one side of the range is taken and price quickly shows acceptance back inside or continuation beyond that boundary.`,
-    confirmationChecklist: [
-      'Wait for one side of the range to be swept cleanly before considering any entry.',
-      'Look for a strong rejection or reclaim candle rather than overlapping candles with no displacement.',
-      'Only participate if the next candle confirms the reclaim or breakout instead of drifting back into indecision.'
-    ],
-    entryTrigger: 'Enter only after the reclaim or breakout candle closes and the next candle proves the level is holding.',
-    stopGuidance: 'Place the stop beyond the sweep wick on the side that was taken, not in the middle of the range.',
-    watchOut: 'Stand aside if both sides of the range keep getting traded through, if bodies stay small and overlapping, or if there is no clear follow-through after the sweep.'
-  };
-};
-
-const buildSetupGuide = (pair: string, vision: VisionAnalysisResult, anchor: AnchoredPriceResult): SetupGuide => {
-  const teachingBias = getTeachingBias(vision);
-
-  if (teachingBias === 'neutral') {
-    return buildNeutralGuide(pair, vision, anchor);
-  }
-
-  if (vision.entryType === 'breakout') {
-    return buildBreakoutGuide(pair, vision, anchor, teachingBias);
-  }
-
-  return buildSweepGuide(pair, vision, anchor, teachingBias);
-};
-
-export function buildTradeSignal(pair: string, vision: VisionAnalysisResult, anchor: AnchoredPriceResult): TradeSignalResult {
+export function buildTradeSignal(pair: string, filtered: FilteredSignalResult, pricePlan: PriceEngineResult): TradeSignalResult {
   let confidence = 30;
 
-  if (vision.bias !== 'neutral') confidence += 15;
-  if (vision.trendStrength === 'strong') confidence += 25;
-  if (vision.trendStrength === 'moderate') confidence += 15;
-  if (vision.clarity === 'clear') confidence += 20;
-  if (vision.clarity === 'mixed') confidence += 8;
-  if (vision.entryType === 'breakout') confidence += 5;
-  if (vision.entryType === 'pullback') confidence += 8;
-  if (vision.liquidityContext.includes('above') || vision.liquidityContext.includes('below')) confidence += 5;
-  if (anchor.shouldWait) confidence -= 22;
+  if (filtered.bias !== 'neutral') confidence += 12;
+  if (filtered.trendStrength === 'strong') confidence += 18;
+  if (filtered.trendStrength === 'moderate') confidence += 10;
+  if (filtered.clarity === 'clear') confidence += 18;
+  if (filtered.clarity === 'mixed') confidence += 6;
+  if (filtered.entryType === 'pullback') confidence += 5;
+  if (filtered.currentPriceRelation === 'at_zone') confidence += 10;
+  if (filtered.currentPriceRelation === 'near_zone') confidence += 5;
+  if (filtered.signalType === 'instant') confidence += 14;
+  if (filtered.signalType === 'pending') confidence += 6;
+  if (filtered.confirmationNeeded) confidence -= 8;
+  confidence -= filtered.filterFlags.length * 3;
+  if (filtered.signalType === 'wait') confidence -= 20;
 
   confidence = clamp(confidence, 15, 95);
 
-  if (anchor.shouldWait) {
+  if (filtered.signalType === 'wait') {
     confidence = Math.min(confidence, 45);
   }
 
-  const setupGuide = buildSetupGuide(pair, vision, anchor);
+  const setupGuide = buildSetupGuide(pair, filtered, pricePlan);
   const waitConditions = `${setupGuide.likelyEntryArea} ${setupGuide.entryTrigger} ${setupGuide.watchOut}`;
 
-  const reasoning = anchor.shouldWait
-    ? `${vision.structureSummary} Gemini marked the chart as ${vision.clarity}, so the engine keeps the recommendation on wait. No exact prices were generated by AI. Rather than forcing an entry, the system now points to the most likely reaction area, what confirmation should appear there, and how the idea would be invalidated around the supplied current price of ${formatPrice(anchor.currentPrice, pair)}.`
-    : `${vision.structureSummary} Bias is ${vision.bias} with ${vision.trendStrength} trend pressure and ${vision.entryType} conditions. Liquidity is positioned ${vision.liquidityContext}. Entry, stop loss, and targets are anchored mechanically to the supplied current price of ${formatPrice(anchor.currentPrice, pair)} using a ${formatPrice(anchor.range, pair)} working range and ${formatPrice(anchor.buffer, pair)} execution buffer, which avoids image-based fake precision.`;
+  const reasoning =
+    filtered.signalType === 'wait'
+      ? `${filtered.structureSummary} The filtered signal state is WAIT because ${filtered.filterReason.toLowerCase()} No executable prices were forced. The system keeps the focus on ${filtered.entryZone.description.toLowerCase()} and waits for a higher-quality chart location before publishing levels.`
+      : filtered.signalType === 'pending'
+        ? `${filtered.structureSummary} The AI sees a valid idea, but it is still PENDING because ${filtered.filterReason.toLowerCase()} The engine therefore publishes an entry zone instead of pretending the current candle is already an executable fill.`
+        : `${filtered.structureSummary} The setup remains INSTANT because structure, price location, and confirmation are aligned. Entry is allowed at the current price of ${formatPrice(pricePlan.currentPrice, pair)}, with risk and targets derived from the live-price range model rather than fabricated chart-image precision.`;
 
   return {
-    bias: vision.bias,
+    bias: filtered.bias,
     confidence,
-    currentPrice: anchor.currentPrice,
-    entry: anchor.entry,
-    stopLoss: anchor.stopLoss,
-    takeProfits: anchor.takeProfits,
-    riskReward: anchor.riskReward,
-    entryType: vision.entryType,
-    recommendation: anchor.shouldWait ? 'wait' : vision.recommendation,
+    currentPrice: pricePlan.currentPrice,
+    signalType: filtered.signalType,
+    entryZone: pricePlan.entryZone,
+    entry: pricePlan.entry,
+    stopLoss: pricePlan.stopLoss,
+    takeProfits: pricePlan.takeProfits,
+    riskReward: pricePlan.riskReward,
+    entryType: filtered.entryType,
+    recommendation: filtered.recommendation,
     reasoning,
-    trendStrength: vision.trendStrength,
-    structure: vision.structure,
-    structureSummary: vision.structureSummary,
-    liquidityContext: vision.liquidityContext,
-    clarity: vision.clarity,
-    range: anchor.range,
-    buffer: anchor.buffer,
-    priceSource: anchor.priceSource,
+    trendStrength: filtered.trendStrength,
+    structure: filtered.structure,
+    structureSummary: filtered.structureSummary,
+    liquidityContext: filtered.liquidityContext,
+    clarity: filtered.clarity,
+    currentPriceRelation: filtered.currentPriceRelation,
+    aiEntryZone: filtered.entryZone,
+    confirmationNeeded: filtered.confirmationNeeded,
+    confirmationDetails: filtered.confirmationDetails,
+    invalidationHint: filtered.invalidationHint,
+    filterReason: filtered.filterReason,
+    range: pricePlan.range,
+    buffer: pricePlan.buffer,
+    priceSource: pricePlan.priceSource,
+    executionMode: pricePlan.executionMode,
     waitConditions,
     setupGuide,
-    provider: 'gemini-vision+anchor',
+    provider: 'gemini-vision+filter',
   };
 }

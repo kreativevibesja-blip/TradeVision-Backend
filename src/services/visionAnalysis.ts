@@ -7,12 +7,23 @@ export interface VisionStructureZones {
   recentLowZone: string;
 }
 
+export interface VisionEntryZone {
+  label: string;
+  description: string;
+}
+
 export interface VisionAnalysisResult {
   bias: 'bullish' | 'bearish' | 'neutral';
   trendStrength: 'weak' | 'moderate' | 'strong';
   structure: VisionStructureZones;
   structureSummary: string;
   entryType: 'breakout' | 'pullback' | 'reversal';
+  signalType: 'instant' | 'pending' | 'wait';
+  entryZone: VisionEntryZone;
+  currentPriceRelation: 'at_zone' | 'near_zone' | 'far_from_zone';
+  confirmationNeeded: boolean;
+  confirmationDetails: string;
+  invalidationHint: string;
   liquidityContext: string;
   recommendation: 'wait' | 'potential setup forming' | 'setup ready';
   clarity: 'clear' | 'mixed' | 'unclear';
@@ -70,6 +81,32 @@ const normalizeEntryType = (value: unknown): VisionAnalysisResult['entryType'] =
   return 'pullback';
 };
 
+const normalizeSignalType = (value: unknown): VisionAnalysisResult['signalType'] => {
+  if (typeof value !== 'string') {
+    return 'wait';
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'instant' || normalized === 'pending') {
+    return normalized;
+  }
+
+  return 'wait';
+};
+
+const normalizeCurrentPriceRelation = (value: unknown): VisionAnalysisResult['currentPriceRelation'] => {
+  if (typeof value !== 'string') {
+    return 'far_from_zone';
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'at_zone' || normalized === 'near_zone') {
+    return normalized;
+  }
+
+  return 'far_from_zone';
+};
+
 const normalizeRecommendation = (value: unknown): VisionAnalysisResult['recommendation'] => {
   if (typeof value !== 'string') {
     return 'wait';
@@ -98,6 +135,14 @@ const normalizeClarity = (value: unknown): VisionAnalysisResult['clarity'] => {
 
 const normalizeText = (value: unknown, fallback: string) =>
   typeof value === 'string' && value.trim().length > 0 ? value.trim() : fallback;
+
+const normalizeBoolean = (value: unknown, fallback: boolean) => {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  return fallback;
+};
 
 const normalizeGeminiModelName = (modelName: string) => {
   const normalized = modelName.trim();
@@ -175,6 +220,15 @@ Return ONLY valid JSON with this exact schema:
   },
   "structure_summary": "short structural explanation",
   "entry_type": "breakout | pullback | reversal",
+  "signal_type": "instant | pending | wait",
+  "entry_zone": {
+    "label": "short zone name",
+    "description": "text description of the preferred reaction area"
+  },
+  "current_price_relation": "at_zone | near_zone | far_from_zone",
+  "confirmation_needed": true,
+  "confirmation_details": "what must happen before a valid execution",
+  "invalidation_hint": "what would weaken the idea",
   "liquidity_context": "above highs | below lows | balanced",
   "recommendation": "wait | potential setup forming | setup ready",
   "clarity": "clear | mixed | unclear"
@@ -183,6 +237,9 @@ Return ONLY valid JSON with this exact schema:
 Rules:
 - Never output numeric prices or price guesses
 - Describe only structure, positioning, momentum, and liquidity context
+- Use "instant" only if the chart already shows a valid executable setup at the current location
+- Use "pending" when the idea is valid but price still needs to reach the zone or confirm there
+- Use "wait" when the chart is messy, neutral, or does not justify a trade yet
 - If the chart is messy or unclear, set bias to neutral, recommendation to wait, and clarity to unclear
 - No markdown
 - No extra text`;
@@ -202,7 +259,16 @@ Rules:
 
   const parsed = parseJsonObject(result.response.text());
   const clarity = normalizeClarity(parsed.clarity);
-  const recommendation = clarity === 'unclear' ? 'wait' : normalizeRecommendation(parsed.recommendation);
+  const aiSignalType = normalizeSignalType(parsed.signal_type);
+  const signalType = clarity === 'unclear' ? 'wait' : aiSignalType;
+  const recommendation =
+    clarity === 'unclear'
+      ? 'wait'
+      : signalType === 'instant'
+        ? 'setup ready'
+        : signalType === 'pending'
+          ? 'potential setup forming'
+          : normalizeRecommendation(parsed.recommendation);
   const bias = clarity === 'unclear' ? 'neutral' : normalizeBias(parsed.bias);
 
   return {
@@ -217,6 +283,24 @@ Rules:
       'Structure is visible, but the image did not provide enough clarity for a more detailed summary.'
     ),
     entryType: normalizeEntryType(parsed.entry_type),
+    signalType,
+    entryZone: {
+      label: normalizeText((parsed.entry_zone as Record<string, unknown> | undefined)?.label, 'Preferred reaction area'),
+      description: normalizeText(
+        (parsed.entry_zone as Record<string, unknown> | undefined)?.description,
+        'Wait for price to return to the most meaningful reaction area before planning execution.'
+      ),
+    },
+    currentPriceRelation: clarity === 'unclear' ? 'far_from_zone' : normalizeCurrentPriceRelation(parsed.current_price_relation),
+    confirmationNeeded: clarity === 'unclear' ? true : normalizeBoolean(parsed.confirmation_needed, true),
+    confirmationDetails: normalizeText(
+      parsed.confirmation_details,
+      'Wait for a clear reaction candle and follow-through before considering any entry.'
+    ),
+    invalidationHint: normalizeText(
+      parsed.invalidation_hint,
+      'The setup weakens if price loses the reaction area or chops through it without follow-through.'
+    ),
     liquidityContext: normalizeText(parsed.liquidity_context, 'balanced'),
     recommendation,
     clarity,
