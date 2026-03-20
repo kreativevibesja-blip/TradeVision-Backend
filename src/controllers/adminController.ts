@@ -250,6 +250,15 @@ export const getPricingPlans = async (_req: Request, res: Response) => {
   }
 };
 
+export const getPublicPricingPlans = async (_req: Request, res: Response) => {
+  try {
+    const plans = await listPricingPlans();
+    return res.json({ plans: plans.filter((plan) => plan.isActive) });
+  } catch (error) {
+    return res.status(500).json({ error: 'Failed to get pricing plans' });
+  }
+};
+
 export const updatePricingPlan = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
