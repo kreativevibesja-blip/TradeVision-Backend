@@ -1,8 +1,6 @@
 import { incrementUserDailyUsage, updateAnalysis } from '../../lib/supabase';
 import { analyzeVisionStructure } from '../visionAnalysis';
-import { buildPricePlan } from '../priceEngine';
-import { filterTradeSignal } from '../signalFilter';
-import { buildTradeSignal } from '../signalEngine';
+import { generateFinalSignal } from '../signalEngine';
 import type { SubscriptionTier } from '../../lib/supabase';
 
 interface RunAnalysisPipelineInput {
@@ -29,38 +27,37 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
 
     await updateAnalysis(analysisId, {
       progress: 45,
-      currentStage: 'Filtering signal quality...',
+      currentStage: 'Interpreting SMC structure...',
       layer1Output: vision,
     });
 
-    const filteredSignal = filterTradeSignal(vision);
-
     await updateAnalysis(analysisId, {
       progress: 75,
-      currentStage: 'Building execution plan...',
-      layer2Output: filteredSignal,
+      currentStage: 'Validating entry conditions...',
+      layer2Output: vision,
     });
 
-    const pricePlan = buildPricePlan(currentPrice, pair, filteredSignal);
-    const signal = buildTradeSignal(pair, filteredSignal, pricePlan);
+    const signal = generateFinalSignal(vision, currentPrice);
+
+    const bias = signal.trend === 'bullish' ? 'BULLISH' : signal.trend === 'bearish' ? 'BEARISH' : 'NEUTRAL';
 
     const analysis = await updateAnalysis(analysisId, {
       status: 'COMPLETED',
       progress: 100,
-      currentStage: 'Finalizing trade plan...',
-      bias: signal.bias.toUpperCase(),
-      entry: signal.entry,
-      stopLoss: signal.stopLoss,
-      tp1: signal.takeProfits[0] ?? null,
-      tp2: signal.takeProfits[1] ?? null,
-      takeProfits: signal.takeProfits,
+      currentStage: 'Preparing final SMC signal...',
+      bias,
+      entry: null,
+      stopLoss: null,
+      tp1: null,
+      tp2: null,
+      takeProfits: [],
       confidence: signal.confidence,
       explanation: signal.reasoning,
       analysisText: signal.reasoning,
       rawResponse: signal,
       structure: signal.structure,
-      strategy: `${signal.bias.toUpperCase()} ${signal.signalType.toUpperCase()} ${signal.entryType.toUpperCase()} setup`,
-      waitConditions: signal.waitConditions,
+      strategy: `${signal.trend.toUpperCase()} ${signal.entryLogic.type.toUpperCase()} SMC setup`,
+      waitConditions: signal.message,
       errorMessage: null,
     });
 
