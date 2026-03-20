@@ -2,8 +2,10 @@ import { Request, Response } from 'express';
 import {
   countAnalyses,
   countUsers,
+  createPricingPlan as createPricingPlanRecord,
   deleteAnnouncementRecord,
   deleteAnnouncementRecords,
+  deletePricingPlan as deletePricingPlanRecord,
   getAnalyticsBuckets,
   getCompletedRevenue,
   listAllAnalysesPage,
@@ -251,9 +253,11 @@ export const getPricingPlans = async (_req: Request, res: Response) => {
 export const updatePricingPlan = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { price, features, dailyLimit, isActive } = req.body;
+    const { name, tier, price, features, dailyLimit, isActive } = req.body;
 
     const plan = await updatePricingPlanRecord(id, {
+      ...(name ? { name } : {}),
+      ...(tier ? { tier } : {}),
       ...(price !== undefined ? { price } : {}),
       ...(features ? { features } : {}),
       ...(dailyLimit !== undefined ? { dailyLimit } : {}),
@@ -263,6 +267,34 @@ export const updatePricingPlan = async (req: Request, res: Response) => {
     return res.json({ plan });
   } catch (error) {
     return res.status(500).json({ error: 'Failed to update pricing plan' });
+  }
+};
+
+export const createPricingPlan = async (req: Request, res: Response) => {
+  try {
+    const { name, tier, price, features, dailyLimit, isActive } = req.body;
+
+    const plan = await createPricingPlanRecord({
+      name,
+      tier,
+      price,
+      features: Array.isArray(features) ? features : [],
+      dailyLimit,
+      isActive: typeof isActive === 'boolean' ? isActive : true,
+    });
+
+    return res.status(201).json({ plan });
+  } catch (error) {
+    return res.status(500).json({ error: 'Failed to create pricing plan' });
+  }
+};
+
+export const deletePricingPlan = async (req: Request, res: Response) => {
+  try {
+    await deletePricingPlanRecord(req.params.id);
+    return res.json({ success: true });
+  } catch (error) {
+    return res.status(500).json({ error: 'Failed to delete pricing plan' });
   }
 };
 

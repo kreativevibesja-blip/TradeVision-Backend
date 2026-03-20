@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { authenticate, requireAdmin } from '../middleware/auth';
 import {
+  createPricingPlan,
   getDashboardStats,
   getUsers,
   updateUser,
@@ -9,6 +10,7 @@ import {
   getAnalytics,
   getPricingPlans,
   updatePricingPlan,
+  deletePricingPlan,
   getSystemSettings,
   updateSystemSetting,
   getAnnouncements,
@@ -31,7 +33,9 @@ router.get('/analyses', getAnalysisLogs);
 router.get('/payments', getPayments);
 router.get('/analytics', getAnalytics);
 router.get('/pricing-plans', getPricingPlans);
+router.post('/pricing-plans', createPricingPlan);
 router.patch('/pricing-plans/:id', updatePricingPlan);
+router.delete('/pricing-plans/:id', deletePricingPlan);
 router.get('/settings', getSystemSettings);
 router.post('/settings', updateSystemSetting);
 router.get('/announcements', getAnnouncements);

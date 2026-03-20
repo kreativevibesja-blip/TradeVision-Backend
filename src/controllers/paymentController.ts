@@ -3,7 +3,7 @@ import { AuthRequest } from '../middleware/auth';
 import { createOrder, captureOrder, generateClientToken } from '../services/paypalService';
 import {
   createPaymentRecord,
-  getPricingPlanByTier,
+  getPricingPlanByTierWithFallback,
   listPaymentsForUserId,
   updatePaymentByOrderId,
 } from '../lib/supabase';
@@ -16,7 +16,7 @@ export const createPayment = async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: 'Invalid plan' });
     }
 
-    const pricing = await getPricingPlanByTier(plan);
+    const pricing = await getPricingPlanByTierWithFallback(plan);
     const amount = pricing ? pricing.price.toString() : '19.00';
     const planName = pricing ? pricing.name : 'Pro';
 

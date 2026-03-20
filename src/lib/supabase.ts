@@ -94,6 +94,25 @@ export interface PricingPlanRecord {
   updatedAt: string;
 }
 
+const DEFAULT_PRICING_PLANS: Array<Pick<PricingPlanRecord, 'name' | 'tier' | 'price' | 'features' | 'dailyLimit' | 'isActive'>> = [
+  {
+    name: 'TradeVision AI Free',
+    tier: 'FREE',
+    price: 0,
+    features: ['2 analyses per day', 'Basic AI detection', 'Standard processing'],
+    dailyLimit: 2,
+    isActive: true,
+  },
+  {
+    name: 'TradeVision AI Pro',
+    tier: 'PRO',
+    price: 19,
+    features: ['Unlimited daily analyses', 'Advanced Smart Money Concepts', 'Priority AI processing'],
+    dailyLimit: 999999,
+    isActive: true,
+  },
+];
+
 export interface SystemSettingRecord {
   id: string;
   key: string;
@@ -166,6 +185,13 @@ const updateSingle = async <T>(context: string, table: string, values: Record<st
 
 const insertSingle = async <T>(context: string, table: string, values: Record<string, unknown>): Promise<T> => {
   return single<T>(context, supabase.from(table).insert(values).select('*').maybeSingle());
+};
+
+const deleteSingle = async (context: string, table: string, apply: (query: any) => any) => {
+  const { error } = await apply(supabase.from(table).delete());
+  if (error) {
+    logDbError(context, error);
+  }
 };
 
 const normalizeSearch = (search: string) => search.replace(/[,]/g, ' ').trim();
@@ -325,11 +351,42 @@ export const listAllAnalysesPage = async (page: number, limit: number) => {
 export const getPricingPlanByTier = (tier: SubscriptionTier) =>
   maybeSingle<PricingPlanRecord>('getPricingPlanByTier', supabase.from(PRICING_PLAN_TABLE).select('*').eq('tier', tier).maybeSingle());
 
-export const listPricingPlans = () =>
-  many<PricingPlanRecord>('listPricingPlans', supabase.from(PRICING_PLAN_TABLE).select('*').order('price', { ascending: true }));
+const seedDefaultPricingPlans = async () => {
+  const { data, error } = await supabase.from(PRICING_PLAN_TABLE).insert(DEFAULT_PRICING_PLANS).select('*');
+  if (error) {
+    logDbError('seedDefaultPricingPlans', error);
+  }
+
+  return (data as PricingPlanRecord[]) ?? [];
+};
+
+export const listPricingPlans = async () => {
+  const plans = await many<PricingPlanRecord>('listPricingPlans', supabase.from(PRICING_PLAN_TABLE).select('*').order('price', { ascending: true }));
+  if (plans.length > 0) {
+    return plans;
+  }
+
+  return seedDefaultPricingPlans();
+};
+
+export const getPricingPlanByTierWithFallback = async (tier: SubscriptionTier) => {
+  const directMatch = await getPricingPlanByTier(tier);
+  if (directMatch) {
+    return directMatch;
+  }
+
+  const seededPlans = await listPricingPlans();
+  return seededPlans.find((plan) => plan.tier === tier) ?? null;
+};
 
 export const updatePricingPlan = (id: string, values: Partial<PricingPlanRecord>) =>
   updateSingle<PricingPlanRecord>('updatePricingPlan', PRICING_PLAN_TABLE, values, (query) => query.eq('id', id));
+
+export const createPricingPlan = (values: Pick<PricingPlanRecord, 'name' | 'tier' | 'price' | 'features' | 'dailyLimit' | 'isActive'>) =>
+  insertSingle<PricingPlanRecord>('createPricingPlan', PRICING_PLAN_TABLE, values);
+
+export const deletePricingPlan = (id: string) =>
+  deleteSingle('deletePricingPlan', PRICING_PLAN_TABLE, (query) => query.eq('id', id));
 
 export const createPaymentRecord = (values: Partial<PaymentRecord> & Pick<PaymentRecord, 'userId' | 'paypalOrderId' | 'amount' | 'status' | 'plan'>) =>
   insertSingle<PaymentRecord>('createPaymentRecord', PAYMENT_TABLE, { currency: 'USD', ...values });
