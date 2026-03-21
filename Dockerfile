@@ -8,7 +8,7 @@ RUN npm run build
 
 FROM node:20-bookworm-slim
 WORKDIR /app
-RUN apt-get update && apt-get install -y openssl ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y openssl ca-certificates fontconfig fonts-dejavu-core && rm -rf /var/lib/apt/lists/* && fc-cache -fv
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./
