@@ -9,6 +9,15 @@ interface TicketReplyEmail {
   message: string;
 }
 
+const normalizeMailbox = (value: string) =>
+  value
+    .trim()
+    .replace(/^['"\u201c\u201d\u2018\u2019]+|['"\u201c\u201d\u2018\u2019]+$/g, '')
+    .replace(/\s+/g, ' ');
+
+const isValidMailbox = (value: string) =>
+  /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(value) || /^.+\s<[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+>$/.test(value);
+
 class EmailDeliveryError extends Error {
   constructor(message: string, readonly code?: string) {
     super(message);
@@ -23,6 +32,16 @@ export async function sendTicketReplyEmail({ to, name, ticketNumber, subject, me
   }
 
   const resend = new Resend(config.email.resendApiKey);
+  const from = normalizeMailbox(config.email.from);
+  const replyTo = normalizeMailbox(config.email.replyTo);
+
+  if (!isValidMailbox(from)) {
+    throw new EmailDeliveryError('EMAIL_FROM is invalid. Use help@mytradevision.online or MyTradeVision Support <help@mytradevision.online>.', 'INVALID_EMAIL_FROM');
+  }
+
+  if (!isValidMailbox(replyTo)) {
+    throw new EmailDeliveryError('EMAIL_REPLY_TO is invalid. Use help@mytradevision.online.', 'INVALID_EMAIL_REPLY_TO');
+  }
 
   const escapedMessage = message
     .replace(/&/g, '&amp;')
@@ -32,8 +51,8 @@ export async function sendTicketReplyEmail({ to, name, ticketNumber, subject, me
 
   try {
     const response = await resend.emails.send({
-      from: config.email.from,
-      replyTo: config.email.replyTo,
+      from,
+      replyTo,
       to,
       subject: `Re: ${ticketNumber} — ${subject}`,
       html: `
