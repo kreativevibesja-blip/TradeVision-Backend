@@ -1,39 +1,7 @@
-import nodemailer from 'nodemailer';
-import SMTPTransport from 'nodemailer/lib/smtp-transport';
-import { promises as dns } from 'dns';
+import { Resend } from 'resend';
 import { config } from '../config';
 
-const resolveTransportOptions = async (): Promise<SMTPTransport.Options> => {
-  let transportHost = config.email.host;
-
-  if (config.email.forceIPv4) {
-    try {
-      const resolved = await dns.lookup(config.email.host, { family: 4 });
-      transportHost = resolved.address;
-    } catch (error) {
-      console.warn('[email] IPv4 lookup failed, falling back to hostname:', config.email.host, error);
-    }
-  }
-
-  return {
-    host: transportHost,
-    port: config.email.port,
-    secure: config.email.secure,
-    name: 'mytradevision.online',
-    connectionTimeout: config.email.connectionTimeout,
-    greetingTimeout: config.email.greetingTimeout,
-    socketTimeout: config.email.socketTimeout,
-    requireTLS: !config.email.secure,
-    tls: {
-      servername: config.email.host,
-      minVersion: 'TLSv1.2',
-    },
-    auth: {
-      user: config.email.user,
-      pass: config.email.pass,
-    },
-  };
-};
+const resend = new Resend(config.email.resendApiKey);
 
 interface TicketReplyEmail {
   to: string;
@@ -51,8 +19,8 @@ class EmailDeliveryError extends Error {
 }
 
 export async function sendTicketReplyEmail({ to, name, ticketNumber, subject, message }: TicketReplyEmail): Promise<{ success: boolean }> {
-  if (!config.email.user || !config.email.pass) {
-    console.warn('Email not configured — skipping send.');
+  if (!config.email.resendApiKey) {
+    console.warn('Resend is not configured — skipping send.');
     throw new EmailDeliveryError('Email is not configured on the server.', 'EMAIL_NOT_CONFIGURED');
   }
 
@@ -63,9 +31,7 @@ export async function sendTicketReplyEmail({ to, name, ticketNumber, subject, me
     .replace(/\n/g, '<br/>');
 
   try {
-    const transporter = nodemailer.createTransport(await resolveTransportOptions());
-
-    await transporter.sendMail({
+    const response = await resend.emails.send({
       from: config.email.from,
       replyTo: config.email.replyTo,
       to,
@@ -107,28 +73,18 @@ export async function sendTicketReplyEmail({ to, name, ticketNumber, subject, me
         </div>
       `,
     });
+
+    if (response.error) {
+      throw new EmailDeliveryError(response.error.message || 'Resend failed to send the email.', 'RESEND_ERROR');
+    }
   } catch (error: any) {
     const code = typeof error?.code === 'string' ? error.code : undefined;
 
-    if (code === 'ETIMEDOUT') {
-      throw new EmailDeliveryError(
-        'SMTP connection timed out. Your hosting provider is likely blocking outbound SMTP on ports 465/587, or Gmail is unreachable from the container.',
-        code
-      );
+    if (error instanceof EmailDeliveryError) {
+      throw error;
     }
 
-    if (code === 'ESOCKET' && /ENETUNREACH/i.test(error?.message || '')) {
-      throw new EmailDeliveryError(
-        'SMTP tried to use an unreachable network route. The server cannot reach Gmail over IPv6, so the app now forces IPv4. Redeploy with EMAIL_FORCE_IPV4=true.',
-        code
-      );
-    }
-
-    if (code === 'EAUTH') {
-      throw new EmailDeliveryError('SMTP authentication failed. Check EMAIL_USER, EMAIL_PASS, Gmail App Password, and Send As configuration.', code);
-    }
-
-    throw new EmailDeliveryError(error?.message || 'Failed to send email.', code);
+    throw new EmailDeliveryError(error?.message || 'Failed to send email through Resend.', code);
   }
 
   return { success: true };
