@@ -74,6 +74,13 @@ export const config = {
     user: process.env.EMAIL_USER || '',
     pass: process.env.EMAIL_PASS || '',
     from: process.env.EMAIL_FROM || 'MyTradeVision Support <help@mytradevision.online>',
+    replyTo: process.env.EMAIL_REPLY_TO || 'help@mytradevision.online',
+    host: process.env.EMAIL_HOST || 'smtp.gmail.com',
+    port: parseInt(process.env.EMAIL_PORT || '465', 10),
+    secure: (process.env.EMAIL_SECURE || 'true').toLowerCase() !== 'false',
+    connectionTimeout: parseInt(process.env.EMAIL_CONNECTION_TIMEOUT || '15000', 10),
+    greetingTimeout: parseInt(process.env.EMAIL_GREETING_TIMEOUT || '10000', 10),
+    socketTimeout: parseInt(process.env.EMAIL_SOCKET_TIMEOUT || '20000', 10),
   },
   
   limits: {

@@ -13,7 +13,7 @@ import {
   type TicketPriority,
   type TicketStatus,
 } from '../lib/supabase';
-import { sendTicketReplyEmail } from '../services/emailService';
+import { EmailDeliveryError, sendTicketReplyEmail } from '../services/emailService';
 
 const TICKET_CATEGORIES: TicketCategory[] = ['ACCOUNT', 'BILLING', 'ANALYSIS', 'BUG', 'FEATURE', 'GENERAL'];
 const TICKET_PRIORITIES: TicketPriority[] = ['LOW', 'MEDIUM', 'HIGH', 'URGENT'];
@@ -192,10 +192,6 @@ export const replyToTicket = async (req: AuthRequest, res: Response) => {
       message,
     });
 
-    if (!emailResult.success) {
-      return res.status(500).json({ error: 'Failed to send email. Check email configuration.' });
-    }
-
     const updated = await updateTicketRecord(ticket.id, {
       adminResponse: message,
       respondedAt: new Date().toISOString(),
@@ -205,6 +201,9 @@ export const replyToTicket = async (req: AuthRequest, res: Response) => {
     return res.json({ ticket: mapTicket(updated), emailSent: true });
   } catch (error) {
     console.error('Reply to ticket error:', error);
+    if (error instanceof EmailDeliveryError) {
+      return res.status(502).json({ error: error.message });
+    }
     return res.status(500).json({ error: 'Failed to send reply' });
   }
 };
