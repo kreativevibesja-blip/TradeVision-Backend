@@ -15,20 +15,25 @@ export const app = express();
 app.set('trust proxy', 1);
 
 const allowedOrigins = new Set(config.frontend.urls);
-const previewDomain = config.frontend.previewDomain;
+const previewDomains = config.frontend.previewDomains;
 
 const isAllowedOrigin = (origin: string) => {
   if (allowedOrigins.has(origin)) {
     return true;
   }
 
-  if (!previewDomain) {
+  if (!previewDomains.length) {
     return false;
   }
 
   try {
     const { hostname, protocol } = new URL(origin);
-    return protocol === 'https:' && hostname.endsWith(`.${previewDomain}`);
+    if (protocol !== 'https:') {
+      return false;
+    }
+
+    const normalizedHostname = hostname.toLowerCase();
+    return previewDomains.some((domain) => normalizedHostname === domain || normalizedHostname.endsWith(`.${domain}`));
   } catch {
     return false;
   }

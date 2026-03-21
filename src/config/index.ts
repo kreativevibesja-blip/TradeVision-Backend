@@ -11,21 +11,30 @@ const frontendUrls = (process.env.FRONTEND_URLS || process.env.FRONTEND_URL || '
   .map((url) => url.trim())
   .filter(Boolean);
 
-const inferPreviewDomain = () => {
-  const configured = process.env.FRONTEND_PREVIEW_DOMAIN?.trim().toLowerCase();
-  if (configured) {
-    return configured;
+const normalizeHostOrDomain = (value: string) => {
+  const trimmed = value.trim().toLowerCase();
+  if (!trimmed) {
+    return '';
   }
 
-  const vercelOrigin = frontendUrls.find((url) => /vercel\.app/i.test(url));
-  if (vercelOrigin) {
-    return 'vercel.app';
+  try {
+    return new URL(trimmed).hostname.toLowerCase();
+  } catch {
+    return trimmed.replace(/^https?:\/\//, '').replace(/^\./, '').replace(/\/.*$/, '');
   }
-
-  return '';
 };
 
-const frontendPreviewDomain = inferPreviewDomain();
+const configuredPreviewDomains = (process.env.FRONTEND_PREVIEW_DOMAIN || '')
+  .split(',')
+  .map(normalizeHostOrDomain)
+  .filter(Boolean);
+
+const inferredPreviewDomains = frontendUrls
+  .map(normalizeHostOrDomain)
+  .filter((value) => value === 'vercel.app' || value.endsWith('.vercel.app'))
+  .map(() => 'vercel.app');
+
+const frontendPreviewDomains = Array.from(new Set([...configuredPreviewDomains, ...inferredPreviewDomains]));
 
 export const config = {
   port: parseInt(process.env.PORT || '4000', 10),
@@ -62,7 +71,7 @@ export const config = {
   frontend: {
     url: frontendUrls[0] || 'http://localhost:3000',
     urls: frontendUrls,
-    previewDomain: frontendPreviewDomain,
+    previewDomains: frontendPreviewDomains,
   },
   
   upload: {
