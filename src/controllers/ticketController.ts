@@ -32,6 +32,16 @@ const mapTicket = (ticket: Awaited<ReturnType<typeof createTicketRecord>>) => ({
   canReplyByEmail: Boolean(ticket.userEmail),
 });
 
+export const getOpenTicketCount = async (_req: AuthRequest, res: Response) => {
+  try {
+    const count = await countOpenTickets();
+    return res.json({ count });
+  } catch (error) {
+    console.error('Get open ticket count error:', error);
+    return res.status(500).json({ error: 'Failed to count tickets' });
+  }
+};
+
 export const createTicket = async (req: AuthRequest, res: Response) => {
   try {
     const subject = normalizeText(req.body.subject);
