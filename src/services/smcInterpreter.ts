@@ -1,67 +1,57 @@
-import type { SMCZone, VisionAnalysisResult } from './visionAnalysis';
+import type { VisionAnalysisResult } from './visionAnalysis';
 
 export interface InterpretedSMCResult extends VisionAnalysisResult {
-  entryZone: SMCZone | null;
-  confirmation: VisionAnalysisResult['entryLogic']['confirmationType'];
-  reason?: string;
+  recommendation: 'wait' | 'pending' | 'instant';
+  signalType: 'wait' | 'pending' | 'instant';
+  confirmationNeeded: boolean;
+  message: string;
 }
 
-export function interpretSMC(aiData: VisionAnalysisResult, currentPrice: number): InterpretedSMCResult {
-  const {
-    trend,
-    structure,
-    liquidity,
-    zones,
-    entryLogic,
-    setupQuality,
-    signalType,
-  } = aiData;
+export function interpretSMC(aiData: VisionAnalysisResult): InterpretedSMCResult {
+  const structureUnclear = aiData.structure.state === 'transition';
+  const inEquilibrium = aiData.pricePosition.location === 'equilibrium';
+  const noBias = aiData.entryPlan.bias === 'none';
+  const noEntry = aiData.entryPlan.entryType === 'none';
+  const lowQuality = aiData.quality.setupRating === 'avoid';
+  const waitingAction = aiData.finalVerdict.action === 'wait';
+  const avoidAction = aiData.finalVerdict.action === 'avoid';
+  const confirmationNeeded = aiData.entryPlan.entryType === 'confirmation';
 
-  if (setupQuality === 'low') {
+  if (lowQuality || structureUnclear || avoidAction) {
     return {
       ...aiData,
+      recommendation: 'wait',
       signalType: 'wait',
-      entryZone: null,
-      confirmation: 'none',
-      reason: 'Low quality structure',
+      confirmationNeeded: false,
+      message: aiData.finalVerdict.message,
     };
   }
 
-  if (trend === 'ranging' || signalType === 'wait' || entryLogic.type === 'none') {
+  if (inEquilibrium || noBias || noEntry || waitingAction) {
     return {
       ...aiData,
+      recommendation: 'wait',
       signalType: 'wait',
-      entryZone: null,
-      confirmation: 'none',
-      reason: 'No clean SMC structure yet',
+      confirmationNeeded,
+      message: aiData.finalVerdict.message,
     };
   }
 
-  if (entryLogic.type === 'reversal' && liquidity.sweep === 'none') {
+  if (confirmationNeeded) {
     return {
       ...aiData,
-      signalType: 'wait',
-      entryZone: null,
-      confirmation: 'none',
-      reason: 'No liquidity sweep detected',
-    };
-  }
-
-  if (entryLogic.confirmationRequired) {
-    return {
-      ...aiData,
+      recommendation: 'pending',
       signalType: 'pending',
-      entryZone: entryLogic.entryZone,
-      confirmation: entryLogic.confirmationType,
-      reason: 'Confirmation required before entry',
+      confirmationNeeded: true,
+      message: aiData.finalVerdict.message,
     };
   }
 
   return {
     ...aiData,
-    signalType,
-    entryZone: entryLogic.entryZone,
-    confirmation: entryLogic.confirmationType,
-    reason: 'SMC structure is aligned',
+    recommendation: 'instant',
+    signalType: 'instant',
+    confirmationNeeded: false,
+    message: aiData.finalVerdict.message,
   };
 }

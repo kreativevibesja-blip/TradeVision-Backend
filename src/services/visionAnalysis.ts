@@ -7,26 +7,52 @@ export interface SMCZone {
   max: number | null;
 }
 
+export interface SMCQualifiedZone extends SMCZone {
+  reason: 'order block' | 'imbalance' | 'previous structure';
+}
+
 export interface SMCStructure {
+  state: 'higher highs' | 'lower lows' | 'transition';
   bos: 'bullish' | 'bearish' | 'none';
   choch: 'bullish' | 'bearish' | 'none';
 }
 
 export interface SMCLiquidity {
-  sweep: 'above highs' | 'below lows' | 'none';
-  liquidityZones: string[];
+  type: 'buy-side' | 'sell-side' | 'none';
+  description: string;
 }
 
 export interface SMCZones {
-  supplyZone: SMCZone | null;
-  demandZone: SMCZone | null;
+  supply: SMCQualifiedZone | null;
+  demand: SMCQualifiedZone | null;
 }
 
-export interface SMCEntryLogic {
-  type: 'reversal' | 'continuation' | 'none';
+export interface SMCPricePosition {
+  location: 'premium' | 'discount' | 'equilibrium';
+  explanation: string;
+}
+
+export interface SMCEntryPlan {
+  bias: 'buy' | 'sell' | 'none';
+  entryType: 'instant' | 'confirmation' | 'none';
   entryZone: SMCZone | null;
-  confirmationRequired: boolean;
-  confirmationType: 'bos' | 'choch' | 'rejection' | 'none';
+  confirmation: 'CHoCH' | 'BOS' | 'rejection' | 'none';
+  reason: string;
+}
+
+export interface SMCRiskManagement {
+  invalidationLevel: number | null;
+  invalidationReason: string;
+}
+
+export interface SMCQuality {
+  setupRating: 'A' | 'B' | 'C' | 'avoid';
+  confidence: number;
+}
+
+export interface SMCFinalVerdict {
+  action: 'enter' | 'wait' | 'avoid';
+  message: string;
 }
 
 export interface VisionAnalysisResult {
@@ -34,10 +60,11 @@ export interface VisionAnalysisResult {
   structure: SMCStructure;
   liquidity: SMCLiquidity;
   zones: SMCZones;
-  currentPricePosition: 'premium' | 'discount' | 'equilibrium';
-  entryLogic: SMCEntryLogic;
-  setupQuality: 'high' | 'medium' | 'low';
-  signalType: 'instant' | 'pending' | 'wait';
+  pricePosition: SMCPricePosition;
+  entryPlan: SMCEntryPlan;
+  riskManagement: SMCRiskManagement;
+  quality: SMCQuality;
+  finalVerdict: SMCFinalVerdict;
   reasoning: string;
 }
 
@@ -54,6 +81,9 @@ const parseJsonObject = (value: string) => {
   return JSON.parse(fenced.slice(start, end + 1)) as Record<string, unknown>;
 };
 
+const normalizeText = (value: unknown, fallback: string) =>
+  typeof value === 'string' && value.trim().length > 0 ? value.trim() : fallback;
+
 const normalizeTrend = (value: unknown): VisionAnalysisResult['trend'] => {
   if (typeof value !== 'string') {
     return 'ranging';
@@ -65,6 +95,19 @@ const normalizeTrend = (value: unknown): VisionAnalysisResult['trend'] => {
   }
 
   return 'ranging';
+};
+
+const normalizeStructureState = (value: unknown): SMCStructure['state'] => {
+  if (typeof value !== 'string') {
+    return 'transition';
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'higher highs' || normalized === 'lower lows') {
+    return normalized;
+  }
+
+  return 'transition';
 };
 
 const normalizeBosOrChoch = (value: unknown): SMCStructure['bos'] => {
@@ -80,33 +123,33 @@ const normalizeBosOrChoch = (value: unknown): SMCStructure['bos'] => {
   return 'none';
 };
 
-const normalizeSweep = (value: unknown): SMCLiquidity['sweep'] => {
+const normalizeLiquidityType = (value: unknown): SMCLiquidity['type'] => {
   if (typeof value !== 'string') {
     return 'none';
   }
 
   const normalized = value.trim().toLowerCase();
-  if (normalized === 'above highs' || normalized === 'below lows') {
+  if (normalized === 'buy-side' || normalized === 'sell-side') {
     return normalized;
   }
 
   return 'none';
 };
 
-const normalizeSignalType = (value: unknown): VisionAnalysisResult['signalType'] => {
+const normalizeReason = (value: unknown): SMCQualifiedZone['reason'] => {
   if (typeof value !== 'string') {
-    return 'wait';
+    return 'previous structure';
   }
 
   const normalized = value.trim().toLowerCase();
-  if (normalized === 'instant' || normalized === 'pending') {
+  if (normalized === 'order block' || normalized === 'imbalance') {
     return normalized;
   }
 
-  return 'wait';
+  return 'previous structure';
 };
 
-const normalizeCurrentPricePosition = (value: unknown): VisionAnalysisResult['currentPricePosition'] => {
+const normalizePriceLocation = (value: unknown): SMCPricePosition['location'] => {
   if (typeof value !== 'string') {
     return 'equilibrium';
   }
@@ -119,62 +162,75 @@ const normalizeCurrentPricePosition = (value: unknown): VisionAnalysisResult['cu
   return 'equilibrium';
 };
 
-const normalizeEntryType = (value: unknown): VisionAnalysisResult['entryLogic']['type'] => {
+const normalizeBias = (value: unknown): SMCEntryPlan['bias'] => {
   if (typeof value !== 'string') {
     return 'none';
   }
 
   const normalized = value.trim().toLowerCase();
-  if (normalized === 'reversal' || normalized === 'continuation') {
+  if (normalized === 'buy' || normalized === 'sell') {
     return normalized;
   }
 
   return 'none';
 };
 
-const normalizeConfirmationType = (value: unknown): VisionAnalysisResult['entryLogic']['confirmationType'] => {
+const normalizeEntryType = (value: unknown): SMCEntryPlan['entryType'] => {
   if (typeof value !== 'string') {
     return 'none';
   }
 
   const normalized = value.trim().toLowerCase();
-  if (normalized === 'bos' || normalized === 'choch' || normalized === 'rejection') {
+  if (normalized === 'instant' || normalized === 'confirmation') {
     return normalized;
   }
 
   return 'none';
 };
 
-const normalizeText = (value: unknown, fallback: string) =>
-  typeof value === 'string' && value.trim().length > 0 ? value.trim() : fallback;
-
-const normalizeBoolean = (value: unknown, fallback: boolean) => {
-  if (typeof value === 'boolean') {
-    return value;
-  }
-
-  return fallback;
-};
-
-const normalizeSetupQuality = (value: unknown): VisionAnalysisResult['setupQuality'] => {
+const normalizeConfirmation = (value: unknown): SMCEntryPlan['confirmation'] => {
   if (typeof value !== 'string') {
-    return 'low';
+    return 'none';
   }
 
   const normalized = value.trim().toLowerCase();
-  if (normalized === 'high' || normalized === 'medium') {
+  if (normalized === 'choch') {
+    return 'CHoCH';
+  }
+  if (normalized === 'bos') {
+    return 'BOS';
+  }
+  if (normalized === 'rejection') {
+    return 'rejection';
+  }
+
+  return 'none';
+};
+
+const normalizeSetupRating = (value: unknown): SMCQuality['setupRating'] => {
+  if (typeof value !== 'string') {
+    return 'avoid';
+  }
+
+  const normalized = value.trim().toUpperCase();
+  if (normalized === 'A' || normalized === 'B' || normalized === 'C') {
     return normalized;
   }
 
-  return 'low';
+  return 'avoid';
 };
 
-const normalizeStringArray = (value: unknown): string[] => {
-  if (!Array.isArray(value)) {
-    return [];
+const normalizeFinalAction = (value: unknown): SMCFinalVerdict['action'] => {
+  if (typeof value !== 'string') {
+    return 'wait';
   }
 
-  return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim());
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'enter' || normalized === 'avoid') {
+    return normalized;
+  }
+
+  return 'wait';
 };
 
 const normalizeNumeric = (value: unknown): number | null => {
@@ -192,6 +248,15 @@ const normalizeNumeric = (value: unknown): number | null => {
   return null;
 };
 
+const normalizeConfidence = (value: unknown) => {
+  const numeric = normalizeNumeric(value);
+  if (numeric === null) {
+    return 35;
+  }
+
+  return Math.min(100, Math.max(1, Math.round(numeric)));
+};
+
 const normalizeZone = (value: unknown): SMCZone | null => {
   if (!value || typeof value !== 'object') {
     return null;
@@ -206,6 +271,24 @@ const normalizeZone = (value: unknown): SMCZone | null => {
   }
 
   return min <= max ? { min, max } : { min: max, max: min };
+};
+
+const normalizeQualifiedZone = (value: unknown): SMCQualifiedZone | null => {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const zone = normalizeZone(record);
+
+  if (!zone) {
+    return null;
+  }
+
+  return {
+    ...zone,
+    reason: normalizeReason(record.reason),
+  };
 };
 
 const normalizeGeminiModelName = (modelName: string) => {
@@ -267,48 +350,128 @@ export async function analyzeVisionStructure(
   const primaryModel = getGeminiModelForSubscription(subscription);
   const fallbackModel = normalizeGeminiModelName(config.gemini.freeModel);
 
-  const prompt = `Analyze this trading chart using Smart Money Concepts (SMC).
+  const prompt = `You are an institutional-level Smart Money Concepts (SMC) trading analyst.
+
+Your job is to analyze the provided chart like a professional trader, not a signal generator.
+
+You MUST think in terms of:
+- Market structure
+- Liquidity
+- Order flow
+- Premium vs Discount
+- Confirmation-based entries
 
 Trading pair/index: ${pair}
 Timeframe: ${timeframe}
 
-Return ONLY valid JSON with this exact schema:
+========================================
+OUTPUT FORMAT (STRICT JSON ONLY)
+========================================
+
 {
   "trend": "bullish | bearish | ranging",
   "structure": {
+    "state": "higher highs | lower lows | transition",
     "bos": "bullish | bearish | none",
     "choch": "bullish | bearish | none"
   },
   "liquidity": {
-    "sweep": "above highs | below lows | none",
-    "liquidity_zones": ["string description"]
+    "type": "buy-side | sell-side | none",
+    "description": "Where liquidity was taken and how price reacted"
   },
   "zones": {
-    "supply_zone": { "min": number, "max": number },
-    "demand_zone": { "min": number, "max": number }
+    "supply": {
+      "min": number,
+      "max": number,
+      "reason": "order block | imbalance | previous structure"
+    },
+    "demand": {
+      "min": number,
+      "max": number,
+      "reason": "order block | imbalance | previous structure"
+    }
   },
-  "current_price_position": "premium | discount | equilibrium",
-  "entry_logic": {
-    "type": "reversal | continuation | none",
-    "entry_zone": { "min": number, "max": number },
-    "confirmation_required": true,
-    "confirmation_type": "bos | choch | rejection | none"
+  "price_position": {
+    "location": "premium | discount | equilibrium",
+    "explanation": "Explain relative to the most recent impulse leg"
   },
-  "setup_quality": "high | medium | low",
-  "signal_type": "instant | pending | wait",
-  "reasoning": "clear explanation using SMC concepts"
+  "entry_plan": {
+    "bias": "buy | sell | none",
+    "entry_type": "instant | confirmation | none",
+    "entry_zone": {
+      "min": number | null,
+      "max": number | null
+    },
+    "confirmation": "CHoCH | BOS | rejection | none",
+    "reason": "Why this entry makes sense based on structure"
+  },
+  "risk_management": {
+    "invalidation_level": number,
+    "invalidation_reason": "Explain what breaks the setup"
+  },
+  "quality": {
+    "setup_rating": "A | B | C | avoid",
+    "confidence": 1-100
+  },
+  "final_verdict": {
+    "action": "enter | wait | avoid",
+    "message": "Clear instruction for the user"
+  },
+  "reasoning": "Full professional explanation using SMC logic"
 }
 
-STRICT RULES:
-- DO NOT guess exact entry prices
-- DO NOT force trades
-- If no clean structure, signal_type MUST be "wait"
-- Identify liquidity sweeps BEFORE suggesting entries
-- Prefer waiting for confirmation (BOS/CHoCH) over immediate entry
-- Entry zones must be realistic and NOT near current price unless valid
-- Use only JSON
-- No markdown
-- No extra text`;
+========================================
+STRICT RULES (DO NOT BREAK)
+========================================
+
+1. DO NOT force trades
+   - If no clear setup -> action MUST be "wait" or "avoid"
+
+2. ALWAYS explain liquidity
+   - Identify where stops were taken (above highs / below lows)
+
+3. ALWAYS justify zones
+   - You MUST explain WHY supply/demand exists
+   - No guessing levels
+
+4. ALWAYS include invalidation
+   - Define the exact price level where the setup fails
+
+5. ENTRY DISCIPLINE
+   - If price is NOT in a key zone -> entry_type MUST be "none"
+   - Prefer confirmation entries over instant entries
+
+6. PREMIUM vs DISCOUNT LOGIC
+   - In bearish markets -> prefer selling in premium
+   - In bullish markets -> prefer buying in discount
+
+7. NO MID-RANGE ENTRIES
+   - If price is in equilibrium -> action MUST be "wait"
+
+8. STRUCTURE FIRST
+   - If structure is unclear -> setup_rating MUST be "avoid"
+
+9. REALISM OVER COMPLETION
+   - It is better to say "no trade" than to give a bad trade
+
+========================================
+GOAL
+========================================
+
+Your output must feel like:
+- a professional trader's breakdown
+- not a random AI opinion
+- not a generic explanation
+
+It must be:
+- precise
+- disciplined
+- realistic
+- trustworthy
+
+Return STRICT JSON ONLY.
+Do not use markdown.
+Do not add commentary outside the JSON.`;
 
   let result;
 
@@ -316,7 +479,7 @@ STRICT RULES:
     result = await generateVisionResponse(genAI, primaryModel, prompt, base64Image, mimeType);
   } catch (error) {
     if (subscription === 'PRO' && primaryModel !== fallbackModel && isUnsupportedModelError(error)) {
-      console.warn(`[visionAnalysis] Pro model \"${primaryModel}\" is unavailable. Falling back to \"${fallbackModel}\".`);
+      console.warn(`[visionAnalysis] Pro model "${primaryModel}" is unavailable. Falling back to "${fallbackModel}".`);
       result = await generateVisionResponse(genAI, fallbackModel, prompt, base64Image, mimeType);
     } else {
       throw error;
@@ -324,39 +487,68 @@ STRICT RULES:
   }
 
   const parsed = parseJsonObject(result.response.text());
-  const trend = normalizeTrend(parsed.trend);
-  const setupQuality = normalizeSetupQuality(parsed.setup_quality);
-  const entryLogic = parsed.entry_logic as Record<string, unknown> | undefined;
+  const structure = parsed.structure as Record<string, unknown> | undefined;
   const liquidity = parsed.liquidity as Record<string, unknown> | undefined;
   const zones = parsed.zones as Record<string, unknown> | undefined;
-  const signalType =
-    setupQuality === 'low' || trend === 'ranging'
-      ? 'wait'
-      : normalizeSignalType(parsed.signal_type);
+  const pricePosition = parsed.price_position as Record<string, unknown> | undefined;
+  const entryPlan = parsed.entry_plan as Record<string, unknown> | undefined;
+  const riskManagement = parsed.risk_management as Record<string, unknown> | undefined;
+  const quality = parsed.quality as Record<string, unknown> | undefined;
+  const finalVerdict = parsed.final_verdict as Record<string, unknown> | undefined;
 
   return {
-    trend,
+    trend: normalizeTrend(parsed.trend),
     structure: {
-      bos: normalizeBosOrChoch((parsed.structure as Record<string, unknown> | undefined)?.bos),
-      choch: normalizeBosOrChoch((parsed.structure as Record<string, unknown> | undefined)?.choch),
+      state: normalizeStructureState(structure?.state),
+      bos: normalizeBosOrChoch(structure?.bos),
+      choch: normalizeBosOrChoch(structure?.choch),
     },
     liquidity: {
-      sweep: normalizeSweep(liquidity?.sweep),
-      liquidityZones: normalizeStringArray(liquidity?.liquidity_zones),
+      type: normalizeLiquidityType(liquidity?.type),
+      description: normalizeText(
+        liquidity?.description,
+        'No meaningful liquidity event was clearly validated from the chart.'
+      ),
     },
     zones: {
-      supplyZone: normalizeZone(zones?.supply_zone),
-      demandZone: normalizeZone(zones?.demand_zone),
+      supply: normalizeQualifiedZone(zones?.supply),
+      demand: normalizeQualifiedZone(zones?.demand),
     },
-    currentPricePosition: normalizeCurrentPricePosition(parsed.current_price_position),
-    entryLogic: {
-      type: normalizeEntryType(entryLogic?.type),
-      entryZone: normalizeZone(entryLogic?.entry_zone),
-      confirmationRequired: normalizeBoolean(entryLogic?.confirmation_required, true),
-      confirmationType: normalizeConfirmationType(entryLogic?.confirmation_type),
+    pricePosition: {
+      location: normalizePriceLocation(pricePosition?.location),
+      explanation: normalizeText(
+        pricePosition?.explanation,
+        'Price is not clearly positioned in premium or discount relative to the latest impulse leg.'
+      ),
     },
-    setupQuality,
-    signalType,
+    entryPlan: {
+      bias: normalizeBias(entryPlan?.bias),
+      entryType: normalizeEntryType(entryPlan?.entry_type),
+      entryZone: normalizeZone(entryPlan?.entry_zone),
+      confirmation: normalizeConfirmation(entryPlan?.confirmation),
+      reason: normalizeText(
+        entryPlan?.reason,
+        'No disciplined entry plan is justified until structure and location improve.'
+      ),
+    },
+    riskManagement: {
+      invalidationLevel: normalizeNumeric(riskManagement?.invalidation_level),
+      invalidationReason: normalizeText(
+        riskManagement?.invalidation_reason,
+        'The setup is invalidated if price breaks the structural level that supports the current bias.'
+      ),
+    },
+    quality: {
+      setupRating: normalizeSetupRating(quality?.setup_rating),
+      confidence: normalizeConfidence(quality?.confidence),
+    },
+    finalVerdict: {
+      action: normalizeFinalAction(finalVerdict?.action),
+      message: normalizeText(
+        finalVerdict?.message,
+        'Wait for a cleaner institutional setup before committing to a trade.'
+      ),
+    },
     reasoning: normalizeText(
       parsed.reasoning,
       'The chart does not present a clean Smart Money Concepts setup yet, so patience is preferred over forcing an entry.'
