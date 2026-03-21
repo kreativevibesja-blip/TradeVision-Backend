@@ -712,3 +712,376 @@ Do not add commentary outside the JSON.`;
     takeProfit3: normalizeNumeric(parsed.take_profit_3),
   };
 }
+
+// ============================================
+// Dual-Chart HTF Analysis (Higher Timeframe)
+// Focus: Market structure, supply/demand zones, premium/discount
+// ============================================
+
+export async function analyzeHTFVisionStructure(
+  base64Image: string,
+  mimeType: string,
+  pair: string,
+  timeframe: string
+): Promise<VisionAnalysisResult> {
+  if (!config.gemini.apiKey) {
+    throw new Error('TradeVision AI is not configured correctly');
+  }
+
+  const genAI = new GoogleGenerativeAI(config.gemini.apiKey);
+  const primaryModel = normalizeGeminiModelName(config.gemini.proModel);
+  const fallbackModel = normalizeGeminiModelName(config.gemini.freeModel);
+
+  const prompt = `You are an elite institutional Smart Money Concepts (SMC) analyst reviewing A HIGHER TIMEFRAME chart.
+
+Your role: Determine the MACRO BIAS and structural context. Think like a hedge fund desk — structure first, everything else follows.
+
+Trading pair/index: ${pair}
+Timeframe: ${timeframe} (HIGHER TIMEFRAME — this sets the directional bias)
+
+========================================
+YOUR FOCUS FOR THIS HIGHER TIMEFRAME CHART
+========================================
+
+1. **Market Structure** — Is price making higher highs/higher lows (bullish) or lower highs/lower lows (bearish)? Identify the MOST RECENT Break of Structure (BOS) or Change of Character (CHoCH).
+
+2. **Supply & Demand Zones** — Mark the KEY institutional supply and demand zones that are most likely to cause a reaction. These are where large orders were placed (order blocks, imbalances, or major structural pivots). Be PRECISE with zone boundaries.
+
+3. **Premium vs Discount** — Relative to the last major impulse leg, is current price in premium (top 50%), discount (bottom 50%), or equilibrium? This is CRITICAL for determining whether to look for buys or sells on the lower timeframe.
+
+4. **Liquidity Pools** — Where are the obvious equal highs/lows or stop-loss clusters that smart money will target? Identify the nearest untouched liquidity pool.
+
+5. **Overall Directional Bias** — What direction should the lower timeframe trader be looking? BUY from discount in bullish structure, SELL from premium in bearish structure.
+
+========================================
+OUTPUT FORMAT (STRICT JSON ONLY)
+========================================
+{
+  "trend": "bullish | bearish | ranging",
+  "structure": {
+    "state": "higher highs | lower lows | transition",
+    "bos": "bullish | bearish | none",
+    "choch": "bullish | bearish | none"
+  },
+  "liquidity": {
+    "type": "buy-side | sell-side | none",
+    "description": "Where the nearest untouched liquidity pool sits and what it means for directional bias"
+  },
+  "zones": {
+    "supply": {
+      "min": number,
+      "max": number,
+      "reason": "order block | imbalance | previous structure"
+    },
+    "demand": {
+      "min": number,
+      "max": number,
+      "reason": "order block | imbalance | previous structure"
+    }
+  },
+  "price_position": {
+    "location": "premium | discount | equilibrium",
+    "explanation": "Explain relative to the most recent impulse leg — this determines the LTF trading direction"
+  },
+  "entry_plan": {
+    "bias": "buy | sell | none",
+    "entry_type": "none",
+    "entry_zone": null,
+    "confirmation": "none",
+    "reason": "HTF provides bias only — entry is determined by the lower timeframe"
+  },
+  "risk_management": {
+    "invalidation_level": number,
+    "invalidation_reason": "The structural level that invalidates the current HTF bias"
+  },
+  "quality": {
+    "setup_rating": "A | B | C | avoid",
+    "confidence": 1-100
+  },
+  "final_verdict": {
+    "action": "enter | wait | avoid",
+    "message": "Clear directional bias for the lower timeframe trader"
+  },
+  "stop_loss": null,
+  "take_profit_1": null,
+  "take_profit_2": null,
+  "take_profit_3": null,
+  "reasoning": "Full breakdown of the higher timeframe structure, zones, and why the bias is what it is",
+  "visible_price_range": {
+    "min": "lowest price on right Y-axis",
+    "max": "highest price on right Y-axis"
+  }
+}
+
+========================================
+STRICT RULES
+========================================
+1. This is the HIGHER TIMEFRAME — do NOT provide entry, SL, or TP levels. Those come from the lower timeframe.
+2. Focus on STRUCTURE, ZONES, and BIAS only.
+3. Zone boundaries must be TIGHT (0.5-2% of visible price range).
+4. Read the Y-axis carefully for visible_price_range.
+5. If structure is unclear, setup_rating = "avoid" and bias = "none".
+6. Do NOT force a directional bias. If ranging, say ranging.
+7. Mark the most significant supply zone (institutional selling area) AND demand zone (institutional buying area).
+8. Premium/discount MUST be relative to the last major impulse leg, not the entire visible chart.
+
+Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
+
+  let result;
+  try {
+    result = await generateVisionResponse(genAI, primaryModel, prompt, base64Image, mimeType);
+  } catch (error) {
+    if (primaryModel !== fallbackModel && isUnsupportedModelError(error)) {
+      result = await generateVisionResponse(genAI, fallbackModel, prompt, base64Image, mimeType);
+    } else {
+      throw error;
+    }
+  }
+
+  const parsed = parseJsonObject(result.response.text());
+  const structure = parsed.structure as Record<string, unknown> | undefined;
+  const liquidity = parsed.liquidity as Record<string, unknown> | undefined;
+  const zones = parsed.zones as Record<string, unknown> | undefined;
+  const pricePosition = parsed.price_position as Record<string, unknown> | undefined;
+  const entryPlan = parsed.entry_plan as Record<string, unknown> | undefined;
+  const riskManagement = parsed.risk_management as Record<string, unknown> | undefined;
+  const quality = parsed.quality as Record<string, unknown> | undefined;
+  const finalVerdict = parsed.final_verdict as Record<string, unknown> | undefined;
+
+  return {
+    trend: normalizeTrend(parsed.trend),
+    structure: {
+      state: normalizeStructureState(structure?.state),
+      bos: normalizeBosOrChoch(structure?.bos),
+      choch: normalizeBosOrChoch(structure?.choch),
+    },
+    liquidity: {
+      type: normalizeLiquidityType(liquidity?.type),
+      description: normalizeText(liquidity?.description, 'No significant liquidity identified on the higher timeframe.'),
+    },
+    zones: {
+      supply: normalizeQualifiedZone(zones?.supply),
+      demand: normalizeQualifiedZone(zones?.demand),
+    },
+    pricePosition: {
+      location: normalizePriceLocation(pricePosition?.location),
+      explanation: normalizeText(pricePosition?.explanation, 'Price position relative to the impulse leg could not be determined.'),
+    },
+    entryPlan: {
+      bias: normalizeBias(entryPlan?.bias),
+      entryType: 'none',
+      entryZone: null,
+      confirmation: 'none',
+      reason: normalizeText(entryPlan?.reason, 'HTF provides bias only — entry is determined by the lower timeframe.'),
+    },
+    riskManagement: {
+      invalidationLevel: normalizeNumeric(riskManagement?.invalidation_level),
+      invalidationReason: normalizeText(riskManagement?.invalidation_reason, 'HTF structural invalidation level.'),
+    },
+    quality: {
+      setupRating: normalizeSetupRating(quality?.setup_rating),
+      confidence: normalizeConfidence(quality?.confidence),
+    },
+    finalVerdict: {
+      action: normalizeFinalAction(finalVerdict?.action),
+      message: normalizeText(finalVerdict?.message, 'Review the lower timeframe for confirmation.'),
+    },
+    reasoning: normalizeText(parsed.reasoning, 'Higher timeframe analysis could not determine a clear structure.'),
+    visiblePriceRange: normalizeVisiblePriceRange(parsed.visible_price_range),
+    stopLoss: null,
+    takeProfit1: null,
+    takeProfit2: null,
+    takeProfit3: null,
+  };
+}
+
+// ============================================
+// Dual-Chart LTF Analysis (Lower Timeframe)
+// Focus: Entry, SL, TP, internal zones, liquidity sweeps
+// ============================================
+
+export async function analyzeLTFVisionStructure(
+  base64Image: string,
+  mimeType: string,
+  pair: string,
+  timeframe: string
+): Promise<VisionAnalysisResult> {
+  if (!config.gemini.apiKey) {
+    throw new Error('TradeVision AI is not configured correctly');
+  }
+
+  const genAI = new GoogleGenerativeAI(config.gemini.apiKey);
+  const primaryModel = normalizeGeminiModelName(config.gemini.proModel);
+  const fallbackModel = normalizeGeminiModelName(config.gemini.freeModel);
+
+  const prompt = `You are an elite institutional Smart Money Concepts (SMC) execution analyst reviewing A LOWER TIMEFRAME chart.
+
+Your role: Find the PRECISE ENTRY, stop loss, and take profit levels. Think like a prop firm trader executing off the desk's bias — precision is everything.
+
+Trading pair/index: ${pair}
+Timeframe: ${timeframe} (LOWER TIMEFRAME — this is where you find the sniper entry)
+
+========================================
+YOUR FOCUS FOR THIS LOWER TIMEFRAME CHART
+========================================
+
+1. **Internal Structure** — Identify the micro BOS/CHoCH within the lower timeframe. Where has internal structure shifted? This is your entry confirmation.
+
+2. **Liquidity Sweeps** — Has price swept any recent internal highs or lows? A liquidity sweep followed by a structural shift is the highest probability entry.
+
+3. **Order Blocks & Imbalances** — Find the most recent unmitigated order block or fair value gap where price is likely to react. This is your entry zone.
+
+4. **Entry Level** — Provide the EXACT entry zone (min/max). This should be at an internal order block or imbalance AFTER a liquidity sweep and structural confirmation.
+
+5. **Stop Loss** — Place it below/above the most recent structural low/high that would invalidate the entry. Must be logical, not arbitrary.
+
+6. **Take Profit Levels** — TP1 (conservative, nearest internal structure), TP2 (moderate, next key level), TP3 (aggressive, major liquidity pool or HTF zone). Minimum 1:2 Risk:Reward for TP1.
+
+7. **Confirmation Signal** — What specific confirmation do you see or need? CHoCH, BOS, rejection wick, engulfing candle at the order block.
+
+========================================
+OUTPUT FORMAT (STRICT JSON ONLY)
+========================================
+{
+  "trend": "bullish | bearish | ranging",
+  "structure": {
+    "state": "higher highs | lower lows | transition",
+    "bos": "bullish | bearish | none",
+    "choch": "bullish | bearish | none"
+  },
+  "liquidity": {
+    "type": "buy-side | sell-side | none",
+    "description": "Describe the liquidity sweep — which highs/lows were taken, and how price reacted after the sweep"
+  },
+  "zones": {
+    "supply": {
+      "min": number,
+      "max": number,
+      "reason": "order block | imbalance | previous structure"
+    },
+    "demand": {
+      "min": number,
+      "max": number,
+      "reason": "order block | imbalance | previous structure"
+    }
+  },
+  "price_position": {
+    "location": "premium | discount | equilibrium",
+    "explanation": "Where price sits relative to the internal structure range"
+  },
+  "entry_plan": {
+    "bias": "buy | sell | none",
+    "entry_type": "instant | confirmation | none",
+    "entry_zone": {
+      "min": number | null,
+      "max": number | null
+    },
+    "confirmation": "CHoCH | BOS | rejection | none",
+    "reason": "Explain the specific price action that justifies this entry — reference the liquidity sweep, order block, and structural shift"
+  },
+  "risk_management": {
+    "invalidation_level": number,
+    "invalidation_reason": "The exact structural level that invalidates this entry"
+  },
+  "quality": {
+    "setup_rating": "A | B | C | avoid",
+    "confidence": 1-100
+  },
+  "final_verdict": {
+    "action": "enter | wait | avoid",
+    "message": "Precise execution instruction — what to do RIGHT NOW"
+  },
+  "stop_loss": number | null,
+  "take_profit_1": number | null,
+  "take_profit_2": number | null,
+  "take_profit_3": number | null,
+  "reasoning": "Step-by-step breakdown: liquidity sweep → structural shift → entry zone → SL/TP logic",
+  "visible_price_range": {
+    "min": "lowest price on right Y-axis",
+    "max": "highest price on right Y-axis"
+  }
+}
+
+========================================
+STRICT RULES
+========================================
+1. This is the LOWER TIMEFRAME — your job is to find the SNIPER ENTRY with precise SL and TP.
+2. Entry MUST be at an internal order block or imbalance, not a random level.
+3. A liquidity sweep BEFORE entry increases confidence significantly. If no sweep occurred, note this.
+4. SL must be at a structural level that invalidates the trade, NOT an arbitrary distance.
+5. TP1 must have at least 1:2 Risk:Reward ratio.
+6. Zone boundaries must be TIGHT (the order block body or imbalance range only).
+7. If no clean entry exists, action = "wait" and explain what price action you need to see.
+8. Read the Y-axis carefully for visible_price_range.
+9. DO NOT force an entry. If the lower timeframe doesn't confirm, action = "wait".
+10. The entry_plan.reason must specifically reference: what was swept, what shifted, and where the entry sits.
+
+Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
+
+  let result;
+  try {
+    result = await generateVisionResponse(genAI, primaryModel, prompt, base64Image, mimeType);
+  } catch (error) {
+    if (primaryModel !== fallbackModel && isUnsupportedModelError(error)) {
+      result = await generateVisionResponse(genAI, fallbackModel, prompt, base64Image, mimeType);
+    } else {
+      throw error;
+    }
+  }
+
+  const parsed = parseJsonObject(result.response.text());
+  const structure = parsed.structure as Record<string, unknown> | undefined;
+  const liquidity = parsed.liquidity as Record<string, unknown> | undefined;
+  const zones = parsed.zones as Record<string, unknown> | undefined;
+  const pricePosition = parsed.price_position as Record<string, unknown> | undefined;
+  const entryPlan = parsed.entry_plan as Record<string, unknown> | undefined;
+  const riskManagement = parsed.risk_management as Record<string, unknown> | undefined;
+  const quality = parsed.quality as Record<string, unknown> | undefined;
+  const finalVerdict = parsed.final_verdict as Record<string, unknown> | undefined;
+
+  return {
+    trend: normalizeTrend(parsed.trend),
+    structure: {
+      state: normalizeStructureState(structure?.state),
+      bos: normalizeBosOrChoch(structure?.bos),
+      choch: normalizeBosOrChoch(structure?.choch),
+    },
+    liquidity: {
+      type: normalizeLiquidityType(liquidity?.type),
+      description: normalizeText(liquidity?.description, 'No clear liquidity sweep was identified on the lower timeframe.'),
+    },
+    zones: {
+      supply: normalizeQualifiedZone(zones?.supply),
+      demand: normalizeQualifiedZone(zones?.demand),
+    },
+    pricePosition: {
+      location: normalizePriceLocation(pricePosition?.location),
+      explanation: normalizeText(pricePosition?.explanation, 'Internal price position could not be determined.'),
+    },
+    entryPlan: {
+      bias: normalizeBias(entryPlan?.bias),
+      entryType: normalizeEntryType(entryPlan?.entry_type),
+      entryZone: normalizeZone(entryPlan?.entry_zone),
+      confirmation: normalizeConfirmation(entryPlan?.confirmation),
+      reason: normalizeText(entryPlan?.reason, 'No disciplined entry is justified until internal structure confirms.'),
+    },
+    riskManagement: {
+      invalidationLevel: normalizeNumeric(riskManagement?.invalidation_level),
+      invalidationReason: normalizeText(riskManagement?.invalidation_reason, 'The setup is invalidated if price breaks the structural level.'),
+    },
+    quality: {
+      setupRating: normalizeSetupRating(quality?.setup_rating),
+      confidence: normalizeConfidence(quality?.confidence),
+    },
+    finalVerdict: {
+      action: normalizeFinalAction(finalVerdict?.action),
+      message: normalizeText(finalVerdict?.message, 'Wait for internal structure to confirm before entering.'),
+    },
+    reasoning: normalizeText(parsed.reasoning, 'Lower timeframe does not present a confirmed entry yet.'),
+    visiblePriceRange: normalizeVisiblePriceRange(parsed.visible_price_range),
+    stopLoss: normalizeNumeric(parsed.stop_loss),
+    takeProfit1: normalizeNumeric(parsed.take_profit_1),
+    takeProfit2: normalizeNumeric(parsed.take_profit_2),
+    takeProfit3: normalizeNumeric(parsed.take_profit_3),
+  };
+}

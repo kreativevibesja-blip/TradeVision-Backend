@@ -328,6 +328,136 @@ const buildOverlay = (context: DrawContext, analysis: MarkupAnalysis) => {
   `);
 };
 
+// ============================================
+// Specialized HTF/LTF overlay builders
+// ============================================
+
+const drawPriceLevel = (context: DrawContext, price: number | null | undefined, color: string, label: string) => {
+  if (!isFiniteNumber(price)) return '';
+  const y = priceToY(price, context);
+  if (!isFiniteNumber(y)) return '';
+  const safeY = clamp(y, context.plotArea.top + 4, context.plotArea.bottom - 4);
+  const tagX = clamp(context.plotArea.right - 200, context.plotArea.left + 8, context.plotArea.right - 140);
+  const tagY = clamp(safeY - 14, context.plotArea.top + 4, context.plotArea.bottom - 26);
+  return `
+    <line x1="${context.plotArea.left}" y1="${safeY}" x2="${context.plotArea.right}" y2="${safeY}" stroke="${color}" stroke-width="1.5" stroke-dasharray="6 4" opacity="0.9" />
+    ${drawTag(tagX, tagY, color, label, formatMarkupPrice(price))}
+  `;
+};
+
+const buildHTFOverlay = (context: DrawContext, analysis: MarkupAnalysis) => {
+  // HTF: Supply/demand zones + premium/discount indicator + liquidity pool
+  const premiumDiscountLabel = analysis.zones?.supplyZone && analysis.zones?.demandZone
+    ? (() => {
+        const supply = analysis.zones.supplyZone;
+        const demand = analysis.zones.demandZone;
+        if (!isFiniteNumber(supply.max) || !isFiniteNumber(demand.min)) return '';
+        const midY = priceToY((supply.max + demand.min) / 2, context);
+        if (!isFiniteNumber(midY)) return '';
+        const safeMidY = clamp(midY, context.plotArea.top + 4, context.plotArea.bottom - 4);
+        return `
+          <line x1="${context.plotArea.left}" y1="${safeMidY}" x2="${context.plotArea.right}" y2="${safeMidY}" stroke="#a78bfa" stroke-width="1" stroke-dasharray="4 4" opacity="0.6" />
+          ${drawTag(context.plotArea.left + 10, clamp(safeMidY - 26, context.plotArea.top + 4, context.plotArea.bottom - 36), '#a78bfa', 'Equilibrium', 'Premium above · Discount below')}
+        `;
+      })()
+    : '';
+
+  const htfBadges = [
+    analysis.zones?.supplyZone ? { label: 'Supply', color: '#ef4444' } : null,
+    analysis.zones?.demandZone ? { label: 'Demand', color: '#22c55e' } : null,
+    { label: 'P/D', color: '#a78bfa' },
+    analysis.liquidity?.type && analysis.liquidity.type !== 'none'
+      ? { label: 'Liquidity', color: analysis.liquidity.type === 'buy-side' ? '#f59e0b' : '#06b6d4' }
+      : null,
+  ].filter(Boolean) as Array<{ label: string; color: string }>;
+
+  const badgesSvg = (() => {
+    if (!htfBadges.length) return '';
+    const badgeWidth = 72;
+    const gap = 6;
+    const totalWidth = htfBadges.length * badgeWidth + (htfBadges.length - 1) * gap;
+    const startX = Math.max(context.plotArea.left, context.plotArea.right - totalWidth);
+    const y = Math.max(8, context.plotArea.top - 28);
+    return htfBadges.map((badge, i) => {
+      const x = startX + i * (badgeWidth + gap);
+      return `
+        <rect x="${x}" y="${y}" width="${badgeWidth}" height="20" fill="rgba(10,14,23,0.88)" stroke="${badge.color}" stroke-width="1" rx="4" />
+        <circle cx="${x + 12}" cy="${y + 10}" r="3.5" fill="${badge.color}" />
+        <text x="${x + 22}" y="${y + 14}" fill="#f8fafc" font-size="10" font-family="${FONT_STACK}" font-weight="700">${escapeXml(badge.label)}</text>
+      `;
+    }).join('\n');
+  })();
+
+  const fragments = [
+    badgesSvg,
+    drawZone(context, analysis.zones?.supplyZone, '#ef4444', 'HTF Supply'),
+    drawZone(context, analysis.zones?.demandZone, '#22c55e', 'HTF Demand'),
+    premiumDiscountLabel,
+    drawLiquidityMarker(context, analysis),
+  ].filter(Boolean);
+
+  if (!fragments.length) return null;
+
+  return Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+    <svg width="${context.width}" height="${context.height}" viewBox="0 0 ${context.width} ${context.height}" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <defs><style type="text/css">text { font-family: 'DejaVu Sans', 'Liberation Sans', 'Noto Sans', 'Arial', 'Helvetica', sans-serif; }</style></defs>
+      ${fragments.join('\n')}
+    </svg>
+  `);
+};
+
+const buildLTFOverlay = (context: DrawContext, analysis: MarkupAnalysis & { stopLoss?: number | null; takeProfit1?: number | null; takeProfit2?: number | null; takeProfit3?: number | null }) => {
+  // LTF: Entry zone + SL + TP1/2/3 + internal zones + liquidity sweep
+  const ltfBadges = [
+    (analysis.entryPlan?.entryZone ?? analysis.entryZone) ? { label: 'Entry', color: '#3b82f6' } : null,
+    isFiniteNumber(analysis.stopLoss) ? { label: 'SL', color: '#ef4444' } : null,
+    isFiniteNumber(analysis.takeProfit1) ? { label: 'TP', color: '#10b981' } : null,
+    analysis.zones?.supplyZone ? { label: 'Int. Supply', color: '#f97316' } : null,
+    analysis.zones?.demandZone ? { label: 'Int. Demand', color: '#06b6d4' } : null,
+    analysis.liquidity?.type && analysis.liquidity.type !== 'none'
+      ? { label: 'Sweep', color: analysis.liquidity.type === 'buy-side' ? '#f59e0b' : '#06b6d4' }
+      : null,
+  ].filter(Boolean) as Array<{ label: string; color: string }>;
+
+  const badgesSvg = (() => {
+    if (!ltfBadges.length) return '';
+    const badgeWidth = 72;
+    const gap = 6;
+    const totalWidth = ltfBadges.length * badgeWidth + (ltfBadges.length - 1) * gap;
+    const startX = Math.max(context.plotArea.left, context.plotArea.right - totalWidth);
+    const y = Math.max(8, context.plotArea.top - 28);
+    return ltfBadges.map((badge, i) => {
+      const x = startX + i * (badgeWidth + gap);
+      return `
+        <rect x="${x}" y="${y}" width="${badgeWidth}" height="20" fill="rgba(10,14,23,0.88)" stroke="${badge.color}" stroke-width="1" rx="4" />
+        <circle cx="${x + 12}" cy="${y + 10}" r="3.5" fill="${badge.color}" />
+        <text x="${x + 22}" y="${y + 14}" fill="#f8fafc" font-size="10" font-family="${FONT_STACK}" font-weight="700">${escapeXml(badge.label)}</text>
+      `;
+    }).join('\n');
+  })();
+
+  const fragments = [
+    badgesSvg,
+    drawZone(context, analysis.zones?.supplyZone, '#f97316', 'Internal supply'),
+    drawZone(context, analysis.zones?.demandZone, '#06b6d4', 'Internal demand'),
+    drawZone(context, analysis.entryPlan?.entryZone ?? analysis.entryZone, '#3b82f6', 'Entry zone'),
+    drawPriceLevel(context, analysis.stopLoss, '#ef4444', 'Stop Loss'),
+    drawPriceLevel(context, analysis.takeProfit1, '#10b981', 'TP1'),
+    drawPriceLevel(context, analysis.takeProfit2, '#34d399', 'TP2'),
+    drawPriceLevel(context, analysis.takeProfit3, '#6ee7b7', 'TP3'),
+    drawLiquidityMarker(context, analysis),
+  ].filter(Boolean);
+
+  if (!fragments.length) return null;
+
+  return Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+    <svg width="${context.width}" height="${context.height}" viewBox="0 0 ${context.width} ${context.height}" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <defs><style type="text/css">text { font-family: 'DejaVu Sans', 'Liberation Sans', 'Noto Sans', 'Arial', 'Helvetica', sans-serif; }</style></defs>
+      ${fragments.join('\n')}
+    </svg>
+  `);
+};
+
 const parseBooleanSetting = (value: unknown, fallback: boolean) => {
   if (typeof value === 'boolean') {
     return value;
@@ -423,6 +553,86 @@ export async function drawChartMarkup(
     }
   } catch (error) {
     console.error('[chartMarkup] failed to generate markup:', error);
+    return { markedImageUrl: null, chartBounds: null, hasMarkup: false };
+  }
+}
+
+export async function drawHTFChartMarkup(
+  imageBuffer: Buffer,
+  analysis: MarkupAnalysis,
+  chartBoundsInput: ChartBoundsInput
+): Promise<MarkupResult> {
+  try {
+    const metadata = await sharp(imageBuffer).metadata();
+    if (!metadata.width || !metadata.height) {
+      return { markedImageUrl: null, chartBounds: null, hasMarkup: false };
+    }
+
+    const chartBounds = inferChartBounds(analysis, chartBoundsInput);
+    if (!chartBounds) {
+      return { markedImageUrl: null, chartBounds: null, hasMarkup: false };
+    }
+
+    const overlay = buildHTFOverlay(
+      { width: metadata.width, height: metadata.height, bounds: chartBounds, plotArea: inferPlotArea(metadata.width, metadata.height) },
+      analysis
+    );
+
+    if (!overlay) {
+      return { markedImageUrl: null, chartBounds, hasMarkup: false };
+    }
+
+    const markedBuffer = await sharp(imageBuffer).composite([{ input: overlay }]).png().toBuffer();
+
+    try {
+      const markedImageUrl = await uploadMarkupToStorage(markedBuffer);
+      return { markedImageUrl, chartBounds, hasMarkup: true };
+    } catch {
+      const markedImageUrl = await writeLocalMarkup(markedBuffer);
+      return { markedImageUrl, chartBounds, hasMarkup: true };
+    }
+  } catch (error) {
+    console.error('[chartMarkup] failed to generate HTF markup:', error);
+    return { markedImageUrl: null, chartBounds: null, hasMarkup: false };
+  }
+}
+
+export async function drawLTFChartMarkup(
+  imageBuffer: Buffer,
+  analysis: MarkupAnalysis & { stopLoss?: number | null; takeProfit1?: number | null; takeProfit2?: number | null; takeProfit3?: number | null },
+  chartBoundsInput: ChartBoundsInput
+): Promise<MarkupResult> {
+  try {
+    const metadata = await sharp(imageBuffer).metadata();
+    if (!metadata.width || !metadata.height) {
+      return { markedImageUrl: null, chartBounds: null, hasMarkup: false };
+    }
+
+    const chartBounds = inferChartBounds(analysis, chartBoundsInput);
+    if (!chartBounds) {
+      return { markedImageUrl: null, chartBounds: null, hasMarkup: false };
+    }
+
+    const overlay = buildLTFOverlay(
+      { width: metadata.width, height: metadata.height, bounds: chartBounds, plotArea: inferPlotArea(metadata.width, metadata.height) },
+      analysis
+    );
+
+    if (!overlay) {
+      return { markedImageUrl: null, chartBounds, hasMarkup: false };
+    }
+
+    const markedBuffer = await sharp(imageBuffer).composite([{ input: overlay }]).png().toBuffer();
+
+    try {
+      const markedImageUrl = await uploadMarkupToStorage(markedBuffer);
+      return { markedImageUrl, chartBounds, hasMarkup: true };
+    } catch {
+      const markedImageUrl = await writeLocalMarkup(markedBuffer);
+      return { markedImageUrl, chartBounds, hasMarkup: true };
+    }
+  } catch (error) {
+    console.error('[chartMarkup] failed to generate LTF markup:', error);
     return { markedImageUrl: null, chartBounds: null, hasMarkup: false };
   }
 }

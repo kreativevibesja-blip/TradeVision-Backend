@@ -1,8 +1,15 @@
 import { incrementUserDailyUsage, updateAnalysis } from '../../lib/supabase';
-import { analyzeVisionStructure } from '../visionAnalysis';
+import { analyzeVisionStructure, analyzeHTFVisionStructure, analyzeLTFVisionStructure } from '../visionAnalysis';
 import { generateFinalSignal } from '../signalEngine';
-import { drawChartMarkup, isChartMarkupEnabledForPlan } from '../chartMarkup';
+import { drawChartMarkup, drawHTFChartMarkup, drawLTFChartMarkup, isChartMarkupEnabledForPlan } from '../chartMarkup';
 import type { SubscriptionTier } from '../../lib/supabase';
+
+interface SecondaryChartInput {
+  base64Image: string;
+  mimeType: string;
+  imageUrl: string;
+  timeframe: string;
+}
 
 interface RunAnalysisPipelineInput {
   analysisId: string;
@@ -16,21 +23,62 @@ interface RunAnalysisPipelineInput {
   imageUrl: string;
   base64Image: string;
   mimeType: string;
+  secondaryChart: SecondaryChartInput | null;
 }
 
-export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe, subscription, currentPrice, chartMinPrice, chartMaxPrice, imageUrl, base64Image, mimeType }: RunAnalysisPipelineInput) {
+export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe, subscription, currentPrice, chartMinPrice, chartMaxPrice, imageUrl, base64Image, mimeType, secondaryChart }: RunAnalysisPipelineInput) {
   try {
+    const isDualChart = secondaryChart !== null;
+
     await updateAnalysis(analysisId, {
       status: 'PROCESSING',
-      progress: 15,
-      currentStage: 'Analyzing market structure...',
+      progress: 10,
+      currentStage: isDualChart ? 'Analyzing higher timeframe structure...' : 'Analyzing market structure...',
       errorMessage: null,
     });
 
-    const vision = await analyzeVisionStructure(base64Image, mimeType, pair, timeframe, subscription);
+    let vision;
+
+    if (isDualChart) {
+      // Dual-chart mode: HTF (chart 1) for structure + LTF (chart 2) for entry
+      const [htfVision, ltfVision] = await Promise.all([
+        analyzeHTFVisionStructure(base64Image, mimeType, pair, timeframe),
+        analyzeLTFVisionStructure(secondaryChart.base64Image, secondaryChart.mimeType, pair, secondaryChart.timeframe),
+      ]);
+
+      await updateAnalysis(analysisId, {
+        progress: 50,
+        currentStage: 'Combining multi-timeframe analysis...',
+      });
+
+      // Merge: HTF provides structure/zones/trend/pricePosition, LTF provides entry/SL/TP/liquidity
+      vision = {
+        trend: htfVision.trend,
+        structure: htfVision.structure,
+        liquidity: ltfVision.liquidity,
+        zones: htfVision.zones,
+        pricePosition: htfVision.pricePosition,
+        entryPlan: ltfVision.entryPlan,
+        riskManagement: ltfVision.riskManagement,
+        quality: {
+          setupRating: htfVision.quality.setupRating,
+          confidence: Math.round((htfVision.quality.confidence + ltfVision.quality.confidence) / 2),
+        },
+        finalVerdict: ltfVision.finalVerdict,
+        reasoning: `**Higher Timeframe (${timeframe}):** ${htfVision.reasoning}\n\n**Lower Timeframe (${secondaryChart.timeframe}):** ${ltfVision.reasoning}`,
+        visiblePriceRange: htfVision.visiblePriceRange,
+        stopLoss: ltfVision.stopLoss,
+        takeProfit1: ltfVision.takeProfit1,
+        takeProfit2: ltfVision.takeProfit2,
+        takeProfit3: ltfVision.takeProfit3,
+      };
+    } else {
+      // Single chart mode (existing flow)
+      vision = await analyzeVisionStructure(base64Image, mimeType, pair, timeframe, subscription);
+    }
 
     await updateAnalysis(analysisId, {
-      progress: 45,
+      progress: isDualChart ? 60 : 45,
       currentStage: 'Interpreting SMC structure...',
       layer1Output: vision,
     });
@@ -43,12 +91,29 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
 
     const signal = generateFinalSignal(vision, currentPrice);
     const markupEnabled = await isChartMarkupEnabledForPlan(subscription);
-    const markup = markupEnabled
-      ? await drawChartMarkup(Buffer.from(base64Image, 'base64'), signal, {
+
+    let markup = { markedImageUrl: null as string | null, chartBounds: null as any, hasMarkup: false };
+    let htfMarkup = { markedImageUrl: null as string | null, chartBounds: null as any, hasMarkup: false };
+    let ltfMarkup = { markedImageUrl: null as string | null, chartBounds: null as any, hasMarkup: false };
+
+    if (markupEnabled) {
+      if (isDualChart) {
+        // Generate separate markups for HTF and LTF charts
+        const [htfResult, ltfResult] = await Promise.all([
+          drawHTFChartMarkup(Buffer.from(base64Image, 'base64'), signal, { minPrice: chartMinPrice, maxPrice: chartMaxPrice }),
+          drawLTFChartMarkup(Buffer.from(secondaryChart.base64Image, 'base64'), signal, { minPrice: null, maxPrice: null }),
+        ]);
+        htfMarkup = htfResult;
+        ltfMarkup = ltfResult;
+        // Use LTF as the primary marked image (shows entry/SL/TP)
+        markup = ltfMarkup;
+      } else {
+        markup = await drawChartMarkup(Buffer.from(base64Image, 'base64'), signal, {
           minPrice: chartMinPrice,
           maxPrice: chartMaxPrice,
-        })
-      : { markedImageUrl: null, chartBounds: null, hasMarkup: false };
+        });
+      }
+    }
 
     const enrichedSignal = {
       ...signal,
@@ -56,6 +121,18 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
       markedImageUrl: markup.markedImageUrl,
       hasMarkup: markup.hasMarkup,
       chartBounds: markup.chartBounds,
+      // Dual-chart specific fields
+      ...(isDualChart ? {
+        isDualChart: true,
+        htfTimeframe: timeframe,
+        ltfTimeframe: secondaryChart.timeframe,
+        htfOriginalImageUrl: imageUrl,
+        ltfOriginalImageUrl: secondaryChart.imageUrl,
+        htfMarkedImageUrl: htfMarkup.markedImageUrl,
+        ltfMarkedImageUrl: ltfMarkup.markedImageUrl,
+        htfChartBounds: htfMarkup.chartBounds,
+        ltfChartBounds: ltfMarkup.chartBounds,
+      } : {}),
     };
 
     const bias = signal.trend === 'bullish' ? 'BULLISH' : signal.trend === 'bearish' ? 'BEARISH' : 'NEUTRAL';

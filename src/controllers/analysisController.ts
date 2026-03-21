@@ -107,15 +107,26 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: 'Current price is required and must be a positive number' });
     }
 
+    // Handle both single and multi-file uploads
+    const files = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
+    const chartFile = files?.chart?.[0] ?? req.file;
+    const chart2File = files?.chart2?.[0];
     const inlineImage = parseInlineImage(req.body.image);
 
-    if (!req.file && !inlineImage) {
+    if (!chartFile && !inlineImage) {
       return res.status(400).json({ error: 'Chart image is required' });
     }
+
+    // Dual-chart is PRO only
+    const timeframe2 = chart2File ? (req.body.timeframe2 || timeframe) : null;
 
     const user = await hydrateUsageCounter(req.user!.id);
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (chart2File && user.subscription !== 'PRO') {
+      return res.status(403).json({ error: 'Dual-chart analysis is a Pro feature' });
     }
 
     const limit = user.subscription === 'PRO' ? config.limits.proDaily : config.limits.freeDaily;
@@ -127,7 +138,7 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const imageUrl = req.file ? `/uploads/${req.file.filename}` : 'inline-upload';
+    const imageUrl = chartFile ? `/uploads/${chartFile.filename}` : 'inline-upload';
     const analysisId = randomUUID();
 
     await createAnalysis({
@@ -143,6 +154,26 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
       currentStage: 'Preparing analysis...',
     });
 
+    const primaryImage = chartFile
+      ? {
+          base64Image: (await fs.readFile(path.join(process.cwd(), config.upload.dir, chartFile.filename))).toString('base64'),
+          mimeType: chartFile.mimetype || 'image/jpeg',
+        }
+      : {
+          base64Image: inlineImage!.base64Image,
+          mimeType: inlineImage!.mimeType,
+        };
+
+    // Build secondary image data if present
+    const secondaryImage = chart2File
+      ? {
+          base64Image: (await fs.readFile(path.join(process.cwd(), config.upload.dir, chart2File.filename))).toString('base64'),
+          mimeType: chart2File.mimetype || 'image/jpeg',
+          imageUrl: `/uploads/${chart2File.filename}`,
+          timeframe: timeframe2!,
+        }
+      : null;
+
     const analysis = await runAnalysisPipeline({
       analysisId,
       userId: req.user!.id,
@@ -153,15 +184,8 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
       chartMinPrice,
       chartMaxPrice,
       imageUrl,
-      ...(req.file
-        ? {
-            base64Image: (await fs.readFile(path.join(process.cwd(), config.upload.dir, req.file.filename))).toString('base64'),
-            mimeType: req.file.mimetype || 'image/jpeg',
-          }
-        : {
-            base64Image: inlineImage!.base64Image,
-            mimeType: inlineImage!.mimeType,
-          }),
+      ...primaryImage,
+      secondaryChart: secondaryImage,
     });
 
     return res.json({ analysis: serializeAnalysis(analysis) });

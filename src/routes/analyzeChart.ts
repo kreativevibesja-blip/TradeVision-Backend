@@ -10,7 +10,7 @@ import { analysisLimiter } from '../middleware/rateLimiter';
 
 const router = Router();
 
-router.post('/analyze-chart', authenticate, analysisLimiter, upload.single('chart'), analyzeChart);
+router.post('/analyze-chart', authenticate, analysisLimiter, upload.fields([{ name: 'chart', maxCount: 1 }, { name: 'chart2', maxCount: 1 }]), analyzeChart);
 router.get('/analyses', authenticate, getAnalyses);
 router.get('/analyses/:id', authenticate, getAnalysisById);
 
