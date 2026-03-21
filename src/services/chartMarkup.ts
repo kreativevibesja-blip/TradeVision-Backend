@@ -26,6 +26,7 @@ interface MarkupAnalysis {
   };
   invalidationLevel?: number | null;
   currentPrice?: number;
+  visiblePriceRange?: { min: number; max: number } | null;
 }
 
 interface ChartBoundsInput {
@@ -73,22 +74,26 @@ const collectZoneNumbers = (zone?: NumericZone | null) => {
 };
 
 const formatMarkupPrice = (value: number) => {
-  if (Math.abs(value) >= 1000) {
-    return value.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
-  }
-
-  if (Math.abs(value) >= 100) {
-    return value.toFixed(2);
-  }
-
-  if (Math.abs(value) >= 1) {
-    return value.toFixed(4);
-  }
-
-  return value.toFixed(5);
+  const decimals = Math.abs(value) >= 1000 ? 2 : Math.abs(value) >= 1 ? 4 : 5;
+  const parts = value.toFixed(decimals).split('.');
+  parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return parts.join('.');
 };
 
 const inferChartBounds = (analysis: MarkupAnalysis, input: ChartBoundsInput): ChartBounds | null => {
+  if (
+    analysis.visiblePriceRange &&
+    isFiniteNumber(analysis.visiblePriceRange.min) &&
+    isFiniteNumber(analysis.visiblePriceRange.max) &&
+    analysis.visiblePriceRange.max > analysis.visiblePriceRange.min
+  ) {
+    return {
+      minPrice: analysis.visiblePriceRange.min,
+      maxPrice: analysis.visiblePriceRange.max,
+      source: 'inferred',
+    };
+  }
+
   if (isFiniteNumber(input.minPrice) && isFiniteNumber(input.maxPrice) && input.maxPrice > input.minPrice) {
     return {
       minPrice: input.minPrice,
@@ -118,21 +123,7 @@ const inferChartBounds = (analysis: MarkupAnalysis, input: ChartBoundsInput): Ch
     return null;
   }
 
-  if (isFiniteNumber(analysis.currentPrice)) {
-    const currentPrice = analysis.currentPrice;
-    const furthestDistance = Math.max(...numbers.map((value) => Math.abs(value - currentPrice)));
-    const paddedDistance = furthestDistance * 1.18;
-
-    if (Number.isFinite(paddedDistance) && paddedDistance > 0) {
-      return {
-        minPrice: currentPrice - paddedDistance,
-        maxPrice: currentPrice + paddedDistance,
-        source: 'inferred',
-      };
-    }
-  }
-
-  const padding = range * 0.14;
+  const padding = range * 0.25;
 
   return {
     minPrice: minPrice - padding,
@@ -162,10 +153,10 @@ const escapeXml = (value: string) =>
     .replace(/'/g, '&apos;');
 
 const inferPlotArea = (width: number, height: number) => {
-  const left = Math.round(width * 0.03);
-  const right = Math.round(width * 0.91);
-  const top = Math.round(height * 0.11);
-  const bottom = Math.round(height * 0.88);
+  const left = Math.round(width * 0.005);
+  const right = Math.round(width * 0.905);
+  const top = Math.round(height * 0.06);
+  const bottom = Math.round(height * 0.925);
 
   return {
     left,
@@ -177,16 +168,18 @@ const inferPlotArea = (width: number, height: number) => {
   };
 };
 
+const FONT_STACK = 'DejaVu Sans, Liberation Sans, Noto Sans, Arial, Helvetica, sans-serif';
+
 const drawTag = (x: number, y: number, color: string, title: string, subtitle?: string) => {
   const safeTitle = escapeXml(title);
   const safeSubtitle = subtitle ? escapeXml(subtitle) : '';
-  const width = Math.max(124, Math.min(260, 48 + Math.max(title.length, subtitle?.length || 0) * 7));
-  const height = subtitle ? 42 : 28;
+  const width = Math.max(90, Math.min(210, 32 + Math.max(title.length, subtitle?.length || 0) * 5.6));
+  const height = subtitle ? 32 : 20;
 
   return `
-    <rect x="${x}" y="${y}" width="${width}" height="${height}" fill="rgba(10,14,23,0.92)" stroke="${color}" stroke-width="1.5" rx="10" />
-    <text x="${x + 12}" y="${y + 18}" fill="${color}" font-size="13" font-family="Arial, sans-serif" font-weight="700">${safeTitle}</text>
-    ${subtitle ? `<text x="${x + 12}" y="${y + 33}" fill="#e2e8f0" font-size="11" font-family="Arial, sans-serif" font-weight="500">${safeSubtitle}</text>` : ''}
+    <rect x="${x}" y="${y}" width="${width}" height="${height}" fill="rgba(10,14,23,0.92)" stroke="${color}" stroke-width="1" rx="4" />
+    <text x="${x + 8}" y="${y + 13}" fill="${color}" font-size="10" font-family="${FONT_STACK}" font-weight="700">${safeTitle}</text>
+    ${subtitle ? `<text x="${x + 8}" y="${y + 25}" fill="#e2e8f0" font-size="8" font-family="${FONT_STACK}" font-weight="500">${safeSubtitle}</text>` : ''}
   `;
 };
 
@@ -202,26 +195,29 @@ const drawZone = (context: DrawContext, zone: NumericZone | null | undefined, co
     return '';
   }
 
-  const top = clamp(Math.min(y1, y2), context.plotArea.top, context.plotArea.bottom);
-  const height = clamp(Math.abs(y2 - y1), 0, context.plotArea.height);
+  const rawTop = Math.min(y1, y2);
+  const rawHeight = Math.abs(y2 - y1);
+  const maxHeight = context.plotArea.height * 0.12;
+  const height = clamp(Math.min(rawHeight, maxHeight), 2, context.plotArea.height);
+  const center = rawTop + rawHeight / 2;
+  const top = clamp(center - height / 2, context.plotArea.top, context.plotArea.bottom - height);
 
   if (height < 2) {
     return '';
   }
 
-  const centerY = top + height / 2;
-  const tagY = clamp(top - 34, context.plotArea.top + 4, context.plotArea.bottom - 46);
+  const tagY = clamp(top - 26, context.plotArea.top + 2, context.plotArea.bottom - 36);
   const priceRange = `${formatMarkupPrice(zone.min)} - ${formatMarkupPrice(zone.max)}`;
-  const tagX = clamp(context.plotArea.left + 14, 12, context.plotArea.right - 220);
-  const anchorX = context.plotArea.left + 8;
-  const anchorY = clamp(centerY, context.plotArea.top + 8, context.plotArea.bottom - 8);
+  const tagX = clamp(context.plotArea.left + 10, 8, context.plotArea.right - 180);
+  const anchorX = context.plotArea.left + 6;
+  const anchorY = clamp(center, context.plotArea.top + 4, context.plotArea.bottom - 4);
   const reason = zone.reason || undefined;
 
   return `
-    <rect x="${context.plotArea.left}" y="${top}" width="${context.plotArea.width}" height="${height}" fill="${color}24" stroke="${color}" stroke-width="2" rx="4" />
-    <line x1="${anchorX}" y1="${anchorY}" x2="${tagX}" y2="${tagY + 20}" stroke="${color}" stroke-width="1.5" stroke-dasharray="5 4" />
-    <circle cx="${anchorX}" cy="${anchorY}" r="3.5" fill="${color}" />
-    ${drawTag(tagX, tagY, color, label, reason ? `${priceRange} • ${reason}` : priceRange)}
+    <rect x="${context.plotArea.left}" y="${top}" width="${context.plotArea.width}" height="${height}" fill="${color}18" stroke="${color}" stroke-width="1" rx="2" />
+    <line x1="${anchorX}" y1="${anchorY}" x2="${tagX}" y2="${tagY + 14}" stroke="${color}" stroke-width="1" stroke-dasharray="4 3" opacity="0.6" />
+    <circle cx="${anchorX}" cy="${anchorY}" r="2.5" fill="${color}" />
+    ${drawTag(tagX, tagY, color, label, reason ? `${priceRange} | ${reason}` : priceRange)}
   `;
 };
 
@@ -239,20 +235,20 @@ const drawLegendBadges = (context: DrawContext, analysis: MarkupAnalysis) => {
     return '';
   }
 
-  const badgeWidth = 92;
-  const badgeHeight = 28;
-  const gap = 10;
+  const badgeWidth = 72;
+  const badgeHeight = 20;
+  const gap = 6;
   const totalWidth = badges.length * badgeWidth + (badges.length - 1) * gap;
   const startX = Math.max(context.plotArea.left, context.plotArea.right - totalWidth);
-  const y = Math.max(14, context.plotArea.top - 44);
+  const y = Math.max(8, context.plotArea.top - 28);
 
   return badges
     .map((badge, index) => {
       const x = startX + index * (badgeWidth + gap);
       return `
-        <rect x="${x}" y="${y}" width="${badgeWidth}" height="${badgeHeight}" fill="rgba(10,14,23,0.88)" stroke="${badge.color}" stroke-width="1.5" rx="10" />
-        <circle cx="${x + 16}" cy="${y + 14}" r="5" fill="${badge.color}" />
-        <text x="${x + 28}" y="${y + 19}" fill="#f8fafc" font-size="13" font-family="Arial, sans-serif" font-weight="700">${escapeXml(badge.label)}</text>
+        <rect x="${x}" y="${y}" width="${badgeWidth}" height="${badgeHeight}" fill="rgba(10,14,23,0.88)" stroke="${badge.color}" stroke-width="1" rx="4" />
+        <circle cx="${x + 12}" cy="${y + 10}" r="3.5" fill="${badge.color}" />
+        <text x="${x + 22}" y="${y + 14}" fill="#f8fafc" font-size="10" font-family="${FONT_STACK}" font-weight="700">${escapeXml(badge.label)}</text>
       `;
     })
     .join('\n');
@@ -296,14 +292,14 @@ const drawLiquidityMarker = (context: DrawContext, analysis: MarkupAnalysis) => 
   }
 
   const color = analysis.liquidity?.type === 'buy-side' ? '#f59e0b' : '#06b6d4';
-  const label = analysis.liquidity?.type === 'buy-side' ? 'Liquidity sweep above highs' : 'Liquidity sweep below lows';
-  const safeY = clamp(y, context.plotArea.top + 8, context.plotArea.bottom - 8);
-  const tagX = clamp(context.plotArea.right - 232, context.plotArea.left + 12, context.plotArea.right - 180);
-  const tagY = clamp(safeY - 18, context.plotArea.top + 6, context.plotArea.bottom - 34);
+  const sweepLabel = analysis.liquidity?.type === 'buy-side' ? 'above highs' : 'below lows';
+  const safeY = clamp(y, context.plotArea.top + 4, context.plotArea.bottom - 4);
+  const tagX = clamp(context.plotArea.right - 180, context.plotArea.left + 8, context.plotArea.right - 120);
+  const tagY = clamp(safeY - 14, context.plotArea.top + 4, context.plotArea.bottom - 26);
 
   return `
-    <line x1="${context.plotArea.left}" y1="${safeY}" x2="${context.plotArea.right}" y2="${safeY}" stroke="${color}" stroke-width="2" stroke-dasharray="10 8" />
-    ${drawTag(tagX, tagY, color, 'Liquidity sweep', label)}
+    <line x1="${context.plotArea.left}" y1="${safeY}" x2="${context.plotArea.right}" y2="${safeY}" stroke="${color}" stroke-width="1.5" stroke-dasharray="8 6" opacity="0.8" />
+    ${drawTag(tagX, tagY, color, 'Liq. sweep', sweepLabel)}
   `;
 };
 
@@ -320,8 +316,13 @@ const buildOverlay = (context: DrawContext, analysis: MarkupAnalysis) => {
     return null;
   }
 
-  return Buffer.from(`
+  return Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
     <svg width="${context.width}" height="${context.height}" viewBox="0 0 ${context.width} ${context.height}" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <style type="text/css">
+          text { font-family: 'DejaVu Sans', 'Liberation Sans', 'Noto Sans', 'Arial', 'Helvetica', sans-serif; }
+        </style>
+      </defs>
       ${fragments.join('\n')}
     </svg>
   `);

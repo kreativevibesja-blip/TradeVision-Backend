@@ -43,6 +43,7 @@ export interface TradeSignalResult {
   confidence: number;
   invalidationLevel: number | null;
   invalidationReason: string;
+  visiblePriceRange: { min: number; max: number } | null;
   provider: 'tradevision';
 }
 
@@ -152,6 +153,7 @@ export function generateFinalSignal(aiData: VisionAnalysisResult, currentPrice: 
     confidence: aiData.quality.confidence,
     invalidationLevel: aiData.riskManagement.invalidationLevel,
     invalidationReason: aiData.riskManagement.invalidationReason,
+    visiblePriceRange: aiData.visiblePriceRange,
     provider: 'tradevision',
   };
 }

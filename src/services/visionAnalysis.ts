@@ -66,6 +66,7 @@ export interface VisionAnalysisResult {
   quality: SMCQuality;
   finalVerdict: SMCFinalVerdict;
   reasoning: string;
+  visiblePriceRange: { min: number; max: number } | null;
 }
 
 const parseJsonObject = (value: string) => {
@@ -291,6 +292,22 @@ const normalizeQualifiedZone = (value: unknown): SMCQualifiedZone | null => {
   };
 };
 
+const normalizeVisiblePriceRange = (value: unknown): { min: number; max: number } | null => {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const min = normalizeNumeric(record.min);
+  const max = normalizeNumeric(record.max);
+
+  if (min === null || max === null || max <= min) {
+    return null;
+  }
+
+  return { min, max };
+};
+
 const normalizeGeminiModelName = (modelName: string) => {
   const normalized = modelName.trim();
   const withoutPrefix = normalized.replace(/^models\//i, '');
@@ -417,7 +434,11 @@ OUTPUT FORMAT (STRICT JSON ONLY)
     "action": "enter | wait | avoid",
     "message": "Clear instruction for the user"
   },
-  "reasoning": "Full professional explanation using SMC logic"
+  "reasoning": "Full professional explanation using SMC logic",
+  "visible_price_range": {
+    "min": "lowest price number visible on the right-side Y-axis",
+    "max": "highest price number visible on the right-side Y-axis"
+  }
 }
 
 ========================================
@@ -453,6 +474,16 @@ STRICT RULES (DO NOT BREAK)
 
 9. REALISM OVER COMPLETION
    - It is better to say "no trade" than to give a bad trade
+
+10. PRECISE ZONE BOUNDARIES
+   - Read the Y-axis (right-side price scale) carefully
+   - Zone min/max must be TIGHT — only the order block body or key candle range
+   - Do NOT create wide supply/demand zones spanning large price ranges
+   - A typical zone should span 0.5-2% of the visible price range
+
+11. VISIBLE PRICE RANGE
+   - Read the lowest and highest price labels on the right Y-axis of the chart
+   - Return these exact numbers as visible_price_range min and max
 
 ========================================
 GOAL
@@ -553,5 +584,6 @@ Do not add commentary outside the JSON.`;
       parsed.reasoning,
       'The chart does not present a clean Smart Money Concepts setup yet, so patience is preferred over forcing an entry.'
     ),
+    visiblePriceRange: normalizeVisiblePriceRange(parsed.visible_price_range),
   };
 }
