@@ -599,6 +599,19 @@ export const listAdminTicketsPage = async (
 export const updateTicketRecord = (id: string, values: Partial<TicketRecord>) =>
   updateSingle<TicketRecord>('updateTicketRecord', TICKET_TABLE, values, (query) => query.eq('id', id));
 
+export const countOpenTickets = async () => {
+  const { count, error } = await supabase
+    .from(TICKET_TABLE)
+    .select('id', { count: 'exact', head: true })
+    .in('status', ['OPEN', 'IN_PROGRESS', 'WAITING_ON_USER']);
+
+  if (error) {
+    logDbError('countOpenTickets', error);
+  }
+
+  return count ?? 0;
+};
+
 const bucketByDay = <T>(rows: T[], getDate: (row: T) => string, getValue: (row: T) => number) => {
   const buckets = rows.reduce<Record<string, number>>((acc, row) => {
     const key = new Date(getDate(row)).toISOString().slice(0, 10);

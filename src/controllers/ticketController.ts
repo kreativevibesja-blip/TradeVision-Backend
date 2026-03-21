@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { Response } from 'express';
 import { AuthRequest } from '../middleware/auth';
 import {
+  countOpenTickets,
   createTicketRecord,
   getUserById,
   listAdminTicketsPage,
