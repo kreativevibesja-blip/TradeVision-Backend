@@ -18,11 +18,15 @@ const PAYMENT_TABLE = 'Payment';
 const PRICING_PLAN_TABLE = 'PricingPlan';
 const SYSTEM_SETTINGS_TABLE = 'SystemSettings';
 const ANNOUNCEMENT_TABLE = 'Announcement';
+const TICKET_TABLE = 'Ticket';
 
 export type SubscriptionTier = 'FREE' | 'PRO';
 export type UserRole = 'USER' | 'ADMIN';
 export type PaymentStatus = 'PENDING' | 'COMPLETED' | 'FAILED' | 'REFUNDED';
 export type AnalysisStatus = 'QUEUED' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
+export type TicketStatus = 'OPEN' | 'IN_PROGRESS' | 'WAITING_ON_USER' | 'RESOLVED' | 'CLOSED';
+export type TicketPriority = 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT';
+export type TicketCategory = 'ACCOUNT' | 'BILLING' | 'ANALYSIS' | 'BUG' | 'FEATURE' | 'GENERAL';
 
 export interface UserRecord {
   id: string;
@@ -134,6 +138,26 @@ export interface AnnouncementContentPayload {
   expiresAt: string | null;
 }
 
+export interface TicketRecord {
+  id: string;
+  ticketNumber: string;
+  userId: string;
+  userEmail: string;
+  userName: string | null;
+  whatsappNumber: string | null;
+  subject: string;
+  category: TicketCategory;
+  priority: TicketPriority;
+  status: TicketStatus;
+  message: string;
+  adminNotes: string | null;
+  adminResponse: string | null;
+  respondedAt: string | null;
+  closedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 const logDbError = (context: string, error: unknown) => {
   console.error(`Database error: ${context}`, error);
   throw new Error('Database operation failed');
@@ -195,6 +219,16 @@ const deleteSingle = async (context: string, table: string, apply: (query: any) 
 };
 
 const normalizeSearch = (search: string) => search.replace(/[,]/g, ' ').trim();
+
+const buildTicketSearch = (search: string) => {
+  const term = normalizeSearch(search).replace(/[()%]/g, '');
+  return [
+    `ticketNumber.ilike.%${term}%`,
+    `subject.ilike.%${term}%`,
+    `userEmail.ilike.%${term}%`,
+    `userName.ilike.%${term}%`,
+  ].join(',');
+};
 
 export const getUserByEmail = (email: string) =>
   maybeSingle<UserRecord>('getUserByEmail', supabase.from(USER_TABLE).select('*').eq('email', email).maybeSingle());
@@ -486,6 +520,84 @@ export const deleteAnnouncementRecords = async (ids: string[]) => {
     logDbError('deleteAnnouncementRecords', error);
   }
 };
+
+export const createTicketRecord = (values: Pick<TicketRecord, 'ticketNumber' | 'userId' | 'userEmail' | 'userName' | 'whatsappNumber' | 'subject' | 'category' | 'priority' | 'message'>) =>
+  insertSingle<TicketRecord>('createTicketRecord', TICKET_TABLE, {
+    status: 'OPEN',
+    ...values,
+  });
+
+export const getTicketByIdForUser = (id: string, userId: string) =>
+  maybeSingle<TicketRecord>('getTicketByIdForUser', supabase.from(TICKET_TABLE).select('*').eq('id', id).eq('userId', userId).maybeSingle());
+
+export const listTicketsForUser = async (userId: string, page: number, limit: number) => {
+  const skip = (page - 1) * limit;
+  const { data, count, error } = await supabase
+    .from(TICKET_TABLE)
+    .select('*', { count: 'exact' })
+    .eq('userId', userId)
+    .order('createdAt', { ascending: false })
+    .range(skip, skip + limit - 1);
+
+  if (error) {
+    logDbError('listTicketsForUser', error);
+  }
+
+  return {
+    tickets: (data as TicketRecord[]) ?? [],
+    total: count ?? 0,
+  };
+};
+
+export const listAdminTicketsPage = async (
+  page: number,
+  limit: number,
+  filters: {
+    search?: string;
+    status?: TicketStatus;
+    priority?: TicketPriority;
+    dateRange?: '7d' | '30d' | '90d' | 'all';
+  }
+) => {
+  const skip = (page - 1) * limit;
+  let query = supabase
+    .from(TICKET_TABLE)
+    .select('*', { count: 'exact' })
+    .order('createdAt', { ascending: false })
+    .range(skip, skip + limit - 1);
+
+  if (filters.status) {
+    query = query.eq('status', filters.status);
+  }
+
+  if (filters.priority) {
+    query = query.eq('priority', filters.priority);
+  }
+
+  if (filters.search?.trim()) {
+    query = query.or(buildTicketSearch(filters.search));
+  }
+
+  const days = filters.dateRange === '7d' ? 7 : filters.dateRange === '30d' ? 30 : filters.dateRange === '90d' ? 90 : null;
+  if (days) {
+    const fromDate = new Date();
+    fromDate.setDate(fromDate.getDate() - days);
+    query = query.gte('createdAt', fromDate.toISOString());
+  }
+
+  const { data, count, error } = await query;
+  if (error) {
+    logDbError('listAdminTicketsPage', error);
+  }
+
+  return {
+    tickets: (data as TicketRecord[]) ?? [],
+    total: count ?? 0,
+  };
+};
+
+export const updateTicketRecord = (id: string, values: Partial<TicketRecord>) =>
+  updateSingle<TicketRecord>('updateTicketRecord', TICKET_TABLE, values, (query) => query.eq('id', id));
 
 const bucketByDay = <T>(rows: T[], getDate: (row: T) => string, getValue: (row: T) => number) => {
   const buckets = rows.reduce<Record<string, number>>((acc, row) => {

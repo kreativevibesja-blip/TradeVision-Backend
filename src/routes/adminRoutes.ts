@@ -20,6 +20,7 @@ import {
   updateAnnouncement,
   deleteAnnouncement,
 } from '../controllers/adminController';
+import { getAdminTickets, updateAdminTicket } from '../controllers/ticketController';
 
 const router = Router();
 
@@ -44,5 +45,7 @@ router.get('/announcements', getAnnouncements);
 router.post('/announcements', createAnnouncement);
 router.patch('/announcements/:id', updateAnnouncement);
 router.delete('/announcements/:id', deleteAnnouncement);
+router.get('/tickets', getAdminTickets);
+router.patch('/tickets/:id', updateAdminTicket);
 
 export default router;
