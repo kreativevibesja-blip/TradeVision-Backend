@@ -67,6 +67,10 @@ export interface VisionAnalysisResult {
   finalVerdict: SMCFinalVerdict;
   reasoning: string;
   visiblePriceRange: { min: number; max: number } | null;
+  stopLoss: number | null;
+  takeProfit1: number | null;
+  takeProfit2: number | null;
+  takeProfit3: number | null;
 }
 
 const parseJsonObject = (value: string) => {
@@ -367,7 +371,7 @@ export async function analyzeVisionStructure(
   const primaryModel = getGeminiModelForSubscription(subscription);
   const fallbackModel = normalizeGeminiModelName(config.gemini.freeModel);
 
-  const prompt = `You are an institutional-level Smart Money Concepts (SMC) trading analyst.
+  const basePromptHeader = `You are an institutional-level Smart Money Concepts (SMC) trading analyst.
 
 Your job is to analyze the provided chart like a professional trader, not a signal generator.
 
@@ -379,12 +383,9 @@ You MUST think in terms of:
 - Confirmation-based entries
 
 Trading pair/index: ${pair}
-Timeframe: ${timeframe}
+Timeframe: ${timeframe}`;
 
-========================================
-OUTPUT FORMAT (STRICT JSON ONLY)
-========================================
-
+  const proJsonSchema = `
 {
   "trend": "bullish | bearish | ranging",
   "structure": {
@@ -434,13 +435,75 @@ OUTPUT FORMAT (STRICT JSON ONLY)
     "action": "enter | wait | avoid",
     "message": "Clear instruction for the user"
   },
+  "stop_loss": number | null,
+  "take_profit_1": number | null,
+  "take_profit_2": number | null,
+  "take_profit_3": number | null,
   "reasoning": "Full professional explanation using SMC logic",
   "visible_price_range": {
     "min": "lowest price number visible on the right-side Y-axis",
     "max": "highest price number visible on the right-side Y-axis"
   }
-}
+}`;
 
+  const freeJsonSchema = `
+{
+  "trend": "bullish | bearish | ranging",
+  "structure": {
+    "state": "higher highs | lower lows | transition",
+    "bos": "bullish | bearish | none",
+    "choch": "bullish | bearish | none"
+  },
+  "liquidity": {
+    "type": "buy-side | sell-side | none",
+    "description": "Brief description of liquidity conditions"
+  },
+  "zones": {
+    "supply": {
+      "min": number,
+      "max": number,
+      "reason": "order block | imbalance | previous structure"
+    },
+    "demand": {
+      "min": number,
+      "max": number,
+      "reason": "order block | imbalance | previous structure"
+    }
+  },
+  "price_position": {
+    "location": "premium | discount | equilibrium",
+    "explanation": "Brief explanation of price position"
+  },
+  "entry_plan": {
+    "bias": "buy | sell | none",
+    "entry_type": "instant | confirmation | none",
+    "entry_zone": {
+      "min": number | null,
+      "max": number | null
+    },
+    "confirmation": "CHoCH | BOS | rejection | none",
+    "reason": "Brief reason for this entry"
+  },
+  "risk_management": {
+    "invalidation_level": number,
+    "invalidation_reason": "What breaks the setup"
+  },
+  "quality": {
+    "setup_rating": "A | B | C | avoid",
+    "confidence": 1-100
+  },
+  "final_verdict": {
+    "action": "enter | wait | avoid",
+    "message": "Clear instruction for the user"
+  },
+  "reasoning": "Concise explanation of the setup using SMC logic",
+  "visible_price_range": {
+    "min": "lowest price number visible on the right-side Y-axis",
+    "max": "highest price number visible on the right-side Y-axis"
+  }
+}`;
+
+  const proRules = `
 ========================================
 STRICT RULES (DO NOT BREAK)
 ========================================
@@ -485,6 +548,47 @@ STRICT RULES (DO NOT BREAK)
    - Read the lowest and highest price labels on the right Y-axis of the chart
    - Return these exact numbers as visible_price_range min and max
 
+12. STOP LOSS AND TAKE PROFIT RULES
+   - If action is "enter" (immediate trade): provide DEFINITIVE stop_loss, take_profit_1, take_profit_2, and take_profit_3 with exact price levels
+   - If action is "wait": provide POTENTIAL/PROJECTED stop_loss and take_profit levels based on where you expect the setup to complete
+   - If action is "avoid": stop_loss and take_profits can be null
+   - stop_loss MUST be at a logical structural level (below demand for buys, above supply for sells)
+   - take_profit_1: conservative target (nearest structure level)
+   - take_profit_2: moderate target (next key level)
+   - take_profit_3: aggressive target (major structure or liquidity pool)
+   - Risk:Reward ratio must be at least 1:2 for take_profit_1`;
+
+  const freeRules = `
+========================================
+STRICT RULES (DO NOT BREAK)
+========================================
+
+1. DO NOT force trades
+   - If no clear setup -> action MUST be "wait" or "avoid"
+
+2. Identify general liquidity conditions briefly
+
+3. Justify supply/demand zones
+
+4. Include invalidation level
+
+5. ENTRY DISCIPLINE
+   - If price is NOT in a key zone -> entry_type MUST be "none"
+
+6. STRUCTURE FIRST
+   - If structure is unclear -> setup_rating MUST be "avoid"
+
+7. REALISM OVER COMPLETION
+   - It is better to say "no trade" than to give a bad trade
+
+8. PRECISE ZONE BOUNDARIES
+   - Zone min/max must be TIGHT — only the order block body or key candle range
+
+9. VISIBLE PRICE RANGE
+   - Read the lowest and highest price labels on the right Y-axis of the chart
+   - Return these exact numbers as visible_price_range min and max`;
+
+  const proGoal = `
 ========================================
 GOAL
 ========================================
@@ -503,6 +607,23 @@ It must be:
 Return STRICT JSON ONLY.
 Do not use markdown.
 Do not add commentary outside the JSON.`;
+
+  const freeGoal = `
+========================================
+GOAL
+========================================
+
+Provide a useful overview of the chart's market structure and key levels.
+Keep your reasoning concise — 2-3 sentences max.
+Do NOT include stop loss or take profit levels.
+
+Return STRICT JSON ONLY.
+Do not use markdown.
+Do not add commentary outside the JSON.`;
+
+  const prompt = subscription === 'PRO'
+    ? `${basePromptHeader}\n\n========================================\nOUTPUT FORMAT (STRICT JSON ONLY)\n========================================\n${proJsonSchema}\n${proRules}\n${proGoal}`
+    : `${basePromptHeader}\n\n========================================\nOUTPUT FORMAT (STRICT JSON ONLY)\n========================================\n${freeJsonSchema}\n${freeRules}\n${freeGoal}`;
 
   let result;
 
@@ -585,5 +706,9 @@ Do not add commentary outside the JSON.`;
       'The chart does not present a clean Smart Money Concepts setup yet, so patience is preferred over forcing an entry.'
     ),
     visiblePriceRange: normalizeVisiblePriceRange(parsed.visible_price_range),
+    stopLoss: normalizeNumeric(parsed.stop_loss),
+    takeProfit1: normalizeNumeric(parsed.take_profit_1),
+    takeProfit2: normalizeNumeric(parsed.take_profit_2),
+    takeProfit3: normalizeNumeric(parsed.take_profit_3),
   };
 }

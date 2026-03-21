@@ -44,6 +44,10 @@ export interface TradeSignalResult {
   invalidationLevel: number | null;
   invalidationReason: string;
   visiblePriceRange: { min: number; max: number } | null;
+  stopLoss: number | null;
+  takeProfit1: number | null;
+  takeProfit2: number | null;
+  takeProfit3: number | null;
   provider: 'tradevision';
 }
 
@@ -154,6 +158,10 @@ export function generateFinalSignal(aiData: VisionAnalysisResult, currentPrice: 
     invalidationLevel: aiData.riskManagement.invalidationLevel,
     invalidationReason: aiData.riskManagement.invalidationReason,
     visiblePriceRange: aiData.visiblePriceRange,
+    stopLoss: aiData.stopLoss,
+    takeProfit1: aiData.takeProfit1,
+    takeProfit2: aiData.takeProfit2,
+    takeProfit3: aiData.takeProfit3,
     provider: 'tradevision',
   };
 }
