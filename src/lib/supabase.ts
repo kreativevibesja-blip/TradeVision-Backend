@@ -557,6 +557,9 @@ export const createTicketRecord = (values: Pick<TicketRecord, 'ticketNumber' | '
 export const getTicketByIdForUser = (id: string, userId: string) =>
   maybeSingle<TicketRecord>('getTicketByIdForUser', supabase.from(TICKET_TABLE).select('*').eq('id', id).eq('userId', userId).maybeSingle());
 
+export const getTicketById = (id: string) =>
+  maybeSingle<TicketRecord>('getTicketById', supabase.from(TICKET_TABLE).select('*').eq('id', id).maybeSingle());
+
 export const listTicketsForUser = async (userId: string, page: number, limit: number) => {
   const skip = (page - 1) * limit;
   const { data, count, error } = await supabase

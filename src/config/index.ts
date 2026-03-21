@@ -69,6 +69,12 @@ export const config = {
     dir: process.env.UPLOAD_DIR || 'uploads',
     maxFileSize: parseInt(process.env.MAX_FILE_SIZE || '10485760', 10),
   },
+
+  email: {
+    user: process.env.EMAIL_USER || '',
+    pass: process.env.EMAIL_PASS || '',
+    from: process.env.EMAIL_FROM || 'MyTradeVision Support <help@mytradevision.online>',
+  },
   
   limits: {
     freeDaily: 2,

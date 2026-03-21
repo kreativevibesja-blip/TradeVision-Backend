@@ -4,6 +4,7 @@ import { AuthRequest } from '../middleware/auth';
 import {
   countOpenTickets,
   createTicketRecord,
+  getTicketById,
   getUserById,
   listAdminTicketsPage,
   listTicketsForUser,
@@ -12,6 +13,7 @@ import {
   type TicketPriority,
   type TicketStatus,
 } from '../lib/supabase';
+import { sendTicketReplyEmail } from '../services/emailService';
 
 const TICKET_CATEGORIES: TicketCategory[] = ['ACCOUNT', 'BILLING', 'ANALYSIS', 'BUG', 'FEATURE', 'GENERAL'];
 const TICKET_PRIORITIES: TicketPriority[] = ['LOW', 'MEDIUM', 'HIGH', 'URGENT'];
@@ -162,5 +164,47 @@ export const updateAdminTicket = async (req: AuthRequest, res: Response) => {
   } catch (error) {
     console.error('Update admin ticket error:', error);
     return res.status(500).json({ error: 'Failed to update ticket' });
+  }
+};
+
+export const replyToTicket = async (req: AuthRequest, res: Response) => {
+  try {
+    const message = normalizeText(req.body.message);
+
+    if (!message || message.length < 2) {
+      return res.status(400).json({ error: 'Message is required' });
+    }
+
+    const ticket = await getTicketById(req.params.id);
+    if (!ticket) {
+      return res.status(404).json({ error: 'Ticket not found' });
+    }
+
+    if (!ticket.userEmail) {
+      return res.status(400).json({ error: 'Ticket has no email address' });
+    }
+
+    const emailResult = await sendTicketReplyEmail({
+      to: ticket.userEmail,
+      name: ticket.userName,
+      ticketNumber: ticket.ticketNumber,
+      subject: ticket.subject,
+      message,
+    });
+
+    if (!emailResult.success) {
+      return res.status(500).json({ error: 'Failed to send email. Check email configuration.' });
+    }
+
+    const updated = await updateTicketRecord(ticket.id, {
+      adminResponse: message,
+      respondedAt: new Date().toISOString(),
+      status: ticket.status === 'OPEN' ? 'IN_PROGRESS' : ticket.status,
+    });
+
+    return res.json({ ticket: mapTicket(updated), emailSent: true });
+  } catch (error) {
+    console.error('Reply to ticket error:', error);
+    return res.status(500).json({ error: 'Failed to send reply' });
   }
 };

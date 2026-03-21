@@ -20,7 +20,7 @@ import {
   updateAnnouncement,
   deleteAnnouncement,
 } from '../controllers/adminController';
-import { getAdminTickets, getOpenTicketCount, updateAdminTicket } from '../controllers/ticketController';
+import { getAdminTickets, getOpenTicketCount, updateAdminTicket, replyToTicket } from '../controllers/ticketController';
 import { getCoupons, createCoupon, toggleCoupon, deleteCoupon } from '../controllers/couponController';
 
 const router = Router();
@@ -49,6 +49,7 @@ router.delete('/announcements/:id', deleteAnnouncement);
 router.get('/tickets', getAdminTickets);
 router.get('/tickets/count', getOpenTicketCount);
 router.patch('/tickets/:id', updateAdminTicket);
+router.post('/tickets/:id/reply', replyToTicket);
 router.get('/coupons', getCoupons);
 router.post('/coupons', createCoupon);
 router.patch('/coupons/:id/toggle', toggleCoupon);
