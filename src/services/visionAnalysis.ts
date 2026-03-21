@@ -75,7 +75,7 @@ const parseJsonObject = (value: string) => {
   const end = fenced.lastIndexOf('}');
 
   if (start === -1 || end === -1 || end <= start) {
-    throw new Error('Gemini did not return JSON');
+    throw new Error('TradeVision analysis service did not return valid JSON');
   }
 
   return JSON.parse(fenced.slice(start, end + 1)) as Record<string, unknown>;
@@ -343,7 +343,7 @@ export async function analyzeVisionStructure(
   subscription: SubscriptionTier
 ): Promise<VisionAnalysisResult> {
   if (!config.gemini.apiKey) {
-    throw new Error('Gemini API key is not configured');
+    throw new Error('TradeVision AI is not configured correctly');
   }
 
   const genAI = new GoogleGenerativeAI(config.gemini.apiKey);

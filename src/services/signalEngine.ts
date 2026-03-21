@@ -43,7 +43,7 @@ export interface TradeSignalResult {
   confidence: number;
   invalidationLevel: number | null;
   invalidationReason: string;
-  provider: 'gemini-vision+smc';
+  provider: 'tradevision';
 }
 
 const sweepFromLiquidity = (type: VisionAnalysisResult['liquidity']['type']): 'above highs' | 'below lows' | 'none' => {
@@ -152,6 +152,6 @@ export function generateFinalSignal(aiData: VisionAnalysisResult, currentPrice: 
     confidence: aiData.quality.confidence,
     invalidationLevel: aiData.riskManagement.invalidationLevel,
     invalidationReason: aiData.riskManagement.invalidationReason,
-    provider: 'gemini-vision+smc',
+    provider: 'tradevision',
   };
 }
