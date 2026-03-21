@@ -43,6 +43,14 @@ interface DrawContext {
   width: number;
   height: number;
   bounds: ChartBounds;
+  plotArea: {
+    left: number;
+    right: number;
+    top: number;
+    bottom: number;
+    width: number;
+    height: number;
+  };
 }
 
 interface MarkupResult {
@@ -62,6 +70,22 @@ const collectZoneNumbers = (zone?: NumericZone | null) => {
   }
 
   return [zone.min, zone.max].filter(isFiniteNumber);
+};
+
+const formatMarkupPrice = (value: number) => {
+  if (Math.abs(value) >= 1000) {
+    return value.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  }
+
+  if (Math.abs(value) >= 100) {
+    return value.toFixed(2);
+  }
+
+  if (Math.abs(value) >= 1) {
+    return value.toFixed(4);
+  }
+
+  return value.toFixed(5);
 };
 
 const inferChartBounds = (analysis: MarkupAnalysis, input: ChartBoundsInput): ChartBounds | null => {
@@ -94,7 +118,21 @@ const inferChartBounds = (analysis: MarkupAnalysis, input: ChartBoundsInput): Ch
     return null;
   }
 
-  const padding = range * 0.12;
+  if (isFiniteNumber(analysis.currentPrice)) {
+    const currentPrice = analysis.currentPrice;
+    const furthestDistance = Math.max(...numbers.map((value) => Math.abs(value - currentPrice)));
+    const paddedDistance = furthestDistance * 1.18;
+
+    if (Number.isFinite(paddedDistance) && paddedDistance > 0) {
+      return {
+        minPrice: currentPrice - paddedDistance,
+        maxPrice: currentPrice + paddedDistance,
+        source: 'inferred',
+      };
+    }
+  }
+
+  const padding = range * 0.14;
 
   return {
     minPrice: minPrice - padding,
@@ -110,7 +148,7 @@ const priceToY = (price: number, context: DrawContext) => {
   }
 
   const percent = (price - context.bounds.minPrice) / range;
-  return context.height - percent * context.height;
+  return context.plotArea.bottom - percent * context.plotArea.height;
 };
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
@@ -122,6 +160,35 @@ const escapeXml = (value: string) =>
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&apos;');
+
+const inferPlotArea = (width: number, height: number) => {
+  const left = Math.round(width * 0.03);
+  const right = Math.round(width * 0.91);
+  const top = Math.round(height * 0.11);
+  const bottom = Math.round(height * 0.88);
+
+  return {
+    left,
+    right,
+    top,
+    bottom,
+    width: right - left,
+    height: bottom - top,
+  };
+};
+
+const drawTag = (x: number, y: number, color: string, title: string, subtitle?: string) => {
+  const safeTitle = escapeXml(title);
+  const safeSubtitle = subtitle ? escapeXml(subtitle) : '';
+  const width = Math.max(124, Math.min(260, 48 + Math.max(title.length, subtitle?.length || 0) * 7));
+  const height = subtitle ? 42 : 28;
+
+  return `
+    <rect x="${x}" y="${y}" width="${width}" height="${height}" fill="rgba(10,14,23,0.92)" stroke="${color}" stroke-width="1.5" rx="10" />
+    <text x="${x + 12}" y="${y + 18}" fill="${color}" font-size="13" font-family="Arial, sans-serif" font-weight="700">${safeTitle}</text>
+    ${subtitle ? `<text x="${x + 12}" y="${y + 33}" fill="#e2e8f0" font-size="11" font-family="Arial, sans-serif" font-weight="500">${safeSubtitle}</text>` : ''}
+  `;
+};
 
 const drawZone = (context: DrawContext, zone: NumericZone | null | undefined, color: string, label: string) => {
   if (!zone || !isFiniteNumber(zone.min) || !isFiniteNumber(zone.max)) {
@@ -135,21 +202,26 @@ const drawZone = (context: DrawContext, zone: NumericZone | null | undefined, co
     return '';
   }
 
-  const top = clamp(Math.min(y1, y2), 0, context.height);
-  const height = clamp(Math.abs(y2 - y1), 0, context.height);
+  const top = clamp(Math.min(y1, y2), context.plotArea.top, context.plotArea.bottom);
+  const height = clamp(Math.abs(y2 - y1), 0, context.plotArea.height);
 
   if (height < 2) {
     return '';
   }
 
-  const labelY = clamp(top + 22, 24, context.height - 12);
-  const reason = zone.reason ? ` • ${zone.reason}` : '';
-  const labelText = escapeXml(`${label}${reason}`);
+  const centerY = top + height / 2;
+  const tagY = clamp(top - 34, context.plotArea.top + 4, context.plotArea.bottom - 46);
+  const priceRange = `${formatMarkupPrice(zone.min)} - ${formatMarkupPrice(zone.max)}`;
+  const tagX = clamp(context.plotArea.left + 14, 12, context.plotArea.right - 220);
+  const anchorX = context.plotArea.left + 8;
+  const anchorY = clamp(centerY, context.plotArea.top + 8, context.plotArea.bottom - 8);
+  const reason = zone.reason || undefined;
 
   return `
-    <rect x="0" y="${top}" width="${context.width}" height="${height}" fill="${color}33" stroke="${color}" stroke-width="2" rx="2" />
-    <rect x="14" y="${labelY - 18}" width="220" height="24" fill="rgba(10,14,23,0.82)" rx="6" />
-    <text x="24" y="${labelY}" fill="${color}" font-size="14" font-family="Arial, sans-serif" font-weight="700">${labelText}</text>
+    <rect x="${context.plotArea.left}" y="${top}" width="${context.plotArea.width}" height="${height}" fill="${color}24" stroke="${color}" stroke-width="2" rx="4" />
+    <line x1="${anchorX}" y1="${anchorY}" x2="${tagX}" y2="${tagY + 20}" stroke="${color}" stroke-width="1.5" stroke-dasharray="5 4" />
+    <circle cx="${anchorX}" cy="${anchorY}" r="3.5" fill="${color}" />
+    ${drawTag(tagX, tagY, color, label, reason ? `${priceRange} • ${reason}` : priceRange)}
   `;
 };
 
@@ -171,8 +243,8 @@ const drawLegendBadges = (context: DrawContext, analysis: MarkupAnalysis) => {
   const badgeHeight = 28;
   const gap = 10;
   const totalWidth = badges.length * badgeWidth + (badges.length - 1) * gap;
-  const startX = Math.max(14, context.width - totalWidth - 18);
-  const y = 16;
+  const startX = Math.max(context.plotArea.left, context.plotArea.right - totalWidth);
+  const y = Math.max(14, context.plotArea.top - 44);
 
   return badges
     .map((badge, index) => {
@@ -225,13 +297,13 @@ const drawLiquidityMarker = (context: DrawContext, analysis: MarkupAnalysis) => 
 
   const color = analysis.liquidity?.type === 'buy-side' ? '#f59e0b' : '#06b6d4';
   const label = analysis.liquidity?.type === 'buy-side' ? 'Liquidity sweep above highs' : 'Liquidity sweep below lows';
-  const safeY = clamp(y, 8, context.height - 8);
-  const labelY = clamp(safeY - 10, 18, context.height - 16);
+  const safeY = clamp(y, context.plotArea.top + 8, context.plotArea.bottom - 8);
+  const tagX = clamp(context.plotArea.right - 232, context.plotArea.left + 12, context.plotArea.right - 180);
+  const tagY = clamp(safeY - 18, context.plotArea.top + 6, context.plotArea.bottom - 34);
 
   return `
-    <line x1="0" y1="${safeY}" x2="${context.width}" y2="${safeY}" stroke="${color}" stroke-width="2" stroke-dasharray="10 8" />
-    <rect x="14" y="${labelY - 18}" width="230" height="24" fill="rgba(10,14,23,0.86)" rx="6" />
-    <text x="24" y="${labelY}" fill="${color}" font-size="14" font-family="Arial, sans-serif" font-weight="700">${escapeXml(label)}</text>
+    <line x1="${context.plotArea.left}" y1="${safeY}" x2="${context.plotArea.right}" y2="${safeY}" stroke="${color}" stroke-width="2" stroke-dasharray="10 8" />
+    ${drawTag(tagX, tagY, color, 'Liquidity sweep', label)}
   `;
 };
 
@@ -326,6 +398,7 @@ export async function drawChartMarkup(
         width: metadata.width,
         height: metadata.height,
         bounds: chartBounds,
+        plotArea: inferPlotArea(metadata.width, metadata.height),
       },
       analysis
     );
