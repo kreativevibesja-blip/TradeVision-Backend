@@ -11,7 +11,21 @@ const frontendUrls = (process.env.FRONTEND_URLS || process.env.FRONTEND_URL || '
   .map((url) => url.trim())
   .filter(Boolean);
 
-const frontendPreviewDomain = process.env.FRONTEND_PREVIEW_DOMAIN?.trim().toLowerCase() || '';
+const inferPreviewDomain = () => {
+  const configured = process.env.FRONTEND_PREVIEW_DOMAIN?.trim().toLowerCase();
+  if (configured) {
+    return configured;
+  }
+
+  const vercelOrigin = frontendUrls.find((url) => /vercel\.app/i.test(url));
+  if (vercelOrigin) {
+    return 'vercel.app';
+  }
+
+  return '';
+};
+
+const frontendPreviewDomain = inferPreviewDomain();
 
 export const config = {
   port: parseInt(process.env.PORT || '4000', 10),
