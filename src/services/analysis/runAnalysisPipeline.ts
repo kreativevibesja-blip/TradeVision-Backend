@@ -1,6 +1,7 @@
 import { incrementUserDailyUsage, updateAnalysis } from '../../lib/supabase';
 import { analyzeVisionStructure } from '../visionAnalysis';
 import { generateFinalSignal } from '../signalEngine';
+import { drawChartMarkup } from '../chartMarkup';
 import type { SubscriptionTier } from '../../lib/supabase';
 
 interface RunAnalysisPipelineInput {
@@ -10,11 +11,14 @@ interface RunAnalysisPipelineInput {
   timeframe: string;
   subscription: SubscriptionTier;
   currentPrice: number;
+  chartMinPrice: number | null;
+  chartMaxPrice: number | null;
+  imageUrl: string;
   base64Image: string;
   mimeType: string;
 }
 
-export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe, subscription, currentPrice, base64Image, mimeType }: RunAnalysisPipelineInput) {
+export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe, subscription, currentPrice, chartMinPrice, chartMaxPrice, imageUrl, base64Image, mimeType }: RunAnalysisPipelineInput) {
   try {
     await updateAnalysis(analysisId, {
       status: 'PROCESSING',
@@ -38,6 +42,18 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
     });
 
     const signal = generateFinalSignal(vision, currentPrice);
+    const markup = await drawChartMarkup(Buffer.from(base64Image, 'base64'), signal, {
+      minPrice: chartMinPrice,
+      maxPrice: chartMaxPrice,
+    });
+
+    const enrichedSignal = {
+      ...signal,
+      originalImageUrl: imageUrl,
+      markedImageUrl: markup.markedImageUrl,
+      hasMarkup: markup.hasMarkup,
+      chartBounds: markup.chartBounds,
+    };
 
     const bias = signal.trend === 'bullish' ? 'BULLISH' : signal.trend === 'bearish' ? 'BEARISH' : 'NEUTRAL';
 
@@ -51,13 +67,13 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
       tp1: null,
       tp2: null,
       takeProfits: [],
-      confidence: signal.confidence,
-      explanation: signal.reasoning,
-      analysisText: signal.reasoning,
-      rawResponse: signal,
-      structure: signal.structure,
-      strategy: `${signal.trend.toUpperCase()} ${signal.entryLogic.type.toUpperCase()} SMC setup`,
-      waitConditions: signal.message,
+      confidence: enrichedSignal.confidence,
+      explanation: enrichedSignal.reasoning,
+      analysisText: enrichedSignal.reasoning,
+      rawResponse: enrichedSignal,
+      structure: enrichedSignal.structure,
+      strategy: `${enrichedSignal.trend.toUpperCase()} ${enrichedSignal.entryLogic.type.toUpperCase()} SMC setup`,
+      waitConditions: enrichedSignal.message,
       errorMessage: null,
     });
 

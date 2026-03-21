@@ -31,6 +31,11 @@ const parseCurrentPrice = (value: unknown) => {
   return null;
 };
 
+const parseOptionalPrice = (value: unknown) => {
+  const parsed = parseCurrentPrice(value);
+  return parsed === null ? null : parsed;
+};
+
 const parseInlineImage = (value: unknown) => {
   if (typeof value !== 'string' || !value.trim()) {
     return null;
@@ -91,6 +96,8 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
   try {
     const { pair, timeframe } = req.body;
     const currentPrice = parseCurrentPrice(req.body.currentPrice);
+    const chartMinPrice = parseOptionalPrice(req.body.chartMinPrice);
+    const chartMaxPrice = parseOptionalPrice(req.body.chartMaxPrice);
 
     if (!pair || !timeframe) {
       return res.status(400).json({ error: 'Pair and timeframe are required' });
@@ -143,6 +150,9 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
       timeframe,
       subscription: user.subscription,
       currentPrice,
+      chartMinPrice,
+      chartMaxPrice,
+      imageUrl,
       ...(req.file
         ? {
             base64Image: (await fs.readFile(path.join(process.cwd(), config.upload.dir, req.file.filename))).toString('base64'),
