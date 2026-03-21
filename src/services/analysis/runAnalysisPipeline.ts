@@ -1,7 +1,7 @@
 import { incrementUserDailyUsage, updateAnalysis } from '../../lib/supabase';
 import { analyzeVisionStructure } from '../visionAnalysis';
 import { generateFinalSignal } from '../signalEngine';
-import { drawChartMarkup } from '../chartMarkup';
+import { drawChartMarkup, isChartMarkupEnabledForPlan } from '../chartMarkup';
 import type { SubscriptionTier } from '../../lib/supabase';
 
 interface RunAnalysisPipelineInput {
@@ -42,10 +42,13 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
     });
 
     const signal = generateFinalSignal(vision, currentPrice);
-    const markup = await drawChartMarkup(Buffer.from(base64Image, 'base64'), signal, {
-      minPrice: chartMinPrice,
-      maxPrice: chartMaxPrice,
-    });
+    const markupEnabled = await isChartMarkupEnabledForPlan(subscription);
+    const markup = markupEnabled
+      ? await drawChartMarkup(Buffer.from(base64Image, 'base64'), signal, {
+          minPrice: chartMinPrice,
+          maxPrice: chartMaxPrice,
+        })
+      : { markedImageUrl: null, chartBounds: null, hasMarkup: false };
 
     const enrichedSignal = {
       ...signal,

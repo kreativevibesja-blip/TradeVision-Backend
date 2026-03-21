@@ -3,7 +3,7 @@ import path from 'path';
 import { randomUUID } from 'crypto';
 import sharp from 'sharp';
 import { config } from '../config';
-import { supabase } from '../lib/supabase';
+import { getSystemSetting, supabase, type SubscriptionTier } from '../lib/supabase';
 
 interface NumericZone {
   min: number | null;
@@ -50,6 +50,9 @@ interface MarkupResult {
   chartBounds: ChartBounds | null;
   hasMarkup: boolean;
 }
+
+const CHART_MARKUP_FREE_ENABLED_KEY = 'chart_markup_free_enabled';
+const CHART_MARKUP_PRO_ENABLED_KEY = 'chart_markup_pro_enabled';
 
 const isFiniteNumber = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
 
@@ -150,6 +153,39 @@ const drawZone = (context: DrawContext, zone: NumericZone | null | undefined, co
   `;
 };
 
+const drawLegendBadges = (context: DrawContext, analysis: MarkupAnalysis) => {
+  const badges = [
+    analysis.zones?.supplyZone ? { label: 'Supply', color: '#ef4444' } : null,
+    analysis.zones?.demandZone ? { label: 'Demand', color: '#22c55e' } : null,
+    (analysis.entryPlan?.entryZone ?? analysis.entryZone) ? { label: 'Entry', color: '#3b82f6' } : null,
+    analysis.liquidity?.type && analysis.liquidity.type !== 'none'
+      ? { label: 'Sweep', color: analysis.liquidity.type === 'buy-side' ? '#f59e0b' : '#06b6d4' }
+      : null,
+  ].filter(Boolean) as Array<{ label: string; color: string }>;
+
+  if (!badges.length) {
+    return '';
+  }
+
+  const badgeWidth = 92;
+  const badgeHeight = 28;
+  const gap = 10;
+  const totalWidth = badges.length * badgeWidth + (badges.length - 1) * gap;
+  const startX = Math.max(14, context.width - totalWidth - 18);
+  const y = 16;
+
+  return badges
+    .map((badge, index) => {
+      const x = startX + index * (badgeWidth + gap);
+      return `
+        <rect x="${x}" y="${y}" width="${badgeWidth}" height="${badgeHeight}" fill="rgba(10,14,23,0.88)" stroke="${badge.color}" stroke-width="1.5" rx="10" />
+        <circle cx="${x + 16}" cy="${y + 14}" r="5" fill="${badge.color}" />
+        <text x="${x + 28}" y="${y + 19}" fill="#f8fafc" font-size="13" font-family="Arial, sans-serif" font-weight="700">${escapeXml(badge.label)}</text>
+      `;
+    })
+    .join('\n');
+};
+
 const resolveLiquidityLevel = (analysis: MarkupAnalysis) => {
   if (analysis.liquidity?.type === 'buy-side') {
     const candidates = [
@@ -201,6 +237,7 @@ const drawLiquidityMarker = (context: DrawContext, analysis: MarkupAnalysis) => 
 
 const buildOverlay = (context: DrawContext, analysis: MarkupAnalysis) => {
   const fragments = [
+    drawLegendBadges(context, analysis),
     drawZone(context, analysis.zones?.supplyZone, '#ef4444', 'Supply zone'),
     drawZone(context, analysis.zones?.demandZone, '#22c55e', 'Demand zone'),
     drawZone(context, analysis.entryPlan?.entryZone ?? analysis.entryZone, '#3b82f6', 'Entry zone'),
@@ -217,6 +254,29 @@ const buildOverlay = (context: DrawContext, analysis: MarkupAnalysis) => {
     </svg>
   `);
 };
+
+const parseBooleanSetting = (value: unknown, fallback: boolean) => {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true') {
+      return true;
+    }
+    if (normalized === 'false') {
+      return false;
+    }
+  }
+
+  return fallback;
+};
+
+export async function isChartMarkupEnabledForPlan(subscription: SubscriptionTier) {
+  const key = subscription === 'PRO' ? CHART_MARKUP_PRO_ENABLED_KEY : CHART_MARKUP_FREE_ENABLED_KEY;
+  const setting = await getSystemSetting(key);
+  return parseBooleanSetting(setting?.value, true);
+}
 
 const writeLocalMarkup = async (buffer: Buffer) => {
   const fileName = `markup-${randomUUID()}.png`;
