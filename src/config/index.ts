@@ -78,6 +78,7 @@ export const config = {
     host: process.env.EMAIL_HOST || 'smtp.gmail.com',
     port: parseInt(process.env.EMAIL_PORT || '465', 10),
     secure: (process.env.EMAIL_SECURE || 'true').toLowerCase() !== 'false',
+    forceIPv4: (process.env.EMAIL_FORCE_IPV4 || 'true').toLowerCase() !== 'false',
     connectionTimeout: parseInt(process.env.EMAIL_CONNECTION_TIMEOUT || '15000', 10),
     greetingTimeout: parseInt(process.env.EMAIL_GREETING_TIMEOUT || '10000', 10),
     socketTimeout: parseInt(process.env.EMAIL_SOCKET_TIMEOUT || '20000', 10),

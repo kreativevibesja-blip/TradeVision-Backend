@@ -1,27 +1,39 @@
 import nodemailer from 'nodemailer';
 import SMTPTransport from 'nodemailer/lib/smtp-transport';
+import { promises as dns } from 'dns';
 import { config } from '../config';
 
-const transportOptions: SMTPTransport.Options = {
-  host: config.email.host,
-  port: config.email.port,
-  secure: config.email.secure,
-  name: 'mytradevision.online',
-  connectionTimeout: config.email.connectionTimeout,
-  greetingTimeout: config.email.greetingTimeout,
-  socketTimeout: config.email.socketTimeout,
-  requireTLS: !config.email.secure,
-  tls: {
-    servername: config.email.host,
-    minVersion: 'TLSv1.2',
-  },
-  auth: {
-    user: config.email.user,
-    pass: config.email.pass,
-  },
-};
+const resolveTransportOptions = async (): Promise<SMTPTransport.Options> => {
+  let transportHost = config.email.host;
 
-const transporter = nodemailer.createTransport(transportOptions);
+  if (config.email.forceIPv4) {
+    try {
+      const resolved = await dns.lookup(config.email.host, { family: 4 });
+      transportHost = resolved.address;
+    } catch (error) {
+      console.warn('[email] IPv4 lookup failed, falling back to hostname:', config.email.host, error);
+    }
+  }
+
+  return {
+    host: transportHost,
+    port: config.email.port,
+    secure: config.email.secure,
+    name: 'mytradevision.online',
+    connectionTimeout: config.email.connectionTimeout,
+    greetingTimeout: config.email.greetingTimeout,
+    socketTimeout: config.email.socketTimeout,
+    requireTLS: !config.email.secure,
+    tls: {
+      servername: config.email.host,
+      minVersion: 'TLSv1.2',
+    },
+    auth: {
+      user: config.email.user,
+      pass: config.email.pass,
+    },
+  };
+};
 
 interface TicketReplyEmail {
   to: string;
@@ -51,6 +63,8 @@ export async function sendTicketReplyEmail({ to, name, ticketNumber, subject, me
     .replace(/\n/g, '<br/>');
 
   try {
+    const transporter = nodemailer.createTransport(await resolveTransportOptions());
+
     await transporter.sendMail({
       from: config.email.from,
       replyTo: config.email.replyTo,
@@ -99,6 +113,13 @@ export async function sendTicketReplyEmail({ to, name, ticketNumber, subject, me
     if (code === 'ETIMEDOUT') {
       throw new EmailDeliveryError(
         'SMTP connection timed out. Your hosting provider is likely blocking outbound SMTP on ports 465/587, or Gmail is unreachable from the container.',
+        code
+      );
+    }
+
+    if (code === 'ESOCKET' && /ENETUNREACH/i.test(error?.message || '')) {
+      throw new EmailDeliveryError(
+        'SMTP tried to use an unreachable network route. The server cannot reach Gmail over IPv6, so the app now forces IPv4. Redeploy with EMAIL_FORCE_IPV4=true.',
         code
       );
     }
