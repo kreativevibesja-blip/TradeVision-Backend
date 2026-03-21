@@ -8,27 +8,62 @@ import {
   updatePaymentByOrderId,
 } from '../lib/supabase';
 import { getBillingSummaryForUser, setBillingStateFromCancellation, setBillingStateFromPayment } from '../services/billing';
+import { validateCouponInternal, applyDiscount, incrementCouponUsage } from './couponController';
 
 export const createPayment = async (req: AuthRequest, res: Response) => {
   try {
-    const { plan } = req.body;
+    const { plan, couponCode } = req.body;
     if (!plan || !['PRO'].includes(plan)) {
       return res.status(400).json({ error: 'Invalid plan' });
     }
 
     const pricing = await getPricingPlanByTierWithFallback(plan);
-    const amount = pricing ? pricing.price.toString() : '19.00';
+    let amount = pricing ? pricing.price : 19;
     const planName = pricing ? pricing.name : 'Pro';
 
-    const order = await createOrder(amount, planName);
+    let appliedCouponId: string | null = null;
+
+    if (couponCode && typeof couponCode === 'string') {
+      const couponResult = await validateCouponInternal(couponCode, req.user!.id);
+      if (!couponResult.valid || !couponResult.discount) {
+        return res.status(400).json({ error: couponResult.message });
+      }
+      amount = Math.round(applyDiscount(amount, couponResult.discount) * 100) / 100;
+      appliedCouponId = couponResult.couponId!;
+    }
+
+    if (amount <= 0) {
+      // Free via full discount — activate immediately without PayPal
+      await createPaymentRecord({
+        userId: req.user!.id,
+        paypalOrderId: `COUPON-${Date.now()}`,
+        amount: 0,
+        status: 'COMPLETED',
+        plan: 'PRO',
+      });
+
+      if (appliedCouponId) {
+        await incrementCouponUsage(appliedCouponId, req.user!.id);
+      }
+
+      await setBillingStateFromPayment(req.user!.id, new Date().toISOString());
+      return res.json({ orderId: null, approveUrl: null, freeActivation: true });
+    }
+
+    const order = await createOrder(amount.toString(), planName);
 
     await createPaymentRecord({
       userId: req.user!.id,
       paypalOrderId: order.id,
-      amount: parseFloat(amount),
+      amount,
       status: 'PENDING',
       plan: 'PRO',
     });
+
+    // Stash coupon for post-capture usage tracking
+    if (appliedCouponId) {
+      pendingCouponMap.set(order.id, { couponId: appliedCouponId, userId: req.user!.id });
+    }
 
     const approveLink = order.links?.find((l) => l.rel === 'approve')?.href;
 
@@ -38,6 +73,10 @@ export const createPayment = async (req: AuthRequest, res: Response) => {
     return res.status(500).json({ error: 'Payment creation failed' });
   }
 };
+
+// Temporary in-memory map to track which order used a coupon.
+// In a production cluster you would use a DB column on the Payment table instead.
+const pendingCouponMap = new Map<string, { couponId: string; userId: string }>();
 
 export const getPayPalClientToken = async (_req: AuthRequest, res: Response) => {
   try {
@@ -60,6 +99,15 @@ export const handlePaymentSuccess = async (req: AuthRequest, res: Response) => {
 
     if (capture.status === 'COMPLETED') {
       const payment = await updatePaymentByOrderId(orderId, { status: 'COMPLETED' });
+
+      // Track coupon usage if this order used a coupon
+      const couponInfo = pendingCouponMap.get(orderId);
+      if (couponInfo) {
+        await incrementCouponUsage(couponInfo.couponId, couponInfo.userId).catch((err) =>
+          console.error('Failed to track coupon usage:', err)
+        );
+        pendingCouponMap.delete(orderId);
+      }
 
       await setBillingStateFromPayment(req.user!.id, payment.createdAt);
 

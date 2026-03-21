@@ -19,6 +19,8 @@ const PRICING_PLAN_TABLE = 'PricingPlan';
 const SYSTEM_SETTINGS_TABLE = 'SystemSettings';
 const ANNOUNCEMENT_TABLE = 'Announcement';
 const TICKET_TABLE = 'Ticket';
+const COUPON_TABLE = 'Coupon';
+const COUPON_USAGE_TABLE = 'CouponUsage';
 
 export type SubscriptionTier = 'FREE' | 'PRO';
 export type UserRole = 'USER' | 'ADMIN';
@@ -136,6 +138,31 @@ export interface AnnouncementRecord {
 export interface AnnouncementContentPayload {
   body: string;
   expiresAt: string | null;
+}
+
+export type CouponType = 'percentage' | 'fixed';
+
+export interface CouponRecord {
+  id: string;
+  code: string;
+  type: CouponType;
+  value: number;
+  maxUses: number;
+  usedCount: number;
+  perUserLimit: number;
+  expiresAt: string | null;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CouponUsageRecord {
+  id: string;
+  couponId: string;
+  userId: string;
+  usageCount: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface TicketRecord {
@@ -622,6 +649,52 @@ const bucketByDay = <T>(rows: T[], getDate: (row: T) => string, getValue: (row: 
   return Object.entries(buckets)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([date, value]) => ({ date, value }));
+};
+
+// ---- Coupon helpers ----
+
+export const createCouponRecord = (values: Pick<CouponRecord, 'code' | 'type' | 'value' | 'maxUses' | 'perUserLimit'> & { expiresAt?: string | null }) =>
+  insertSingle<CouponRecord>('createCouponRecord', COUPON_TABLE, {
+    ...values,
+    code: values.code.toUpperCase().trim(),
+    usedCount: 0,
+    active: true,
+  });
+
+export const listCoupons = () =>
+  many<CouponRecord>('listCoupons', supabase.from(COUPON_TABLE).select('*').order('createdAt', { ascending: false }));
+
+export const getCouponByCode = (code: string) =>
+  maybeSingle<CouponRecord>('getCouponByCode', supabase.from(COUPON_TABLE).select('*').eq('code', code.toUpperCase().trim()).maybeSingle());
+
+export const getCouponById = (id: string) =>
+  maybeSingle<CouponRecord>('getCouponById', supabase.from(COUPON_TABLE).select('*').eq('id', id).maybeSingle());
+
+export const updateCouponRecord = (id: string, values: Partial<CouponRecord>) =>
+  updateSingle<CouponRecord>('updateCouponRecord', COUPON_TABLE, values, (query) => query.eq('id', id));
+
+export const deleteCouponRecord = async (id: string) => {
+  const { error } = await supabase.from(COUPON_TABLE).delete().eq('id', id);
+  if (error) {
+    logDbError('deleteCouponRecord', error);
+  }
+};
+
+export const getCouponUsage = (couponId: string, userId: string) =>
+  maybeSingle<CouponUsageRecord>('getCouponUsage', supabase.from(COUPON_USAGE_TABLE).select('*').eq('couponId', couponId).eq('userId', userId).maybeSingle());
+
+export const incrementCouponUsage = async (couponId: string, userId: string) => {
+  const existing = await getCouponUsage(couponId, userId);
+  if (existing) {
+    await updateSingle<CouponUsageRecord>('incrementCouponUsage', COUPON_USAGE_TABLE, { usageCount: existing.usageCount + 1 }, (query) => query.eq('id', existing.id));
+  } else {
+    await insertSingle<CouponUsageRecord>('incrementCouponUsage', COUPON_USAGE_TABLE, { couponId, userId, usageCount: 1 });
+  }
+  // Increment global used count
+  const coupon = await getCouponById(couponId);
+  if (coupon) {
+    await supabase.from(COUPON_TABLE).update({ usedCount: coupon.usedCount + 1 }).eq('id', couponId);
+  }
 };
 
 export const getAnalyticsBuckets = async (fromIso: string, toIso?: string) => {

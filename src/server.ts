@@ -8,6 +8,7 @@ import analysisRoutes from './routes/analysisRoutes';
 import paymentRoutes from './routes/paymentRoutes';
 import adminRoutes from './routes/adminRoutes';
 import ticketRoutes from './routes/ticketRoutes';
+import couponRoutes from './routes/couponRoutes';
 
 export const app = express();
 
@@ -55,6 +56,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api', analysisRoutes);
 app.use('/api', paymentRoutes);
 app.use('/api/tickets', ticketRoutes);
+app.use('/api/coupons', couponRoutes);
 app.use('/api/admin', adminRoutes);
 
 app.get('/api/health', (_req, res) => {
