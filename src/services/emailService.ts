@@ -1,8 +1,6 @@
 import { Resend } from 'resend';
 import { config } from '../config';
 
-const resend = new Resend(config.email.resendApiKey);
-
 interface TicketReplyEmail {
   to: string;
   name: string | null;
@@ -23,6 +21,8 @@ export async function sendTicketReplyEmail({ to, name, ticketNumber, subject, me
     console.warn('Resend is not configured — skipping send.');
     throw new EmailDeliveryError('Email is not configured on the server.', 'EMAIL_NOT_CONFIGURED');
   }
+
+  const resend = new Resend(config.email.resendApiKey);
 
   const escapedMessage = message
     .replace(/&/g, '&amp;')
