@@ -23,6 +23,11 @@ type SupabaseIdentity = {
   userMetadata?: Record<string, unknown>;
 };
 
+type TokenValidationResult = {
+  identity: SupabaseIdentity | null;
+  reason: 'expired' | 'invalid' | 'unknown';
+};
+
 const isAdminEmail = (email: string) => config.admin.emails.includes(email.trim().toLowerCase());
 const SUPABASE_PASSWORD_PLACEHOLDER = '__supabase_managed_account__';
 
@@ -31,7 +36,7 @@ const getDisplayName = (userMetadata: Record<string, unknown> | undefined) => {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 };
 
-const getSupabaseIdentity = async (token: string): Promise<SupabaseIdentity | null> => {
+const getSupabaseIdentity = async (token: string): Promise<TokenValidationResult> => {
   console.log('[auth] validating token, length:', token.length, 'prefix:', token.slice(0, 20) + '...');
   console.log('[auth] SUPABASE_URL configured:', !!config.supabase.url, '| SERVICE_ROLE_KEY set:', !!config.supabase.serviceRoleKey, '| ANON_KEY set:', !!config.supabase.anonKey);
 
@@ -40,26 +45,35 @@ const getSupabaseIdentity = async (token: string): Promise<SupabaseIdentity | nu
 
     if (error) {
       console.error('[auth] supabase.auth.getUser error:', error.message, '| status:', (error as any).status);
-      return null;
+      if (/expired/i.test(error.message)) {
+        return { identity: null, reason: 'expired' };
+      }
+      if (/invalid jwt|unable to parse|verify signature|invalid claims/i.test(error.message)) {
+        return { identity: null, reason: 'invalid' };
+      }
+      return { identity: null, reason: 'unknown' };
     }
 
     if (!data.user?.id || !data.user?.email) {
       console.error('[auth] supabase.auth.getUser returned no id/email, data:', JSON.stringify(data));
-      return null;
+      return { identity: null, reason: 'invalid' };
     }
 
     console.log('[auth] token valid for user:', data.user.email);
     return {
-      id: data.user.id,
-      email: data.user.email,
-      userMetadata:
-        data.user.user_metadata && typeof data.user.user_metadata === 'object'
-          ? data.user.user_metadata
-          : undefined,
+      identity: {
+        id: data.user.id,
+        email: data.user.email,
+        userMetadata:
+          data.user.user_metadata && typeof data.user.user_metadata === 'object'
+            ? data.user.user_metadata
+            : undefined,
+      },
+      reason: 'unknown',
     };
   } catch (error) {
     console.error('[auth] supabase.auth.getUser threw:', error);
-    return null;
+    return { identity: null, reason: 'unknown' };
   }
 };
 
@@ -71,8 +85,12 @@ export const authenticate = async (req: AuthRequest, res: Response, next: NextFu
     }
 
     const token = authHeader.substring(7);
-    const identity = await getSupabaseIdentity(token);
+    const { identity, reason } = await getSupabaseIdentity(token);
     if (!identity) {
+      if (reason === 'expired') {
+        return res.status(401).json({ error: 'Session expired' });
+      }
+
       return res.status(401).json({ error: 'Invalid token' });
     }
 
