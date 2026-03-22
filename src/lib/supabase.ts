@@ -503,6 +503,55 @@ const summarizeAnalysisModel = (analysis: AnalysisRecord) => {
   };
 };
 
+const summarizeFailureReason = (message: string | null) => {
+  if (!message) {
+    return null;
+  }
+
+  const normalized = message.replace(/\s+/g, ' ').trim();
+  const lower = normalized.toLowerCase();
+
+  if (
+    lower.includes('429 too many requests') ||
+    lower.includes('quota exceeded') ||
+    lower.includes('rate limit')
+  ) {
+    return 'Gemini rate limit hit. Retry later or check API quota.';
+  }
+
+  if (lower.includes('timed out') || lower.includes('timeout') || lower.includes('etimedout')) {
+    return 'AI provider request timed out.';
+  }
+
+  if (lower.includes('enetunreach') || lower.includes('econnreset') || lower.includes('network')) {
+    return 'Network error while contacting the AI provider.';
+  }
+
+  if (lower.includes('not supported for generatecontent') || lower.includes('model') && lower.includes('not found')) {
+    return 'Configured Gemini model is unavailable.';
+  }
+
+  if (lower.includes('did not return valid json') || lower.includes('json')) {
+    return 'AI response could not be parsed.';
+  }
+
+  if (lower.includes('tradevision ai is not configured correctly') || lower.includes('api key')) {
+    return 'AI service is misconfigured.';
+  }
+
+  const firstSentence = normalized
+    .replace(/\[[^\]]*\]/g, '')
+    .replace(/https?:\/\/\S+/g, '')
+    .split(/(?<=[.!?])\s+/)[0]
+    ?.trim();
+
+  if (!firstSentence) {
+    return 'Analysis failed.';
+  }
+
+  return firstSentence.length > 120 ? `${firstSentence.slice(0, 117).trim()}...` : firstSentence;
+};
+
 export const listAllAnalysesPage = async (page: number, limit: number) => {
   const skip = (page - 1) * limit;
   const { data, count, error } = await supabase
@@ -528,7 +577,7 @@ export const listAllAnalysesPage = async (page: number, limit: number) => {
         outcome: analysis.status === 'COMPLETED' ? 'SUCCESS' : analysis.status === 'FAILED' ? 'FAILED' : 'IN_PROGRESS',
         modelUsed: modelSummary.label,
         usedFallback: modelSummary.usedFallback,
-        failureReason: analysis.errorMessage,
+        failureReason: summarizeFailureReason(analysis.errorMessage),
         user: user
           ? {
               email: user.email,
