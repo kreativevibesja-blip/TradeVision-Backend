@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { authenticate } from '../middleware/auth';
 import {
   getMyReferralCode,
+  getMyReferralDiscount,
   updateMyReferralCode,
   getReferralDashboard,
   requestPayout,
@@ -14,6 +15,7 @@ const router = Router();
 router.use(authenticate);
 
 router.get('/my-code', getMyReferralCode);
+router.get('/my-discount', getMyReferralDiscount);
 router.patch('/my-code', updateMyReferralCode);
 router.get('/dashboard', getReferralDashboard);
 router.post('/request-payout', requestPayout);

@@ -18,7 +18,7 @@ import {
   getSystemSetting,
   type ReferralCodeRecord,
 } from '../lib/supabase';
-import { processReferralSignup } from '../services/referralService';
+import { getReferralDiscountForUser, processReferralSignup } from '../services/referralService';
 import { sendPayoutRequestedEmail } from '../services/emailService';
 
 const generateCode = () => {
@@ -143,6 +143,17 @@ export const getReferralDashboard = async (req: AuthRequest, res: Response) => {
   } catch (error) {
     console.error('Get referral dashboard error:', error);
     return res.status(500).json({ error: 'Failed to load referral dashboard' });
+  }
+};
+
+// GET /referrals/my-discount
+export const getMyReferralDiscount = async (req: AuthRequest, res: Response) => {
+  try {
+    const discountPercent = await getReferralDiscountForUser(req.user!.id);
+    return res.json({ discountPercent });
+  } catch (error) {
+    console.error('Get referral discount error:', error);
+    return res.status(500).json({ error: 'Failed to load referral discount' });
   }
 };
 
