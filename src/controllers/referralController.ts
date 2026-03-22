@@ -30,25 +30,31 @@ const generateCode = () => {
   return code;
 };
 
+const ensureReferralCode = async (userId: string): Promise<ReferralCodeRecord> => {
+  let codeRecord = await getReferralCodeByUserId(userId);
+
+  if (codeRecord) {
+    return codeRecord;
+  }
+
+  let code = generateCode();
+  let attempts = 0;
+  while (await getReferralCodeByCode(code)) {
+    code = generateCode();
+    attempts++;
+    if (attempts > 10) {
+      code = `REF${Date.now().toString(36).toUpperCase()}`;
+      break;
+    }
+  }
+
+  return createReferralCode({ userId, code });
+};
+
 // GET /referrals/my-code
 export const getMyReferralCode = async (req: AuthRequest, res: Response) => {
   try {
-    let codeRecord = await getReferralCodeByUserId(req.user!.id);
-
-    if (!codeRecord) {
-      // Auto-generate a referral code for the user
-      let code = generateCode();
-      let attempts = 0;
-      while (await getReferralCodeByCode(code)) {
-        code = generateCode();
-        attempts++;
-        if (attempts > 10) {
-          code = `REF${Date.now().toString(36).toUpperCase()}`;
-          break;
-        }
-      }
-      codeRecord = await createReferralCode({ userId: req.user!.id, code });
-    }
+    const codeRecord = await ensureReferralCode(req.user!.id);
 
     const discountSetting = await getSystemSetting('referral_discount_percent');
     const discountPercent = discountSetting ? Number(discountSetting.value) : 20;
@@ -96,9 +102,10 @@ export const updateMyReferralCode = async (req: AuthRequest, res: Response) => {
 export const getReferralDashboard = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
+    const codeRecordPromise = ensureReferralCode(userId);
 
     const [codeRecord, referrals, commissions, pendingBalance, approvedBalance, paidBalance, payouts] = await Promise.all([
-      getReferralCodeByUserId(userId),
+      codeRecordPromise,
       listReferralsByReferrerId(userId),
       listCommissionsByReferrerId(userId),
       sumPendingCommissions(userId),
