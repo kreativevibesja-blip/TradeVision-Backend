@@ -6,9 +6,12 @@ import {
   getPricingPlanByTierWithFallback,
   listPaymentsForUserId,
   updatePaymentByOrderId,
+  getReferralByReferredUserId,
+  getSystemSetting,
 } from '../lib/supabase';
 import { getBillingSummaryForUser, setBillingStateFromCancellation, setBillingStateFromPayment } from '../services/billing';
 import { validateCouponInternal, applyDiscount, incrementCouponUsage } from './couponController';
+import { processReferralPayment, getReferralDiscountForUser } from '../services/referralService';
 
 export const createPayment = async (req: AuthRequest, res: Response) => {
   try {
@@ -22,6 +25,14 @@ export const createPayment = async (req: AuthRequest, res: Response) => {
     const planName = pricing ? pricing.name : 'Pro';
 
     let appliedCouponId: string | null = null;
+
+    // Apply referral discount if user was referred and hasn't paid yet
+    let referralDiscountApplied = false;
+    const referralDiscount = await getReferralDiscountForUser(req.user!.id);
+    if (referralDiscount > 0) {
+      amount = Math.round(amount * (1 - referralDiscount / 100) * 100) / 100;
+      referralDiscountApplied = true;
+    }
 
     if (couponCode && typeof couponCode === 'string') {
       const couponResult = await validateCouponInternal(couponCode, req.user!.id);
@@ -110,6 +121,11 @@ export const handlePaymentSuccess = async (req: AuthRequest, res: Response) => {
       }
 
       await setBillingStateFromPayment(req.user!.id, payment.createdAt);
+
+      // Process referral commission on successful payment
+      await processReferralPayment(req.user!.id, payment.amount ?? 0).catch((err) =>
+        console.error('Failed to process referral payment:', err)
+      );
 
       return res.json({ success: true, message: 'Subscription activated' });
     }

@@ -23,6 +23,15 @@ import {
 } from '../controllers/adminController';
 import { getAdminTickets, getOpenTicketCount, updateAdminTicket, replyToTicket } from '../controllers/ticketController';
 import { getCoupons, createCoupon, toggleCoupon, deleteCoupon } from '../controllers/couponController';
+import {
+  getAdminReferralDashboard,
+  getAdminReferrals,
+  getAdminCommissions,
+  updateAdminCommission,
+  getAdminPayouts,
+  updateAdminPayout,
+  updateReferralSettings,
+} from '../controllers/adminReferralController';
 
 const router = Router();
 
@@ -56,5 +65,14 @@ router.get('/coupons', getCoupons);
 router.post('/coupons', createCoupon);
 router.patch('/coupons/:id/toggle', toggleCoupon);
 router.delete('/coupons/:id', deleteCoupon);
+
+// Referral admin
+router.get('/referrals/dashboard', getAdminReferralDashboard);
+router.get('/referrals/list', getAdminReferrals);
+router.get('/referrals/commissions', getAdminCommissions);
+router.patch('/referrals/commissions/:id', updateAdminCommission);
+router.get('/referrals/payouts', getAdminPayouts);
+router.patch('/referrals/payouts/:id', updateAdminPayout);
+router.post('/referrals/settings', updateReferralSettings);
 
 export default router;

@@ -21,6 +21,10 @@ const ANNOUNCEMENT_TABLE = 'Announcement';
 const TICKET_TABLE = 'Ticket';
 const COUPON_TABLE = 'Coupon';
 const COUPON_USAGE_TABLE = 'CouponUsage';
+const REFERRAL_CODE_TABLE = 'ReferralCode';
+const REFERRAL_TABLE = 'Referral';
+const COMMISSION_TABLE = 'Commission';
+const PAYOUT_TABLE = 'Payout';
 
 export type SubscriptionTier = 'FREE' | 'PRO';
 export type UserRole = 'USER' | 'ADMIN';
@@ -951,4 +955,201 @@ export const getAnalyticsBuckets = async (fromIso: string, toIso?: string) => {
       _sum: { amount: row.value },
     })),
   };
+};
+
+// ============================================================
+// Referral System
+// ============================================================
+
+export type ReferralStatus = 'pending' | 'qualified' | 'paid';
+export type CommissionStatus = 'pending' | 'approved' | 'paid' | 'rejected';
+export type PayoutStatus = 'pending' | 'processing' | 'paid' | 'rejected';
+
+export interface ReferralCodeRecord {
+  id: string;
+  userId: string;
+  code: string;
+  totalEarnings: number;
+  totalReferrals: number;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReferralRecord {
+  id: string;
+  referrerId: string;
+  referredUserId: string;
+  referralCode: string;
+  status: ReferralStatus;
+  createdAt: string;
+  qualifiedAt: string | null;
+}
+
+export interface CommissionRecord {
+  id: string;
+  referrerId: string;
+  referredUserId: string;
+  referralId: string;
+  amount: number;
+  status: CommissionStatus;
+  createdAt: string;
+  paidAt: string | null;
+}
+
+export interface PayoutRecord {
+  id: string;
+  userId: string;
+  paypalEmail: string;
+  amount: number;
+  status: PayoutStatus;
+  createdAt: string;
+  processedAt: string | null;
+}
+
+// ── Referral codes ──
+
+export const getReferralCodeByUserId = (userId: string) =>
+  maybeSingle<ReferralCodeRecord>('getReferralCodeByUserId', supabase.from(REFERRAL_CODE_TABLE).select('*').eq('userId', userId).maybeSingle());
+
+export const getReferralCodeByCode = (code: string) =>
+  maybeSingle<ReferralCodeRecord>('getReferralCodeByCode', supabase.from(REFERRAL_CODE_TABLE).select('*').eq('code', code.toUpperCase().trim()).maybeSingle());
+
+export const createReferralCode = (values: { userId: string; code: string }) =>
+  insertSingle<ReferralCodeRecord>('createReferralCode', REFERRAL_CODE_TABLE, {
+    userId: values.userId,
+    code: values.code.toUpperCase().trim(),
+  });
+
+export const updateReferralCode = (id: string, values: Partial<ReferralCodeRecord>) =>
+  updateSingle<ReferralCodeRecord>('updateReferralCode', REFERRAL_CODE_TABLE, values, (q) => q.eq('id', id));
+
+// ── Referrals ──
+
+export const createReferral = (values: { referrerId: string; referredUserId: string; referralCode: string }) =>
+  insertSingle<ReferralRecord>('createReferral', REFERRAL_TABLE, values);
+
+export const getReferralByReferredUserId = (referredUserId: string) =>
+  maybeSingle<ReferralRecord>('getReferralByReferredUserId', supabase.from(REFERRAL_TABLE).select('*').eq('referredUserId', referredUserId).maybeSingle());
+
+export const updateReferral = (id: string, values: Partial<ReferralRecord>) =>
+  updateSingle<ReferralRecord>('updateReferral', REFERRAL_TABLE, values, (q) => q.eq('id', id));
+
+export const listReferralsByReferrerId = (referrerId: string) =>
+  many<ReferralRecord>('listReferralsByReferrerId', supabase.from(REFERRAL_TABLE).select('*').eq('referrerId', referrerId).order('createdAt', { ascending: false }));
+
+export const listAllReferralsPage = async (page: number, limit: number) => {
+  const from = (page - 1) * limit;
+  const to = from + limit - 1;
+  const { data, error, count } = await supabase
+    .from(REFERRAL_TABLE)
+    .select('*', { count: 'exact' })
+    .order('createdAt', { ascending: false })
+    .range(from, to);
+  if (error) logDbError('listAllReferralsPage', error);
+  return { referrals: (data ?? []) as ReferralRecord[], total: count ?? 0 };
+};
+
+export const countReferralsByStatus = async (status?: ReferralStatus) => {
+  let query = supabase.from(REFERRAL_TABLE).select('*', { count: 'exact', head: true });
+  if (status) query = query.eq('status', status);
+  const { count, error } = await query;
+  if (error) logDbError('countReferralsByStatus', error);
+  return count ?? 0;
+};
+
+// ── Commissions ──
+
+export const createCommission = (values: { referrerId: string; referredUserId: string; referralId: string; amount: number }) =>
+  insertSingle<CommissionRecord>('createCommission', COMMISSION_TABLE, values);
+
+export const getCommissionByReferralId = (referralId: string) =>
+  maybeSingle<CommissionRecord>('getCommissionByReferralId', supabase.from(COMMISSION_TABLE).select('*').eq('referralId', referralId).maybeSingle());
+
+export const updateCommission = (id: string, values: Partial<CommissionRecord>) =>
+  updateSingle<CommissionRecord>('updateCommission', COMMISSION_TABLE, values, (q) => q.eq('id', id));
+
+export const listCommissionsByReferrerId = (referrerId: string) =>
+  many<CommissionRecord>('listCommissionsByReferrerId', supabase.from(COMMISSION_TABLE).select('*').eq('referrerId', referrerId).order('createdAt', { ascending: false }));
+
+export const listAllCommissionsPage = async (page: number, limit: number, status?: CommissionStatus) => {
+  const from = (page - 1) * limit;
+  const to = from + limit - 1;
+  let query = supabase.from(COMMISSION_TABLE).select('*', { count: 'exact' }).order('createdAt', { ascending: false });
+  if (status) query = query.eq('status', status);
+  const { data, error, count } = await query.range(from, to);
+  if (error) logDbError('listAllCommissionsPage', error);
+  return { commissions: (data ?? []) as CommissionRecord[], total: count ?? 0 };
+};
+
+export const sumApprovedCommissions = async (referrerId: string) => {
+  const rows = await many<{ amount: number }>(
+    'sumApprovedCommissions',
+    supabase.from(COMMISSION_TABLE).select('amount').eq('referrerId', referrerId).eq('status', 'approved')
+  );
+  return rows.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+};
+
+export const sumPaidCommissions = async (referrerId: string) => {
+  const rows = await many<{ amount: number }>(
+    'sumPaidCommissions',
+    supabase.from(COMMISSION_TABLE).select('amount').eq('referrerId', referrerId).eq('status', 'paid')
+  );
+  return rows.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+};
+
+export const sumPendingCommissions = async (referrerId: string) => {
+  const rows = await many<{ amount: number }>(
+    'sumPendingCommissions',
+    supabase.from(COMMISSION_TABLE).select('amount').eq('referrerId', referrerId).in('status', ['pending', 'approved'])
+  );
+  return rows.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+};
+
+export const getTotalCommissionsOwed = async () => {
+  const rows = await many<{ amount: number }>(
+    'getTotalCommissionsOwed',
+    supabase.from(COMMISSION_TABLE).select('amount').in('status', ['pending', 'approved'])
+  );
+  return rows.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+};
+
+export const getTotalCommissionsPaid = async () => {
+  const rows = await many<{ amount: number }>(
+    'getTotalCommissionsPaid',
+    supabase.from(COMMISSION_TABLE).select('amount').eq('status', 'paid')
+  );
+  return rows.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+};
+
+// ── Payouts ──
+
+export const createPayout = (values: { userId: string; paypalEmail: string; amount: number }) =>
+  insertSingle<PayoutRecord>('createPayout', PAYOUT_TABLE, values);
+
+export const updatePayout = (id: string, values: Partial<PayoutRecord>) =>
+  updateSingle<PayoutRecord>('updatePayout', PAYOUT_TABLE, values, (q) => q.eq('id', id));
+
+export const listPayoutsForUser = (userId: string) =>
+  many<PayoutRecord>('listPayoutsForUser', supabase.from(PAYOUT_TABLE).select('*').eq('userId', userId).order('createdAt', { ascending: false }));
+
+export const listAllPayoutsPage = async (page: number, limit: number, status?: PayoutStatus) => {
+  const from = (page - 1) * limit;
+  const to = from + limit - 1;
+  let query = supabase.from(PAYOUT_TABLE).select('*', { count: 'exact' }).order('createdAt', { ascending: false });
+  if (status) query = query.eq('status', status);
+  const { data, error, count } = await query.range(from, to);
+  if (error) logDbError('listAllPayoutsPage', error);
+  return { payouts: (data ?? []) as PayoutRecord[], total: count ?? 0 };
+};
+
+export const getReferralRevenueGenerated = async () => {
+  const rows = await many<{ amount: number }>(
+    'getReferralRevenueGenerated',
+    supabase.from(COMMISSION_TABLE).select('amount').in('status', ['approved', 'paid'])
+  );
+  // Revenue is commission / commissionRate * 100, but we don't know the rate per record.
+  // Instead, sum the payment amounts of referred users. This is more accurate.
+  // For now, return total commission amounts as a proxy (admin sees total commissions).
+  return rows.reduce((s, r) => s + (Number(r.amount) || 0), 0);
 };
