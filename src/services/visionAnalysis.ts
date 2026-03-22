@@ -474,18 +474,15 @@ export async function analyzeVisionStructure(
   timeframe: string,
   subscription: SubscriptionTier
 ): Promise<VisionAnalysisResult> {
-  if (!config.gemini.apiKey && !(subscription === 'PRO' && config.openai.apiKey)) {
+  if (!config.gemini.apiKey) {
     throw new Error('TradeVision AI is not configured correctly');
   }
 
-  const useOpenAIForPro = subscription === 'PRO' && Boolean(config.openai.apiKey);
-  const genAI = config.gemini.apiKey ? new GoogleGenerativeAI(config.gemini.apiKey) : null;
-  const primaryModel = useOpenAIForPro
-    ? config.openai.proModel.trim()
-    : getGeminiModelForSubscription(subscription);
-  const primaryProvider: VisionModelMetadata['provider'] = useOpenAIForPro ? 'openai' : 'gemini';
-  const fallbackModel = config.gemini.apiKey ? normalizeGeminiModelName(config.gemini.freeModel) : null;
-  const resolvedFallbackModel = primaryProvider === 'openai' ? fallbackModel : (primaryModel !== fallbackModel ? fallbackModel : null);
+  const genAI = new GoogleGenerativeAI(config.gemini.apiKey);
+  const primaryModel = getGeminiModelForSubscription(subscription);
+  const primaryProvider: VisionModelMetadata['provider'] = 'gemini';
+  const fallbackModel = normalizeGeminiModelName(config.gemini.freeModel);
+  const resolvedFallbackModel = primaryModel !== fallbackModel ? fallbackModel : null;
 
   const basePromptHeader = `You are an institutional-level Smart Money Concepts (SMC) trading analyst.
 
@@ -862,15 +859,15 @@ export async function analyzeHTFVisionStructure(
   pair: string,
   timeframe: string
 ): Promise<VisionAnalysisResult> {
-  if (!config.openai.apiKey && !config.gemini.apiKey) {
+  if (!config.gemini.apiKey) {
     throw new Error('TradeVision AI is not configured correctly');
   }
 
-  const genAI = config.gemini.apiKey ? new GoogleGenerativeAI(config.gemini.apiKey) : null;
-  const primaryModel = config.openai.apiKey ? config.openai.proModel.trim() : normalizeGeminiModelName(config.gemini.proModel);
-  const primaryProvider: VisionModelMetadata['provider'] = config.openai.apiKey ? 'openai' : 'gemini';
-  const fallbackModel = config.gemini.apiKey ? normalizeGeminiModelName(config.gemini.freeModel) : null;
-  const resolvedFallbackModel = primaryProvider === 'openai' ? fallbackModel : (primaryModel !== fallbackModel ? fallbackModel : null);
+  const genAI = new GoogleGenerativeAI(config.gemini.apiKey);
+  const primaryModel = normalizeGeminiModelName(config.gemini.proModel);
+  const primaryProvider: VisionModelMetadata['provider'] = 'gemini';
+  const fallbackModel = normalizeGeminiModelName(config.gemini.freeModel);
+  const resolvedFallbackModel = primaryModel !== fallbackModel ? fallbackModel : null;
 
   const prompt = `You are an elite institutional Smart Money Concepts (SMC) analyst reviewing A HIGHER TIMEFRAME chart.
 
@@ -1060,15 +1057,15 @@ export async function analyzeLTFVisionStructure(
   pair: string,
   timeframe: string
 ): Promise<VisionAnalysisResult> {
-  if (!config.openai.apiKey && !config.gemini.apiKey) {
+  if (!config.gemini.apiKey) {
     throw new Error('TradeVision AI is not configured correctly');
   }
 
-  const genAI = config.gemini.apiKey ? new GoogleGenerativeAI(config.gemini.apiKey) : null;
-  const primaryModel = config.openai.apiKey ? config.openai.proModel.trim() : normalizeGeminiModelName(config.gemini.proModel);
-  const primaryProvider: VisionModelMetadata['provider'] = config.openai.apiKey ? 'openai' : 'gemini';
-  const fallbackModel = config.gemini.apiKey ? normalizeGeminiModelName(config.gemini.freeModel) : null;
-  const resolvedFallbackModel = primaryProvider === 'openai' ? fallbackModel : (primaryModel !== fallbackModel ? fallbackModel : null);
+  const genAI = new GoogleGenerativeAI(config.gemini.apiKey);
+  const primaryModel = normalizeGeminiModelName(config.gemini.proModel);
+  const primaryProvider: VisionModelMetadata['provider'] = 'gemini';
+  const fallbackModel = normalizeGeminiModelName(config.gemini.freeModel);
+  const resolvedFallbackModel = primaryModel !== fallbackModel ? fallbackModel : null;
 
   const prompt = `You are an elite institutional Smart Money Concepts (SMC) execution analyst reviewing A LOWER TIMEFRAME chart.
 
