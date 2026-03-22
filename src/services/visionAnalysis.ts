@@ -71,6 +71,33 @@ export interface VisionAnalysisResult {
   takeProfit1: number | null;
   takeProfit2: number | null;
   takeProfit3: number | null;
+  analysisMeta?: VisionAnalysisMetadata;
+}
+
+export interface VisionDualModelMetadata {
+  mode: 'dual';
+  charts: VisionModelMetadata[];
+}
+
+export type VisionAnalysisMetadata = VisionModelMetadata | VisionDualModelMetadata;
+
+export interface VisionModelMetadata {
+  provider: 'gemini';
+  mode: 'single' | 'htf' | 'ltf';
+  primaryModel: string;
+  fallbackModel: string | null;
+  actualModel: string;
+  usedFallback: boolean;
+}
+
+export class VisionAnalysisError extends Error {
+  metadata: VisionModelMetadata;
+
+  constructor(message: string, metadata: VisionModelMetadata) {
+    super(message);
+    this.name = 'VisionAnalysisError';
+    this.metadata = metadata;
+  }
 }
 
 const parseJsonObject = (value: string) => {
@@ -356,6 +383,36 @@ const generateVisionResponse = async (
   ]);
 };
 
+const createVisionModelMetadata = (
+  mode: VisionModelMetadata['mode'],
+  primaryModel: string,
+  fallbackModel: string | null,
+  actualModel: string
+): VisionModelMetadata => ({
+  provider: 'gemini',
+  mode,
+  primaryModel,
+  fallbackModel,
+  actualModel,
+  usedFallback: Boolean(fallbackModel && actualModel === fallbackModel),
+});
+
+const withVisionModelMetadata = (
+  result: Omit<VisionAnalysisResult, 'analysisMeta'>,
+  metadata: VisionModelMetadata
+): VisionAnalysisResult => ({
+  ...result,
+  analysisMeta: metadata,
+});
+
+const toVisionAnalysisError = (error: unknown, metadata: VisionModelMetadata) => {
+  if (error instanceof VisionAnalysisError) {
+    return error;
+  }
+
+  return new VisionAnalysisError(error instanceof Error ? error.message : 'Vision analysis failed', metadata);
+};
+
 export async function analyzeVisionStructure(
   base64Image: string,
   mimeType: string,
@@ -370,6 +427,7 @@ export async function analyzeVisionStructure(
   const genAI = new GoogleGenerativeAI(config.gemini.apiKey);
   const primaryModel = getGeminiModelForSubscription(subscription);
   const fallbackModel = normalizeGeminiModelName(config.gemini.freeModel);
+  const resolvedFallbackModel = primaryModel !== fallbackModel ? fallbackModel : null;
 
   const basePromptHeader = `You are an institutional-level Smart Money Concepts (SMC) trading analyst.
 
@@ -626,91 +684,98 @@ Do not add commentary outside the JSON.`;
     : `${basePromptHeader}\n\n========================================\nOUTPUT FORMAT (STRICT JSON ONLY)\n========================================\n${freeJsonSchema}\n${freeRules}\n${freeGoal}`;
 
   let result;
+  let actualModel = primaryModel;
 
   try {
-    result = await generateVisionResponse(genAI, primaryModel, prompt, base64Image, mimeType);
-  } catch (error) {
-    if (subscription === 'PRO' && primaryModel !== fallbackModel && isUnsupportedModelError(error)) {
-      console.warn(`[visionAnalysis] Pro model "${primaryModel}" is unavailable. Falling back to "${fallbackModel}".`);
-      result = await generateVisionResponse(genAI, fallbackModel, prompt, base64Image, mimeType);
-    } else {
-      throw error;
+    try {
+      result = await generateVisionResponse(genAI, primaryModel, prompt, base64Image, mimeType);
+    } catch (error) {
+      if (subscription === 'PRO' && resolvedFallbackModel && isUnsupportedModelError(error)) {
+        console.warn(`[visionAnalysis] Pro model "${primaryModel}" is unavailable. Falling back to "${resolvedFallbackModel}".`);
+        actualModel = resolvedFallbackModel;
+        result = await generateVisionResponse(genAI, resolvedFallbackModel, prompt, base64Image, mimeType);
+      } else {
+        throw error;
+      }
     }
+
+    const parsed = parseJsonObject(result.response.text());
+    const structure = parsed.structure as Record<string, unknown> | undefined;
+    const liquidity = parsed.liquidity as Record<string, unknown> | undefined;
+    const zones = parsed.zones as Record<string, unknown> | undefined;
+    const pricePosition = parsed.price_position as Record<string, unknown> | undefined;
+    const entryPlan = parsed.entry_plan as Record<string, unknown> | undefined;
+    const riskManagement = parsed.risk_management as Record<string, unknown> | undefined;
+    const quality = parsed.quality as Record<string, unknown> | undefined;
+    const finalVerdict = parsed.final_verdict as Record<string, unknown> | undefined;
+    const metadata = createVisionModelMetadata('single', primaryModel, resolvedFallbackModel, actualModel);
+
+    return withVisionModelMetadata({
+      trend: normalizeTrend(parsed.trend),
+      structure: {
+        state: normalizeStructureState(structure?.state),
+        bos: normalizeBosOrChoch(structure?.bos),
+        choch: normalizeBosOrChoch(structure?.choch),
+      },
+      liquidity: {
+        type: normalizeLiquidityType(liquidity?.type),
+        description: normalizeText(
+          liquidity?.description,
+          'No meaningful liquidity event was clearly validated from the chart.'
+        ),
+      },
+      zones: {
+        supply: normalizeQualifiedZone(zones?.supply),
+        demand: normalizeQualifiedZone(zones?.demand),
+      },
+      pricePosition: {
+        location: normalizePriceLocation(pricePosition?.location),
+        explanation: normalizeText(
+          pricePosition?.explanation,
+          'Price is not clearly positioned in premium or discount relative to the latest impulse leg.'
+        ),
+      },
+      entryPlan: {
+        bias: normalizeBias(entryPlan?.bias),
+        entryType: normalizeEntryType(entryPlan?.entry_type),
+        entryZone: normalizeZone(entryPlan?.entry_zone),
+        confirmation: normalizeConfirmation(entryPlan?.confirmation),
+        reason: normalizeText(
+          entryPlan?.reason,
+          'No disciplined entry plan is justified until structure and location improve.'
+        ),
+      },
+      riskManagement: {
+        invalidationLevel: normalizeNumeric(riskManagement?.invalidation_level),
+        invalidationReason: normalizeText(
+          riskManagement?.invalidation_reason,
+          'The setup is invalidated if price breaks the structural level that supports the current bias.'
+        ),
+      },
+      quality: {
+        setupRating: normalizeSetupRating(quality?.setup_rating),
+        confidence: normalizeConfidence(quality?.confidence),
+      },
+      finalVerdict: {
+        action: normalizeFinalAction(finalVerdict?.action),
+        message: normalizeText(
+          finalVerdict?.message,
+          'Wait for a cleaner institutional setup before committing to a trade.'
+        ),
+      },
+      reasoning: normalizeText(
+        parsed.reasoning,
+        'The chart does not present a clean Smart Money Concepts setup yet, so patience is preferred over forcing an entry.'
+      ),
+      visiblePriceRange: normalizeVisiblePriceRange(parsed.visible_price_range),
+      stopLoss: normalizeNumeric(parsed.stop_loss),
+      takeProfit1: normalizeNumeric(parsed.take_profit_1),
+      takeProfit2: normalizeNumeric(parsed.take_profit_2),
+      takeProfit3: normalizeNumeric(parsed.take_profit_3),
+    }, metadata);
+  } catch (error) {
+    throw toVisionAnalysisError(error, createVisionModelMetadata('single', primaryModel, resolvedFallbackModel, actualModel));
   }
-
-  const parsed = parseJsonObject(result.response.text());
-  const structure = parsed.structure as Record<string, unknown> | undefined;
-  const liquidity = parsed.liquidity as Record<string, unknown> | undefined;
-  const zones = parsed.zones as Record<string, unknown> | undefined;
-  const pricePosition = parsed.price_position as Record<string, unknown> | undefined;
-  const entryPlan = parsed.entry_plan as Record<string, unknown> | undefined;
-  const riskManagement = parsed.risk_management as Record<string, unknown> | undefined;
-  const quality = parsed.quality as Record<string, unknown> | undefined;
-  const finalVerdict = parsed.final_verdict as Record<string, unknown> | undefined;
-
-  return {
-    trend: normalizeTrend(parsed.trend),
-    structure: {
-      state: normalizeStructureState(structure?.state),
-      bos: normalizeBosOrChoch(structure?.bos),
-      choch: normalizeBosOrChoch(structure?.choch),
-    },
-    liquidity: {
-      type: normalizeLiquidityType(liquidity?.type),
-      description: normalizeText(
-        liquidity?.description,
-        'No meaningful liquidity event was clearly validated from the chart.'
-      ),
-    },
-    zones: {
-      supply: normalizeQualifiedZone(zones?.supply),
-      demand: normalizeQualifiedZone(zones?.demand),
-    },
-    pricePosition: {
-      location: normalizePriceLocation(pricePosition?.location),
-      explanation: normalizeText(
-        pricePosition?.explanation,
-        'Price is not clearly positioned in premium or discount relative to the latest impulse leg.'
-      ),
-    },
-    entryPlan: {
-      bias: normalizeBias(entryPlan?.bias),
-      entryType: normalizeEntryType(entryPlan?.entry_type),
-      entryZone: normalizeZone(entryPlan?.entry_zone),
-      confirmation: normalizeConfirmation(entryPlan?.confirmation),
-      reason: normalizeText(
-        entryPlan?.reason,
-        'No disciplined entry plan is justified until structure and location improve.'
-      ),
-    },
-    riskManagement: {
-      invalidationLevel: normalizeNumeric(riskManagement?.invalidation_level),
-      invalidationReason: normalizeText(
-        riskManagement?.invalidation_reason,
-        'The setup is invalidated if price breaks the structural level that supports the current bias.'
-      ),
-    },
-    quality: {
-      setupRating: normalizeSetupRating(quality?.setup_rating),
-      confidence: normalizeConfidence(quality?.confidence),
-    },
-    finalVerdict: {
-      action: normalizeFinalAction(finalVerdict?.action),
-      message: normalizeText(
-        finalVerdict?.message,
-        'Wait for a cleaner institutional setup before committing to a trade.'
-      ),
-    },
-    reasoning: normalizeText(
-      parsed.reasoning,
-      'The chart does not present a clean Smart Money Concepts setup yet, so patience is preferred over forcing an entry.'
-    ),
-    visiblePriceRange: normalizeVisiblePriceRange(parsed.visible_price_range),
-    stopLoss: normalizeNumeric(parsed.stop_loss),
-    takeProfit1: normalizeNumeric(parsed.take_profit_1),
-    takeProfit2: normalizeNumeric(parsed.take_profit_2),
-    takeProfit3: normalizeNumeric(parsed.take_profit_3),
-  };
 }
 
 // ============================================
@@ -731,6 +796,7 @@ export async function analyzeHTFVisionStructure(
   const genAI = new GoogleGenerativeAI(config.gemini.apiKey);
   const primaryModel = normalizeGeminiModelName(config.gemini.proModel);
   const fallbackModel = normalizeGeminiModelName(config.gemini.freeModel);
+  const resolvedFallbackModel = primaryModel !== fallbackModel ? fallbackModel : null;
 
   const prompt = `You are an elite institutional Smart Money Concepts (SMC) analyst reviewing A HIGHER TIMEFRAME chart.
 
@@ -828,71 +894,79 @@ STRICT RULES
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 
   let result;
+  let actualModel = primaryModel;
+
   try {
-    result = await generateVisionResponse(genAI, primaryModel, prompt, base64Image, mimeType);
-  } catch (error) {
-    if (primaryModel !== fallbackModel && isUnsupportedModelError(error)) {
-      result = await generateVisionResponse(genAI, fallbackModel, prompt, base64Image, mimeType);
-    } else {
-      throw error;
+    try {
+      result = await generateVisionResponse(genAI, primaryModel, prompt, base64Image, mimeType);
+    } catch (error) {
+      if (resolvedFallbackModel && isUnsupportedModelError(error)) {
+        actualModel = resolvedFallbackModel;
+        result = await generateVisionResponse(genAI, resolvedFallbackModel, prompt, base64Image, mimeType);
+      } else {
+        throw error;
+      }
     }
+
+    const parsed = parseJsonObject(result.response.text());
+    const structure = parsed.structure as Record<string, unknown> | undefined;
+    const liquidity = parsed.liquidity as Record<string, unknown> | undefined;
+    const zones = parsed.zones as Record<string, unknown> | undefined;
+    const pricePosition = parsed.price_position as Record<string, unknown> | undefined;
+    const entryPlan = parsed.entry_plan as Record<string, unknown> | undefined;
+    const riskManagement = parsed.risk_management as Record<string, unknown> | undefined;
+    const quality = parsed.quality as Record<string, unknown> | undefined;
+    const finalVerdict = parsed.final_verdict as Record<string, unknown> | undefined;
+    const metadata = createVisionModelMetadata('htf', primaryModel, resolvedFallbackModel, actualModel);
+
+    return withVisionModelMetadata({
+      trend: normalizeTrend(parsed.trend),
+      structure: {
+        state: normalizeStructureState(structure?.state),
+        bos: normalizeBosOrChoch(structure?.bos),
+        choch: normalizeBosOrChoch(structure?.choch),
+      },
+      liquidity: {
+        type: normalizeLiquidityType(liquidity?.type),
+        description: normalizeText(liquidity?.description, 'No significant liquidity identified on the higher timeframe.'),
+      },
+      zones: {
+        supply: normalizeQualifiedZone(zones?.supply),
+        demand: normalizeQualifiedZone(zones?.demand),
+      },
+      pricePosition: {
+        location: normalizePriceLocation(pricePosition?.location),
+        explanation: normalizeText(pricePosition?.explanation, 'Price position relative to the impulse leg could not be determined.'),
+      },
+      entryPlan: {
+        bias: normalizeBias(entryPlan?.bias),
+        entryType: 'none',
+        entryZone: null,
+        confirmation: 'none',
+        reason: normalizeText(entryPlan?.reason, 'HTF provides bias only — entry is determined by the lower timeframe.'),
+      },
+      riskManagement: {
+        invalidationLevel: normalizeNumeric(riskManagement?.invalidation_level),
+        invalidationReason: normalizeText(riskManagement?.invalidation_reason, 'HTF structural invalidation level.'),
+      },
+      quality: {
+        setupRating: normalizeSetupRating(quality?.setup_rating),
+        confidence: normalizeConfidence(quality?.confidence),
+      },
+      finalVerdict: {
+        action: normalizeFinalAction(finalVerdict?.action),
+        message: normalizeText(finalVerdict?.message, 'Review the lower timeframe for confirmation.'),
+      },
+      reasoning: normalizeText(parsed.reasoning, 'Higher timeframe analysis could not determine a clear structure.'),
+      visiblePriceRange: normalizeVisiblePriceRange(parsed.visible_price_range),
+      stopLoss: null,
+      takeProfit1: null,
+      takeProfit2: null,
+      takeProfit3: null,
+    }, metadata);
+  } catch (error) {
+    throw toVisionAnalysisError(error, createVisionModelMetadata('htf', primaryModel, resolvedFallbackModel, actualModel));
   }
-
-  const parsed = parseJsonObject(result.response.text());
-  const structure = parsed.structure as Record<string, unknown> | undefined;
-  const liquidity = parsed.liquidity as Record<string, unknown> | undefined;
-  const zones = parsed.zones as Record<string, unknown> | undefined;
-  const pricePosition = parsed.price_position as Record<string, unknown> | undefined;
-  const entryPlan = parsed.entry_plan as Record<string, unknown> | undefined;
-  const riskManagement = parsed.risk_management as Record<string, unknown> | undefined;
-  const quality = parsed.quality as Record<string, unknown> | undefined;
-  const finalVerdict = parsed.final_verdict as Record<string, unknown> | undefined;
-
-  return {
-    trend: normalizeTrend(parsed.trend),
-    structure: {
-      state: normalizeStructureState(structure?.state),
-      bos: normalizeBosOrChoch(structure?.bos),
-      choch: normalizeBosOrChoch(structure?.choch),
-    },
-    liquidity: {
-      type: normalizeLiquidityType(liquidity?.type),
-      description: normalizeText(liquidity?.description, 'No significant liquidity identified on the higher timeframe.'),
-    },
-    zones: {
-      supply: normalizeQualifiedZone(zones?.supply),
-      demand: normalizeQualifiedZone(zones?.demand),
-    },
-    pricePosition: {
-      location: normalizePriceLocation(pricePosition?.location),
-      explanation: normalizeText(pricePosition?.explanation, 'Price position relative to the impulse leg could not be determined.'),
-    },
-    entryPlan: {
-      bias: normalizeBias(entryPlan?.bias),
-      entryType: 'none',
-      entryZone: null,
-      confirmation: 'none',
-      reason: normalizeText(entryPlan?.reason, 'HTF provides bias only — entry is determined by the lower timeframe.'),
-    },
-    riskManagement: {
-      invalidationLevel: normalizeNumeric(riskManagement?.invalidation_level),
-      invalidationReason: normalizeText(riskManagement?.invalidation_reason, 'HTF structural invalidation level.'),
-    },
-    quality: {
-      setupRating: normalizeSetupRating(quality?.setup_rating),
-      confidence: normalizeConfidence(quality?.confidence),
-    },
-    finalVerdict: {
-      action: normalizeFinalAction(finalVerdict?.action),
-      message: normalizeText(finalVerdict?.message, 'Review the lower timeframe for confirmation.'),
-    },
-    reasoning: normalizeText(parsed.reasoning, 'Higher timeframe analysis could not determine a clear structure.'),
-    visiblePriceRange: normalizeVisiblePriceRange(parsed.visible_price_range),
-    stopLoss: null,
-    takeProfit1: null,
-    takeProfit2: null,
-    takeProfit3: null,
-  };
 }
 
 // ============================================
@@ -913,6 +987,7 @@ export async function analyzeLTFVisionStructure(
   const genAI = new GoogleGenerativeAI(config.gemini.apiKey);
   const primaryModel = normalizeGeminiModelName(config.gemini.proModel);
   const fallbackModel = normalizeGeminiModelName(config.gemini.freeModel);
+  const resolvedFallbackModel = primaryModel !== fallbackModel ? fallbackModel : null;
 
   const prompt = `You are an elite institutional Smart Money Concepts (SMC) execution analyst reviewing A LOWER TIMEFRAME chart.
 
@@ -1019,69 +1094,77 @@ STRICT RULES
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 
   let result;
+  let actualModel = primaryModel;
+
   try {
-    result = await generateVisionResponse(genAI, primaryModel, prompt, base64Image, mimeType);
-  } catch (error) {
-    if (primaryModel !== fallbackModel && isUnsupportedModelError(error)) {
-      result = await generateVisionResponse(genAI, fallbackModel, prompt, base64Image, mimeType);
-    } else {
-      throw error;
+    try {
+      result = await generateVisionResponse(genAI, primaryModel, prompt, base64Image, mimeType);
+    } catch (error) {
+      if (resolvedFallbackModel && isUnsupportedModelError(error)) {
+        actualModel = resolvedFallbackModel;
+        result = await generateVisionResponse(genAI, resolvedFallbackModel, prompt, base64Image, mimeType);
+      } else {
+        throw error;
+      }
     }
+
+    const parsed = parseJsonObject(result.response.text());
+    const structure = parsed.structure as Record<string, unknown> | undefined;
+    const liquidity = parsed.liquidity as Record<string, unknown> | undefined;
+    const zones = parsed.zones as Record<string, unknown> | undefined;
+    const pricePosition = parsed.price_position as Record<string, unknown> | undefined;
+    const entryPlan = parsed.entry_plan as Record<string, unknown> | undefined;
+    const riskManagement = parsed.risk_management as Record<string, unknown> | undefined;
+    const quality = parsed.quality as Record<string, unknown> | undefined;
+    const finalVerdict = parsed.final_verdict as Record<string, unknown> | undefined;
+    const metadata = createVisionModelMetadata('ltf', primaryModel, resolvedFallbackModel, actualModel);
+
+    return withVisionModelMetadata({
+      trend: normalizeTrend(parsed.trend),
+      structure: {
+        state: normalizeStructureState(structure?.state),
+        bos: normalizeBosOrChoch(structure?.bos),
+        choch: normalizeBosOrChoch(structure?.choch),
+      },
+      liquidity: {
+        type: normalizeLiquidityType(liquidity?.type),
+        description: normalizeText(liquidity?.description, 'No clear liquidity sweep was identified on the lower timeframe.'),
+      },
+      zones: {
+        supply: normalizeQualifiedZone(zones?.supply),
+        demand: normalizeQualifiedZone(zones?.demand),
+      },
+      pricePosition: {
+        location: normalizePriceLocation(pricePosition?.location),
+        explanation: normalizeText(pricePosition?.explanation, 'Internal price position could not be determined.'),
+      },
+      entryPlan: {
+        bias: normalizeBias(entryPlan?.bias),
+        entryType: normalizeEntryType(entryPlan?.entry_type),
+        entryZone: normalizeZone(entryPlan?.entry_zone),
+        confirmation: normalizeConfirmation(entryPlan?.confirmation),
+        reason: normalizeText(entryPlan?.reason, 'No disciplined entry is justified until internal structure confirms.'),
+      },
+      riskManagement: {
+        invalidationLevel: normalizeNumeric(riskManagement?.invalidation_level),
+        invalidationReason: normalizeText(riskManagement?.invalidation_reason, 'The setup is invalidated if price breaks the structural level.'),
+      },
+      quality: {
+        setupRating: normalizeSetupRating(quality?.setup_rating),
+        confidence: normalizeConfidence(quality?.confidence),
+      },
+      finalVerdict: {
+        action: normalizeFinalAction(finalVerdict?.action),
+        message: normalizeText(finalVerdict?.message, 'Wait for internal structure to confirm before entering.'),
+      },
+      reasoning: normalizeText(parsed.reasoning, 'Lower timeframe does not present a confirmed entry yet.'),
+      visiblePriceRange: normalizeVisiblePriceRange(parsed.visible_price_range),
+      stopLoss: normalizeNumeric(parsed.stop_loss),
+      takeProfit1: normalizeNumeric(parsed.take_profit_1),
+      takeProfit2: normalizeNumeric(parsed.take_profit_2),
+      takeProfit3: normalizeNumeric(parsed.take_profit_3),
+    }, metadata);
+  } catch (error) {
+    throw toVisionAnalysisError(error, createVisionModelMetadata('ltf', primaryModel, resolvedFallbackModel, actualModel));
   }
-
-  const parsed = parseJsonObject(result.response.text());
-  const structure = parsed.structure as Record<string, unknown> | undefined;
-  const liquidity = parsed.liquidity as Record<string, unknown> | undefined;
-  const zones = parsed.zones as Record<string, unknown> | undefined;
-  const pricePosition = parsed.price_position as Record<string, unknown> | undefined;
-  const entryPlan = parsed.entry_plan as Record<string, unknown> | undefined;
-  const riskManagement = parsed.risk_management as Record<string, unknown> | undefined;
-  const quality = parsed.quality as Record<string, unknown> | undefined;
-  const finalVerdict = parsed.final_verdict as Record<string, unknown> | undefined;
-
-  return {
-    trend: normalizeTrend(parsed.trend),
-    structure: {
-      state: normalizeStructureState(structure?.state),
-      bos: normalizeBosOrChoch(structure?.bos),
-      choch: normalizeBosOrChoch(structure?.choch),
-    },
-    liquidity: {
-      type: normalizeLiquidityType(liquidity?.type),
-      description: normalizeText(liquidity?.description, 'No clear liquidity sweep was identified on the lower timeframe.'),
-    },
-    zones: {
-      supply: normalizeQualifiedZone(zones?.supply),
-      demand: normalizeQualifiedZone(zones?.demand),
-    },
-    pricePosition: {
-      location: normalizePriceLocation(pricePosition?.location),
-      explanation: normalizeText(pricePosition?.explanation, 'Internal price position could not be determined.'),
-    },
-    entryPlan: {
-      bias: normalizeBias(entryPlan?.bias),
-      entryType: normalizeEntryType(entryPlan?.entry_type),
-      entryZone: normalizeZone(entryPlan?.entry_zone),
-      confirmation: normalizeConfirmation(entryPlan?.confirmation),
-      reason: normalizeText(entryPlan?.reason, 'No disciplined entry is justified until internal structure confirms.'),
-    },
-    riskManagement: {
-      invalidationLevel: normalizeNumeric(riskManagement?.invalidation_level),
-      invalidationReason: normalizeText(riskManagement?.invalidation_reason, 'The setup is invalidated if price breaks the structural level.'),
-    },
-    quality: {
-      setupRating: normalizeSetupRating(quality?.setup_rating),
-      confidence: normalizeConfidence(quality?.confidence),
-    },
-    finalVerdict: {
-      action: normalizeFinalAction(finalVerdict?.action),
-      message: normalizeText(finalVerdict?.message, 'Wait for internal structure to confirm before entering.'),
-    },
-    reasoning: normalizeText(parsed.reasoning, 'Lower timeframe does not present a confirmed entry yet.'),
-    visiblePriceRange: normalizeVisiblePriceRange(parsed.visible_price_range),
-    stopLoss: normalizeNumeric(parsed.stop_loss),
-    takeProfit1: normalizeNumeric(parsed.take_profit_1),
-    takeProfit2: normalizeNumeric(parsed.take_profit_2),
-    takeProfit3: normalizeNumeric(parsed.take_profit_3),
-  };
 }

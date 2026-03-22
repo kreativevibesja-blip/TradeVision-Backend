@@ -425,6 +425,80 @@ const getUsersMap = async (userIds: string[]) => {
   return new Map(users.map((user) => [user.id, user]));
 };
 
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null;
+
+const extractAnalysisMeta = (value: unknown): Record<string, unknown> | null => {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const directMeta = value.analysisMeta;
+  return isRecord(directMeta) ? directMeta : null;
+};
+
+const formatModelName = (value: string) => {
+  const normalized = value.trim().toLowerCase();
+
+  if (normalized === 'gemini-2.5-flash') {
+    return 'Gemini 2.5 Flash';
+  }
+
+  if (normalized === 'gemini-3-flash-preview' || normalized === 'gemini-3-flash') {
+    return 'Gemini 3 Flash Preview';
+  }
+
+  return value;
+};
+
+const summarizeSingleModelMeta = (value: Record<string, unknown>) => {
+  const actualModel = typeof value.actualModel === 'string' ? value.actualModel : null;
+  const mode = typeof value.mode === 'string' ? value.mode : null;
+  const usedFallback = value.usedFallback === true;
+
+  if (!actualModel) {
+    return null;
+  }
+
+  return {
+    label: formatModelName(actualModel),
+    mode,
+    usedFallback,
+  };
+};
+
+const summarizeAnalysisModel = (analysis: AnalysisRecord) => {
+  const metadata = extractAnalysisMeta(analysis.rawResponse) ?? extractAnalysisMeta(analysis.layer2Output) ?? extractAnalysisMeta(analysis.layer1Output);
+
+  if (!metadata) {
+    return { label: null, usedFallback: false };
+  }
+
+  const charts = Array.isArray(metadata.charts)
+    ? metadata.charts.map((chart) => (isRecord(chart) ? summarizeSingleModelMeta(chart) : null)).filter((chart): chart is NonNullable<ReturnType<typeof summarizeSingleModelMeta>> => Boolean(chart))
+    : [];
+
+  if (charts.length > 0) {
+    const usedFallback = charts.some((chart) => chart.usedFallback);
+    const uniqueLabels = Array.from(new Set(charts.map((chart) => chart.label)));
+
+    if (uniqueLabels.length === 1) {
+      return { label: uniqueLabels[0], usedFallback };
+    }
+
+    const label = charts
+      .map((chart) => `${chart.mode === 'htf' ? 'HTF' : chart.mode === 'ltf' ? 'LTF' : 'Chart'}: ${chart.label}`)
+      .join(' | ');
+
+    return { label, usedFallback };
+  }
+
+  const single = summarizeSingleModelMeta(metadata);
+  return {
+    label: single?.label ?? null,
+    usedFallback: single?.usedFallback ?? false,
+  };
+};
+
 export const listAllAnalysesPage = async (page: number, limit: number) => {
   const skip = (page - 1) * limit;
   const { data, count, error } = await supabase
@@ -441,15 +515,25 @@ export const listAllAnalysesPage = async (page: number, limit: number) => {
   const usersMap = await getUsersMap(Array.from(new Set(analyses.map((analysis) => analysis.userId))));
 
   return {
-    analyses: analyses.map((analysis) => ({
-      ...analysis,
-      user: usersMap.has(analysis.userId)
-        ? {
-            email: usersMap.get(analysis.userId)?.email,
-            name: usersMap.get(analysis.userId)?.name,
-          }
-        : null,
-    })),
+    analyses: analyses.map((analysis) => {
+      const user = usersMap.get(analysis.userId);
+      const modelSummary = summarizeAnalysisModel(analysis);
+
+      return {
+        ...analysis,
+        outcome: analysis.status === 'COMPLETED' ? 'SUCCESS' : analysis.status === 'FAILED' ? 'FAILED' : 'IN_PROGRESS',
+        modelUsed: modelSummary.label,
+        usedFallback: modelSummary.usedFallback,
+        failureReason: analysis.errorMessage,
+        user: user
+          ? {
+              email: user.email,
+              name: user.name,
+              subscription: user.subscription,
+            }
+          : null,
+      };
+    }),
     total: count ?? 0,
   };
 };

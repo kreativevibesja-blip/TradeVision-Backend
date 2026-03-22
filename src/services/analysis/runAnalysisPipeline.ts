@@ -3,6 +3,7 @@ import { analyzeVisionStructure, analyzeHTFVisionStructure, analyzeLTFVisionStru
 import { generateFinalSignal } from '../signalEngine';
 import { drawChartMarkup, drawHTFChartMarkup, drawLTFChartMarkup, isChartMarkupEnabledForPlan } from '../chartMarkup';
 import type { SubscriptionTier } from '../../lib/supabase';
+import type { VisionModelMetadata } from '../visionAnalysis';
 
 interface SecondaryChartInput {
   base64Image: string;
@@ -26,9 +27,27 @@ interface RunAnalysisPipelineInput {
   secondaryChart: SecondaryChartInput | null;
 }
 
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null;
+
+const isVisionModelMetadata = (value: unknown): value is VisionModelMetadata =>
+  isRecord(value) &&
+  typeof value.provider === 'string' &&
+  typeof value.primaryModel === 'string' &&
+  typeof value.actualModel === 'string';
+
+const extractVisionMetadataFromError = (error: unknown) => {
+  if (!isRecord(error)) {
+    return null;
+  }
+
+  const metadata = error.metadata;
+  return isRecord(metadata) ? metadata : null;
+};
+
 export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe, subscription, currentPrice, chartMinPrice, chartMaxPrice, imageUrl, base64Image, mimeType, secondaryChart }: RunAnalysisPipelineInput) {
   try {
     const isDualChart = secondaryChart !== null;
+    let analysisMeta: Record<string, unknown> | null = null;
 
     await updateAnalysis(analysisId, {
       status: 'PROCESSING',
@@ -71,10 +90,19 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
         takeProfit1: ltfVision.takeProfit1,
         takeProfit2: ltfVision.takeProfit2,
         takeProfit3: ltfVision.takeProfit3,
+        analysisMeta: {
+          mode: 'dual' as const,
+          charts: [htfVision.analysisMeta, ltfVision.analysisMeta].filter(
+            (item): item is VisionModelMetadata => isVisionModelMetadata(item)
+          ),
+        },
       };
+
+      analysisMeta = isRecord(vision.analysisMeta) ? vision.analysisMeta : null;
     } else {
       // Single chart mode (existing flow)
       vision = await analyzeVisionStructure(base64Image, mimeType, pair, timeframe, subscription);
+      analysisMeta = isRecord(vision.analysisMeta) ? vision.analysisMeta : null;
     }
 
     await updateAnalysis(analysisId, {
@@ -117,6 +145,7 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
 
     const enrichedSignal = {
       ...signal,
+      analysisMeta,
       originalImageUrl: imageUrl,
       markedImageUrl: markup.markedImageUrl,
       hasMarkup: markup.hasMarkup,
@@ -160,12 +189,14 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
     return analysis;
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Analysis failed';
+    const errorMetadata = extractVisionMetadataFromError(error);
 
     await updateAnalysis(analysisId, {
       status: 'FAILED',
       progress: 100,
       currentStage: 'Analysis failed',
       errorMessage: message,
+      ...(errorMetadata ? { rawResponse: { analysisMeta: errorMetadata } } : {}),
     }).catch((updateError) => {
       console.error('[analysis-pipeline] failed to persist failure state:', updateError);
     });
