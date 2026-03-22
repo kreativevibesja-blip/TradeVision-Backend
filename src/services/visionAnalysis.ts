@@ -344,6 +344,10 @@ const normalizeGeminiModelName = (modelName: string) => {
   const withoutPrefix = normalized.replace(/^models\//i, '');
   const lower = withoutPrefix.toLowerCase();
 
+  if (lower === 'gemini-3.1-flash-lite') {
+    return 'gemini-3.1-flash-lite-preview';
+  }
+
   if (lower === 'gemini-3-flash') {
     return 'gemini-3-flash-preview';
   }
