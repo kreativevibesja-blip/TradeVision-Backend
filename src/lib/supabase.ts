@@ -283,9 +283,11 @@ export const updateUser = (id: string, values: Partial<UserRecord>) =>
 
 export const listUsersPage = async (search: string | undefined, page: number, limit: number) => {
   const skip = (page - 1) * limit;
+  const todayStamp = new Date().toISOString().slice(0, 10);
+  const monthStartIso = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1, 0, 0, 0, 0)).toISOString();
   let query = supabase
     .from(USER_TABLE)
-    .select('id,email,name,role,subscription,banned,dailyUsage,createdAt', { count: 'exact' })
+    .select('id,email,name,role,subscription,banned,dailyUsage,lastUsageReset,createdAt', { count: 'exact' })
     .order('createdAt', { ascending: false })
     .range(skip, skip + limit - 1);
 
@@ -304,7 +306,7 @@ export const listUsersPage = async (search: string | undefined, page: number, li
 
   const [analysisRows, paymentRows] = await Promise.all([
     userIds.length
-      ? many<Pick<AnalysisRecord, 'userId'>>('listUsersPage analyses counts', supabase.from(ANALYSIS_TABLE).select('userId').in('userId', userIds))
+      ? many<Pick<AnalysisRecord, 'userId' | 'createdAt'>>('listUsersPage analyses counts', supabase.from(ANALYSIS_TABLE).select('userId,createdAt').in('userId', userIds))
       : Promise.resolve([]),
     userIds.length
       ? many<Pick<PaymentRecord, 'userId'>>('listUsersPage payments counts', supabase.from(PAYMENT_TABLE).select('userId').in('userId', userIds))
@@ -316,6 +318,13 @@ export const listUsersPage = async (search: string | undefined, page: number, li
     return acc;
   }, {});
 
+  const monthlyAnalysisCountMap = analysisRows.reduce<Record<string, number>>((acc, row) => {
+    if (row.createdAt >= monthStartIso) {
+      acc[row.userId] = (acc[row.userId] || 0) + 1;
+    }
+    return acc;
+  }, {});
+
   const paymentCountMap = paymentRows.reduce<Record<string, number>>((acc, row) => {
     acc[row.userId] = (acc[row.userId] || 0) + 1;
     return acc;
@@ -324,6 +333,18 @@ export const listUsersPage = async (search: string | undefined, page: number, li
   return {
     users: users.map((user) => ({
       ...user,
+      usage:
+        user.subscription === 'PRO'
+          ? {
+              current: monthlyAnalysisCountMap[user.id!] || 0,
+              limit: config.limits.proMonthly,
+              period: 'month',
+            }
+          : {
+              current: getUsageDayStamp(user.lastUsageReset) === todayStamp ? user.dailyUsage || 0 : 0,
+              limit: config.limits.freeDaily,
+              period: 'day',
+            },
       _count: {
         analyses: analysisCountMap[user.id!] || 0,
         payments: paymentCountMap[user.id!] || 0,
