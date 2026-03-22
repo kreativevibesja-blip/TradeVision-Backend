@@ -44,7 +44,7 @@ const extractVisionMetadataFromError = (error: unknown) => {
   return isRecord(metadata) ? metadata : null;
 };
 
-const formatZone = (zone: VisionAnalysisResult['zones']['supply']) => {
+const formatZone = (zone: { min: number | null; max: number | null } | null) => {
   if (!zone || typeof zone.min !== 'number' || typeof zone.max !== 'number') {
     return null;
   }
@@ -212,6 +212,20 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
       }
     }
 
+    const dualChartContext = isDualChart && secondaryChart && htfVision && ltfVision ? {
+      isDualChart: true,
+      htfTimeframe: timeframe,
+      ltfTimeframe: secondaryChart.timeframe,
+      htfOriginalImageUrl: imageUrl,
+      ltfOriginalImageUrl: secondaryChart.imageUrl,
+      htfMarkedImageUrl: htfMarkup.markedImageUrl,
+      ltfMarkedImageUrl: ltfMarkup.markedImageUrl,
+      htfChartBounds: htfMarkup.chartBounds,
+      ltfChartBounds: ltfMarkup.chartBounds,
+      htfVisiblePriceRange: htfVision.visiblePriceRange,
+      ltfVisiblePriceRange: ltfVision.visiblePriceRange,
+    } : {};
+
     const enrichedSignal = {
       ...signal,
       analysisMeta,
@@ -219,20 +233,7 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
       markedImageUrl: markup.markedImageUrl,
       hasMarkup: markup.hasMarkup,
       chartBounds: markup.chartBounds,
-      // Dual-chart specific fields
-      ...(isDualChart ? {
-        isDualChart: true,
-        htfTimeframe: timeframe,
-        ltfTimeframe: secondaryChart.timeframe,
-        htfOriginalImageUrl: imageUrl,
-        ltfOriginalImageUrl: secondaryChart.imageUrl,
-        htfMarkedImageUrl: htfMarkup.markedImageUrl,
-        ltfMarkedImageUrl: ltfMarkup.markedImageUrl,
-        htfChartBounds: htfMarkup.chartBounds,
-        ltfChartBounds: ltfMarkup.chartBounds,
-        htfVisiblePriceRange: htfVision.visiblePriceRange,
-        ltfVisiblePriceRange: ltfVision.visiblePriceRange,
-      } : {}),
+      ...dualChartContext,
     };
 
     const bias = signal.trend === 'bullish' ? 'BULLISH' : signal.trend === 'bearish' ? 'BEARISH' : 'NEUTRAL';
