@@ -118,7 +118,7 @@ export function generateFinalSignal(aiData: VisionAnalysisResult, currentPrice: 
 
   const finalSignalType = hasValidEntry ? signalType : 'wait';
   const finalRecommendation = hasValidEntry ? interpreted.recommendation : 'wait';
-  const finalMessage = hasValidEntry ? interpreted.message : 'Price is not in a valid execution zone yet. Wait for price to reach a key area.';
+  const finalMessage = hasValidEntry ? interpreted.message : 'Wait. Price is outside the execution zone.';
 
   return {
     trend: aiData.trend,
