@@ -54,9 +54,9 @@ export const config = {
 
   gemini: {
     apiKey: process.env.GEMINI_API_KEY || '',
-    freeModel: process.env.GEMINI_FREE_MODEL || process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+    freeModel: process.env.GEMINI_FREE_MODEL || process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite',
     proModel: process.env.GEMINI_PRO_MODEL || 'gemini-3-flash-preview',
-    model: process.env.GEMINI_FREE_MODEL || process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+    model: process.env.GEMINI_FREE_MODEL || process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite',
   },
   
   paypal: {

@@ -439,6 +439,10 @@ const extractAnalysisMeta = (value: unknown): Record<string, unknown> | null => 
 const formatModelName = (value: string) => {
   const normalized = value.trim().toLowerCase();
 
+  if (normalized === 'gemini-3.1-flash-lite') {
+    return 'Gemini 3.1 Flash Lite';
+  }
+
   if (normalized === 'gemini-2.5-flash') {
     return 'Gemini 2.5 Flash';
   }
