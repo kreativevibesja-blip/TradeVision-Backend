@@ -330,14 +330,6 @@ export const listUsersPage = async (search: string | undefined, page: number, li
 export const countUsers = (subscription?: SubscriptionTier) =>
   countRows('countUsers', USER_TABLE, subscription ? (query) => query.eq('subscription', subscription) : undefined);
 
-export const incrementUserDailyUsage = async (id: string) => {
-  const user = await getUserById(id);
-  if (!user) {
-    throw new Error('Database operation failed');
-  }
-  return updateUser(id, { dailyUsage: (user.dailyUsage || 0) + 1 });
-};
-
 const getUsageDayStamp = (value?: string | null) => {
   const date = value ? new Date(value) : null;
   if (!date || Number.isNaN(date.getTime())) {
@@ -385,6 +377,11 @@ export const releaseUserDailyUsageReservation = async (id: string) => {
     dailyUsage: Math.max(0, (user.dailyUsage || 0) - 1),
   });
 };
+
+export const countAnalysesForUserSince = (userId: string, fromIso: string) =>
+  countRows('countAnalysesForUserSince', ANALYSIS_TABLE, (query) =>
+    query.eq('userId', userId).gte('createdAt', fromIso)
+  );
 
 export const createAnalysis = (values: Partial<AnalysisRecord> & Pick<AnalysisRecord, 'id' | 'jobId' | 'userId' | 'imageUrl' | 'pair' | 'timeframe'>) =>
   insertSingle<AnalysisRecord>('createAnalysis', ANALYSIS_TABLE, values);

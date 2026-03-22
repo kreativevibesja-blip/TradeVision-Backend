@@ -6,6 +6,7 @@ import { AuthRequest } from '../middleware/auth';
 import { config } from '../config';
 import { inferAssetClass } from '../utils/volatilityDetector';
 import {
+  countAnalysesForUserSince,
   createAnalysis,
   getAnalysisByIdForUser,
   getUserById,
@@ -53,6 +54,11 @@ const parseInlineImage = (value: unknown) => {
     mimeType: 'image/jpeg',
     base64Image: trimmed,
   };
+};
+
+const getMonthStartIso = () => {
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0)).toISOString();
 };
 
 const serializeAnalysis = (analysis: any) => ({
@@ -117,17 +123,27 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
       return res.status(403).json({ error: 'Dual-chart analysis is a Pro feature' });
     }
 
-    const limit = user.subscription === 'PRO' ? config.limits.proDaily : config.limits.freeDaily;
-    const usageReservation = await reserveUserDailyUsage(req.user!.id, limit);
-    if (!usageReservation.allowed) {
-      return res.status(429).json({
-        error: 'Daily analysis limit reached',
-        limit,
-        usage: usageReservation.user.dailyUsage,
-      });
-    }
+    if (user.subscription === 'PRO') {
+      const monthlyUsage = await countAnalysesForUserSince(req.user!.id, getMonthStartIso());
+      if (monthlyUsage >= config.limits.proMonthly) {
+        return res.status(429).json({
+          error: 'Monthly fair use limit reached',
+          limit: config.limits.proMonthly,
+          usage: monthlyUsage,
+        });
+      }
+    } else {
+      const usageReservation = await reserveUserDailyUsage(req.user!.id, config.limits.freeDaily);
+      if (!usageReservation.allowed) {
+        return res.status(429).json({
+          error: 'Daily analysis limit reached',
+          limit: config.limits.freeDaily,
+          usage: usageReservation.user.dailyUsage,
+        });
+      }
 
-    usageReserved = true;
+      usageReserved = true;
+    }
 
     const imageUrl = chartFile ? `/uploads/${chartFile.filename}` : 'inline-upload';
     const analysisId = randomUUID();
@@ -170,7 +186,7 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
       userId: req.user!.id,
       pair,
       timeframe,
-      subscription: usageReservation.user.subscription,
+      subscription: user.subscription,
       currentPrice,
       chartMinPrice,
       chartMaxPrice,

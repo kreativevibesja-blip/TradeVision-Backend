@@ -88,6 +88,6 @@ export const config = {
   
   limits: {
     freeDaily: 2,
-    proDaily: 999999,
+    proMonthly: 300,
   },
 };
