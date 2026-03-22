@@ -398,6 +398,9 @@ export const getAnalysisByJobIdForUser = (jobId: string, userId: string) =>
 export const getAnalysisByIdForUser = (id: string, userId: string) =>
   maybeSingle<AnalysisRecord>('getAnalysisByIdForUser', supabase.from(ANALYSIS_TABLE).select('*').eq('id', id).eq('userId', userId).maybeSingle());
 
+export const getAnalysisById = (id: string) =>
+  maybeSingle<AnalysisRecord>('getAnalysisById', supabase.from(ANALYSIS_TABLE).select('*').eq('id', id).maybeSingle());
+
 export const listAnalysesForUser = async (userId: string, page: number, limit: number) => {
   const skip = (page - 1) * limit;
   const { data, count, error } = await supabase

@@ -6,6 +6,7 @@ import {
   deleteAnnouncementRecord,
   deleteAnnouncementRecords,
   deletePricingPlan as deletePricingPlanRecord,
+  getAnalysisById,
   getAnalyticsBuckets,
   getCompletedRevenue,
   listAllAnalysesPage,
@@ -23,6 +24,7 @@ import {
   type AnnouncementContentPayload,
   type AnnouncementRecord,
 } from '../lib/supabase';
+import { serializeAnalysis } from './analysisController';
 import { setBillingStateFromAdmin } from '../services/billing';
 
 const ANNOUNCEMENT_CONTENT_VERSION = 1;
@@ -176,6 +178,21 @@ export const getAnalysisLogs = async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Admin analysis logs error:', error);
     return res.status(500).json({ error: 'Failed to get analysis logs' });
+  }
+};
+
+export const getAdminAnalysisById = async (req: Request, res: Response) => {
+  try {
+    const analysis = await getAnalysisById(req.params.id);
+
+    if (!analysis) {
+      return res.status(404).json({ error: 'Analysis not found' });
+    }
+
+    return res.json({ analysis: serializeAnalysis(analysis) });
+  } catch (error) {
+    console.error('Admin analysis detail error:', error);
+    return res.status(500).json({ error: 'Failed to get analysis' });
   }
 };
 

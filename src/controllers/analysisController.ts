@@ -61,7 +61,7 @@ const getMonthStartIso = () => {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0)).toISOString();
 };
 
-const serializeAnalysis = (analysis: any) => ({
+export const serializeAnalysis = (analysis: any) => ({
   ...(analysis.rawResponse && typeof analysis.rawResponse === 'object' ? analysis.rawResponse : {}),
   ...analysis,
   reasoning:

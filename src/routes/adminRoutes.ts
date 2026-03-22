@@ -3,6 +3,7 @@ import { authenticate, requireAdmin } from '../middleware/auth';
 import {
   createPricingPlan,
   getDashboardStats,
+  getAdminAnalysisById,
   getUsers,
   updateUser,
   getAnalysisLogs,
@@ -34,6 +35,7 @@ router.get('/dashboard', getDashboardStats);
 router.get('/users', getUsers);
 router.patch('/users/:id', updateUser);
 router.get('/analyses', getAnalysisLogs);
+router.get('/analyses/:id', getAdminAnalysisById);
 router.get('/payments', getPayments);
 router.get('/analytics', getAnalytics);
 router.get('/pricing-plans', getPricingPlans);
