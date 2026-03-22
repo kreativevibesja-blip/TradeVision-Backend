@@ -200,8 +200,32 @@ export const getPayments = async (req: Request, res: Response) => {
   try {
     const page = parseInt(req.query.page as string) || 1;
     const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
+    const plan = req.query.plan === 'FREE' || req.query.plan === 'PRO' ? req.query.plan : undefined;
+    const status = req.query.status === 'PENDING' || req.query.status === 'COMPLETED' || req.query.status === 'FAILED' || req.query.status === 'REFUNDED'
+      ? req.query.status
+      : undefined;
+    const dateRange = typeof req.query.dateRange === 'string' ? req.query.dateRange : 'all';
 
-    const { payments, total } = await listAllPaymentsPage(page, limit);
+    const createdAfter = (() => {
+      if (dateRange === 'all') {
+        return undefined;
+      }
+
+      const days = dateRange === '7d' ? 7 : dateRange === '30d' ? 30 : dateRange === '90d' ? 90 : null;
+      if (!days) {
+        return undefined;
+      }
+
+      const since = new Date();
+      since.setDate(since.getDate() - days);
+      return since.toISOString();
+    })();
+
+    const { payments, total } = await listAllPaymentsPage(page, limit, {
+      plan,
+      status,
+      createdAfter,
+    });
 
     return res.json({ payments, total, page, pages: Math.ceil(total / limit) });
   } catch (error) {

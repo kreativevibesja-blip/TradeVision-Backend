@@ -88,6 +88,12 @@ export interface PaymentRecord {
   updatedAt: string;
 }
 
+interface ListPaymentsFilters {
+  plan?: SubscriptionTier;
+  status?: PaymentStatus;
+  createdAfter?: string;
+}
+
 export interface PricingPlanRecord {
   id: string;
   name: string;
@@ -646,13 +652,26 @@ export const listPaymentsForUser = () =>
 export const listPaymentsForUserId = (userId: string) =>
   many<PaymentRecord>('listPaymentsForUserId', supabase.from(PAYMENT_TABLE).select('*').eq('userId', userId).order('createdAt', { ascending: false }));
 
-export const listAllPaymentsPage = async (page: number, limit: number) => {
+export const listAllPaymentsPage = async (page: number, limit: number, filters: ListPaymentsFilters = {}) => {
   const skip = (page - 1) * limit;
-  const { data, count, error } = await supabase
+  let query = supabase
     .from(PAYMENT_TABLE)
     .select('*', { count: 'exact' })
-    .order('createdAt', { ascending: false })
-    .range(skip, skip + limit - 1);
+    .order('createdAt', { ascending: false });
+
+  if (filters.plan) {
+    query = query.eq('plan', filters.plan);
+  }
+
+  if (filters.status) {
+    query = query.eq('status', filters.status);
+  }
+
+  if (filters.createdAfter) {
+    query = query.gte('createdAt', filters.createdAfter);
+  }
+
+  const { data, count, error } = await query.range(skip, skip + limit - 1);
 
   if (error) {
     logDbError('listAllPaymentsPage', error);
