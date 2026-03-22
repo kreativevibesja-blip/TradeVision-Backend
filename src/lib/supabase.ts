@@ -338,6 +338,54 @@ export const incrementUserDailyUsage = async (id: string) => {
   return updateUser(id, { dailyUsage: (user.dailyUsage || 0) + 1 });
 };
 
+const getUsageDayStamp = (value?: string | null) => {
+  const date = value ? new Date(value) : null;
+  if (!date || Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  return date.toISOString().slice(0, 10);
+};
+
+export const reserveUserDailyUsage = async (id: string, limit: number) => {
+  const user = await getUserById(id);
+  if (!user) {
+    throw new Error('Database operation failed');
+  }
+
+  const todayStamp = new Date().toISOString().slice(0, 10);
+  const usageDayStamp = getUsageDayStamp(user.lastUsageReset);
+  const nextUsage = usageDayStamp === todayStamp ? user.dailyUsage || 0 : 0;
+
+  if (nextUsage >= limit) {
+    return {
+      allowed: false,
+      user: usageDayStamp === todayStamp ? user : { ...user, dailyUsage: 0, lastUsageReset: new Date().toISOString() },
+    };
+  }
+
+  const updatedUser = await updateUser(id, {
+    dailyUsage: nextUsage + 1,
+    lastUsageReset: new Date().toISOString(),
+  });
+
+  return {
+    allowed: true,
+    user: updatedUser,
+  };
+};
+
+export const releaseUserDailyUsageReservation = async (id: string) => {
+  const user = await getUserById(id);
+  if (!user) {
+    throw new Error('Database operation failed');
+  }
+
+  return updateUser(id, {
+    dailyUsage: Math.max(0, (user.dailyUsage || 0) - 1),
+  });
+};
+
 export const createAnalysis = (values: Partial<AnalysisRecord> & Pick<AnalysisRecord, 'id' | 'jobId' | 'userId' | 'imageUrl' | 'pair' | 'timeframe'>) =>
   insertSingle<AnalysisRecord>('createAnalysis', ANALYSIS_TABLE, values);
 

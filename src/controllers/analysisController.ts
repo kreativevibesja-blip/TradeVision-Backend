@@ -10,11 +10,10 @@ import {
   getAnalysisByIdForUser,
   getUserById,
   listAnalysesForUser,
-  updateUser,
+  releaseUserDailyUsageReservation,
+  reserveUserDailyUsage,
 } from '../lib/supabase';
 import { runAnalysisPipeline } from '../services/analysis/runAnalysisPipeline';
-
-const needsUsageReset = (date: string | Date) => new Date().toDateString() !== new Date(date).toDateString();
 
 const parseCurrentPrice = (value: unknown) => {
   if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
@@ -56,19 +55,6 @@ const parseInlineImage = (value: unknown) => {
   };
 };
 
-const hydrateUsageCounter = async (userId: string) => {
-  const user = await getUserById(userId);
-  if (!user) {
-    return null;
-  }
-
-  if (needsUsageReset(user.lastUsageReset)) {
-    return updateUser(user.id, { dailyUsage: 0, lastUsageReset: new Date().toISOString() });
-  }
-
-  return user;
-};
-
 const serializeAnalysis = (analysis: any) => ({
   ...(analysis.rawResponse && typeof analysis.rawResponse === 'object' ? analysis.rawResponse : {}),
   ...analysis,
@@ -93,6 +79,8 @@ const serializeAnalysis = (analysis: any) => ({
 });
 
 export const analyzeChart = async (req: AuthRequest, res: Response) => {
+  let usageReserved = false;
+
   try {
     const { pair, timeframe } = req.body;
     const currentPrice = parseCurrentPrice(req.body.currentPrice);
@@ -120,7 +108,7 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
     // Dual-chart is PRO only
     const timeframe2 = chart2File ? (req.body.timeframe2 || timeframe) : null;
 
-    const user = await hydrateUsageCounter(req.user!.id);
+    const user = await getUserById(req.user!.id);
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
@@ -130,13 +118,16 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
     }
 
     const limit = user.subscription === 'PRO' ? config.limits.proDaily : config.limits.freeDaily;
-    if (user.dailyUsage >= limit) {
+    const usageReservation = await reserveUserDailyUsage(req.user!.id, limit);
+    if (!usageReservation.allowed) {
       return res.status(429).json({
         error: 'Daily analysis limit reached',
         limit,
-        usage: user.dailyUsage,
+        usage: usageReservation.user.dailyUsage,
       });
     }
+
+    usageReserved = true;
 
     const imageUrl = chartFile ? `/uploads/${chartFile.filename}` : 'inline-upload';
     const analysisId = randomUUID();
@@ -179,7 +170,7 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
       userId: req.user!.id,
       pair,
       timeframe,
-      subscription: user.subscription,
+      subscription: usageReservation.user.subscription,
       currentPrice,
       chartMinPrice,
       chartMaxPrice,
@@ -190,6 +181,12 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
 
     return res.json({ analysis: serializeAnalysis(analysis) });
   } catch (error) {
+    if (usageReserved && req.user?.id) {
+      await releaseUserDailyUsageReservation(req.user.id).catch((releaseError) => {
+        console.error('Failed to release reserved daily usage:', releaseError);
+      });
+    }
+
     console.error('Analyze chart error:', error);
     return res.status(500).json({ error: 'Failed to analyze chart' });
   }

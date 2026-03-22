@@ -1,4 +1,4 @@
-import { incrementUserDailyUsage, updateAnalysis } from '../../lib/supabase';
+import { updateAnalysis } from '../../lib/supabase';
 import { analyzeVisionStructure, analyzeHTFVisionStructure, analyzeLTFVisionStructure } from '../visionAnalysis';
 import { generateFinalSignal } from '../signalEngine';
 import { drawChartMarkup, drawHTFChartMarkup, drawLTFChartMarkup, isChartMarkupEnabledForPlan } from '../chartMarkup';
@@ -156,8 +156,6 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
       waitConditions: enrichedSignal.message,
       errorMessage: null,
     });
-
-    await incrementUserDailyUsage(userId);
 
     return analysis;
   } catch (error) {
