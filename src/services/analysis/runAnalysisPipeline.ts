@@ -3,7 +3,7 @@ import { analyzeVisionStructure, analyzeHTFVisionStructure, analyzeLTFVisionStru
 import { generateFinalSignal } from '../signalEngine';
 import { drawChartMarkup, drawHTFChartMarkup, drawLTFChartMarkup, isChartMarkupEnabledForPlan } from '../chartMarkup';
 import type { SubscriptionTier } from '../../lib/supabase';
-import type { VisionModelMetadata } from '../visionAnalysis';
+import type { VisionAnalysisResult, VisionModelMetadata } from '../visionAnalysis';
 
 interface SecondaryChartInput {
   base64Image: string;
