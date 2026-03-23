@@ -754,9 +754,7 @@ Do not add commentary outside the JSON.`;
 
   try {
     try {
-      result = primaryProvider === 'openai'
-        ? await generateOpenAIVisionResponse(primaryModel, prompt, base64Image, mimeType)
-        : await generateVisionResponse(genAI!, primaryModel, prompt, base64Image, mimeType);
+      result = await generateVisionResponse(genAI, primaryModel, prompt, base64Image, mimeType);
     } catch (error) {
       if (subscription === 'PRO' && resolvedFallbackModel && genAI) {
         console.warn(`[visionAnalysis] Primary model "${primaryModel}" failed on provider "${primaryProvider}". Falling back to Gemini model "${resolvedFallbackModel}".`);
@@ -971,9 +969,7 @@ Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 
   try {
     try {
-      result = primaryProvider === 'openai'
-        ? await generateOpenAIVisionResponse(primaryModel, prompt, base64Image, mimeType)
-        : await generateVisionResponse(genAI!, primaryModel, prompt, base64Image, mimeType);
+      result = await generateVisionResponse(genAI, primaryModel, prompt, base64Image, mimeType);
     } catch (error) {
       if (resolvedFallbackModel && genAI) {
         actualModel = resolvedFallbackModel;
@@ -1178,9 +1174,7 @@ Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 
   try {
     try {
-      result = primaryProvider === 'openai'
-        ? await generateOpenAIVisionResponse(primaryModel, prompt, base64Image, mimeType)
-        : await generateVisionResponse(genAI!, primaryModel, prompt, base64Image, mimeType);
+      result = await generateVisionResponse(genAI, primaryModel, prompt, base64Image, mimeType);
     } catch (error) {
       if (resolvedFallbackModel && genAI) {
         actualModel = resolvedFallbackModel;
