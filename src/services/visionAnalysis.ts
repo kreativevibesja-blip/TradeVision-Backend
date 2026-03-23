@@ -358,6 +358,14 @@ const normalizeGeminiModelName = (modelName: string) => {
 const getGeminiModelForSubscription = (subscription: SubscriptionTier) =>
   normalizeGeminiModelName(subscription === 'PRO' ? config.gemini.proModel : config.gemini.freeModel);
 
+const advancedSmcGuidance = `
+ADVANCED SMC CONCEPTS YOU MUST APPLY WHEN CLEARLY VISIBLE
+- Treat equal highs and equal lows as liquidity pools when relevant.
+- Distinguish inducement from the main or external liquidity objective.
+- Separate external structure from internal structure.
+- Prioritize the best structure-aligned zone among order blocks, breaker blocks, mitigation blocks, and fair value gaps.
+- Judge premium, discount, and equilibrium from the active dealing range / impulse leg controlling current price.`;
+
 const isUnsupportedModelError = (error: unknown) => {
   if (!(error instanceof Error)) {
     return false;
@@ -443,6 +451,8 @@ You MUST think in terms of:
 - Order flow
 - Premium vs Discount
 - Confirmation-based entries
+
+${advancedSmcGuidance}
 
 Trading pair/index: ${pair}
 Timeframe: ${timeframe}`;
@@ -575,6 +585,8 @@ STRICT RULES (DO NOT BREAK)
 
 2. ALWAYS explain liquidity
    - Identify where stops were taken (above highs / below lows)
+  - Mention equal highs/equal lows when they are the obvious liquidity pool
+  - Distinguish inducement from the main liquidity target when visible
 
 3. ALWAYS justify zones
    - You MUST explain WHY supply/demand exists
@@ -596,6 +608,7 @@ STRICT RULES (DO NOT BREAK)
 
 8. STRUCTURE FIRST
    - If structure is unclear -> setup_rating MUST be "avoid"
+  - Separate major external structure from minor internal structure
 
 9. REALISM OVER COMPLETION
    - It is better to say "no trade" than to give a bad trade
@@ -618,7 +631,11 @@ STRICT RULES (DO NOT BREAK)
    - take_profit_1: conservative target (nearest structure level)
    - take_profit_2: moderate target (next key level)
    - take_profit_3: aggressive target (major structure or liquidity pool)
-   - Risk:Reward ratio must be at least 1:2 for take_profit_1`;
+  - Risk:Reward ratio must be at least 1:2 for take_profit_1
+
+13. ADVANCED SMC PRIORITY
+  - Prefer the cleanest fresh structure-aligned order block, breaker block, mitigation block, or fair value gap
+  - Premium/discount must be based on the active dealing range controlling price`;
 
   const freeRules = `
 ========================================
@@ -629,6 +646,8 @@ STRICT RULES (DO NOT BREAK)
    - If no clear setup -> action MUST be "wait" or "avoid"
 
 2. Identify general liquidity conditions briefly
+  - Mention equal highs/equal lows when they are clearly important
+  - Distinguish inducement from the main liquidity target when visible
 
 3. Justify supply/demand zones
 
@@ -639,6 +658,7 @@ STRICT RULES (DO NOT BREAK)
 
 6. STRUCTURE FIRST
    - If structure is unclear -> setup_rating MUST be "avoid"
+  - Separate broader structure from smaller internal structure when possible
 
 7. REALISM OVER COMPLETION
    - It is better to say "no trade" than to give a bad trade
@@ -648,7 +668,10 @@ STRICT RULES (DO NOT BREAK)
 
 9. VISIBLE PRICE RANGE
    - Read the lowest and highest price labels on the right Y-axis of the chart
-   - Return these exact numbers as visible_price_range min and max`;
+  - Return these exact numbers as visible_price_range min and max
+
+10. ADVANCED SMC PRIORITY
+  - Prefer the clearest structure-aligned institutional zone and use the active dealing range for premium/discount`;
 
   const proGoal = `
 ========================================
@@ -812,6 +835,8 @@ export async function analyzeHTFVisionStructure(
 
 Your role: Determine the MACRO BIAS and structural context. Think like a hedge fund desk — structure first, everything else follows.
 
+${advancedSmcGuidance}
+
 Trading pair/index: ${pair}
 Timeframe: ${timeframe} (HIGHER TIMEFRAME — this sets the directional bias)
 
@@ -819,13 +844,13 @@ Timeframe: ${timeframe} (HIGHER TIMEFRAME — this sets the directional bias)
 YOUR FOCUS FOR THIS HIGHER TIMEFRAME CHART
 ========================================
 
-1. **Market Structure** — Is price making higher highs/higher lows (bullish) or lower highs/lower lows (bearish)? Identify the MOST RECENT Break of Structure (BOS) or Change of Character (CHoCH).
+1. **Market Structure** — Is price making higher highs/higher lows (bullish) or lower highs/lower lows (bearish)? Identify the MOST RECENT Break of Structure (BOS) or Change of Character (CHoCH). Separate external structure from internal noise.
 
 2. **Supply & Demand Zones** — Mark the KEY institutional supply and demand zones that are most likely to cause a reaction. These are where large orders were placed (order blocks, imbalances, or major structural pivots). Be PRECISE with zone boundaries.
 
-3. **Premium vs Discount** — Relative to the last major impulse leg, is current price in premium (top 50%), discount (bottom 50%), or equilibrium? This is CRITICAL for determining whether to look for buys or sells on the lower timeframe.
+3. **Premium vs Discount** — Relative to the active dealing range / last major impulse leg controlling price, is current price in premium (top 50%), discount (bottom 50%), or equilibrium? This is CRITICAL for determining whether to look for buys or sells on the lower timeframe.
 
-4. **Liquidity Pools** — Where are the obvious equal highs/lows or stop-loss clusters that smart money will target? Identify the nearest untouched liquidity pool.
+4. **Liquidity Pools** — Where are the obvious equal highs/lows or stop-loss clusters that smart money will target? Identify the nearest untouched liquidity pool and distinguish inducement from the true external liquidity objective.
 
 5. **Overall Directional Bias** — What direction should the lower timeframe trader be looking? BUY from discount in bullish structure, SELL from premium in bearish structure.
 
@@ -899,8 +924,10 @@ STRICT RULES
 5. If structure is unclear, setup_rating = "avoid" and bias = "none".
 6. Do NOT force a directional bias. If ranging, say ranging.
 7. Mark the most significant supply zone (institutional selling area) AND demand zone (institutional buying area).
-8. Premium/discount MUST be relative to the last major impulse leg, not the entire visible chart.
-9. Keep reasoning concise: 2-3 short sentences, no long paragraph, no repeated points.
+8. Premium/discount MUST be relative to the active dealing range / last major impulse leg, not the entire visible chart.
+9. Distinguish external structure from internal structure and prioritize external structure for directional bias.
+10. If multiple zones exist, prefer the cleanest fresh structure-aligned order block, breaker block, mitigation block, or fair value gap.
+11. Keep reasoning concise: 2-3 short sentences, no long paragraph, no repeated points.
 
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 
@@ -1004,6 +1031,8 @@ export async function analyzeLTFVisionStructure(
 
 Your role: Find the PRECISE ENTRY, stop loss, and take profit levels. Think like a prop firm trader executing off the desk's bias — precision is everything.
 
+${advancedSmcGuidance}
+
 Trading pair/index: ${pair}
 Timeframe: ${timeframe} (LOWER TIMEFRAME — this is where you find the sniper entry)
 
@@ -1011,11 +1040,11 @@ Timeframe: ${timeframe} (LOWER TIMEFRAME — this is where you find the sniper e
 YOUR FOCUS FOR THIS LOWER TIMEFRAME CHART
 ========================================
 
-1. **Internal Structure** — Identify the micro BOS/CHoCH within the lower timeframe. Where has internal structure shifted? This is your entry confirmation.
+1. **Internal Structure** — Identify the micro BOS/CHoCH within the lower timeframe. Where has internal structure shifted? This is your entry confirmation. Respect the broader external structure when it is clear.
 
-2. **Liquidity Sweeps** — Has price swept any recent internal highs or lows? A liquidity sweep followed by a structural shift is the highest probability entry.
+2. **Liquidity Sweeps** — Has price swept any recent internal highs or lows? A liquidity sweep followed by a structural shift is the highest probability entry. Distinguish inducement from the real liquidity grab.
 
-3. **Order Blocks & Imbalances** — Find the most recent unmitigated order block or fair value gap where price is likely to react. This is your entry zone.
+3. **Order Blocks & Imbalances** — Find the most recent unmitigated order block, breaker block, mitigation block, or fair value gap where price is likely to react. This is your entry zone.
 
 4. **Entry Level** — Provide the EXACT entry zone (min/max). This should be at an internal order block or imbalance AFTER a liquidity sweep and structural confirmation.
 
@@ -1097,11 +1126,13 @@ STRICT RULES
 4. SL must be at a structural level that invalidates the trade, NOT an arbitrary distance.
 5. TP1 must have at least 1:2 Risk:Reward ratio.
 6. Zone boundaries must be TIGHT (the order block body or imbalance range only).
-7. If no clean entry exists, action = "wait" and explain what price action you need to see.
-8. Read the Y-axis carefully for visible_price_range.
-9. DO NOT force an entry. If the lower timeframe doesn't confirm, action = "wait".
-10. Keep reasoning concise: 2-3 short sentences max, with no filler or repeated explanation.
-10. The entry_plan.reason must specifically reference: what was swept, what shifted, and where the entry sits.
+7. Prefer the freshest structure-aligned zone among order blocks, breaker blocks, mitigation blocks, and fair value gaps.
+8. If no clean entry exists, action = "wait" and explain what price action you need to see.
+9. Read the Y-axis carefully for visible_price_range.
+10. DO NOT force an entry. If the lower timeframe doesn't confirm, action = "wait".
+11. Premium/discount should be judged from the active dealing range controlling the execution leg.
+12. Keep reasoning concise: 2-3 short sentences max, with no filler or repeated explanation.
+13. The entry_plan.reason must specifically reference: what was swept, what shifted, and where the entry sits.
 
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 
