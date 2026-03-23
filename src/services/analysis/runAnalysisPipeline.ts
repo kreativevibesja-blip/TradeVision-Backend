@@ -3,7 +3,7 @@ import { analyzeVisionStructure, analyzeHTFVisionStructure, analyzeLTFVisionStru
 import { generateFinalSignal } from '../signalEngine';
 import { drawChartMarkup, drawHTFChartMarkup, drawLTFChartMarkup, isChartMarkupEnabledForPlan } from '../chartMarkup';
 import type { SubscriptionTier } from '../../lib/supabase';
-import type { VisionAnalysisResult, VisionModelMetadata } from '../visionAnalysis';
+import type { VisionModelMetadata } from '../visionAnalysis';
 
 interface SecondaryChartInput {
   base64Image: string;
@@ -43,63 +43,6 @@ const extractVisionMetadataFromError = (error: unknown) => {
   const metadata = error.metadata;
   return isRecord(metadata) ? metadata : null;
 };
-
-const formatZone = (zone: { min: number | null; max: number | null } | null) => {
-  if (!zone || typeof zone.min !== 'number' || typeof zone.max !== 'number') {
-    return null;
-  }
-
-  return `${zone.min.toFixed(2)}-${zone.max.toFixed(2)}`;
-};
-
-const buildDualReasoning = (
-  htfVision: VisionAnalysisResult,
-  ltfVision: VisionAnalysisResult,
-  htfTimeframe: string,
-  ltfTimeframe: string
-) => {
-  const htfDemand = formatZone(htfVision.zones.demand);
-  const htfSupply = formatZone(htfVision.zones.supply);
-  const ltfEntry = formatZone(ltfVision.entryPlan.entryZone);
-  const ltfStopLoss = typeof ltfVision.stopLoss === 'number' ? ltfVision.stopLoss.toFixed(2) : null;
-  const ltfTp1 = typeof ltfVision.takeProfit1 === 'number' ? ltfVision.takeProfit1.toFixed(2) : null;
-
-  const htfLine = [
-    `HTF ${htfTimeframe}: ${htfVision.trend} ${htfVision.structure.state}.`,
-    htfVision.structure.bos !== 'none' ? `BOS ${htfVision.structure.bos}.` : null,
-    `Price in ${htfVision.pricePosition.location}.`,
-    htfDemand ? `Demand ${htfDemand}.` : null,
-    htfSupply ? `Supply ${htfSupply}.` : null,
-  ].filter(Boolean).join(' ');
-
-  const ltfLine = [
-    `LTF ${ltfTimeframe}: bias ${ltfVision.entryPlan.bias}.`,
-    ltfEntry ? `Entry ${ltfEntry}.` : null,
-    ltfVision.entryPlan.confirmation !== 'none' ? `Wait for ${ltfVision.entryPlan.confirmation}.` : null,
-    ltfStopLoss ? `SL ${ltfStopLoss}.` : null,
-    ltfTp1 ? `TP1 ${ltfTp1}.` : null,
-  ].filter(Boolean).join(' ');
-
-  return `${htfLine}\n${ltfLine}`;
-};
-
-const toMarkupAnalysis = (vision: VisionAnalysisResult, currentPrice: number) => ({
-  zones: {
-    supplyZone: vision.zones.supply,
-    demandZone: vision.zones.demand,
-  },
-  entryPlan: {
-    entryZone: vision.entryPlan.entryZone,
-  },
-  liquidity: vision.liquidity,
-  invalidationLevel: vision.riskManagement.invalidationLevel,
-  currentPrice,
-  visiblePriceRange: vision.visiblePriceRange,
-  stopLoss: vision.stopLoss,
-  takeProfit1: vision.takeProfit1,
-  takeProfit2: vision.takeProfit2,
-  takeProfit3: vision.takeProfit3,
-});
 
 export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe, subscription, currentPrice, chartMinPrice, chartMaxPrice, imageUrl, base64Image, mimeType, secondaryChart }: RunAnalysisPipelineInput) {
   try {
@@ -143,7 +86,7 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
           confidence: Math.round((htfVision.quality.confidence + ltfVision.quality.confidence) / 2),
         },
         finalVerdict: ltfVision.finalVerdict,
-        reasoning: buildDualReasoning(htfVision, ltfVision, timeframe, secondaryChart.timeframe),
+        reasoning: `HTF (${timeframe}): ${htfVision.reasoning}\n\nLTF (${secondaryChart.timeframe}): ${ltfVision.reasoning}`,
         visiblePriceRange: htfVision.visiblePriceRange,
         stopLoss: ltfVision.stopLoss,
         takeProfit1: ltfVision.takeProfit1,
@@ -189,16 +132,10 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
           throw new Error('Dual-chart analysis did not return both timeframe results');
         }
 
-        const htfMarkupAnalysis = toMarkupAnalysis(htfVision, currentPrice);
-        const ltfMarkupAnalysis = toMarkupAnalysis(ltfVision, currentPrice);
-
         // Generate separate markups for HTF and LTF charts
         const [htfResult, ltfResult] = await Promise.all([
-          drawHTFChartMarkup(Buffer.from(base64Image, 'base64'), htfMarkupAnalysis, { minPrice: chartMinPrice, maxPrice: chartMaxPrice }),
-          drawLTFChartMarkup(Buffer.from(secondaryChart.base64Image, 'base64'), ltfMarkupAnalysis, {
-            minPrice: ltfVision.visiblePriceRange?.min ?? null,
-            maxPrice: ltfVision.visiblePriceRange?.max ?? null,
-          }),
+          drawHTFChartMarkup(Buffer.from(base64Image, 'base64'), signal, { minPrice: chartMinPrice, maxPrice: chartMaxPrice }),
+          drawLTFChartMarkup(Buffer.from(secondaryChart.base64Image, 'base64'), signal, { minPrice: null, maxPrice: null }),
         ]);
         htfMarkup = htfResult;
         ltfMarkup = ltfResult;
