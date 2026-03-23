@@ -82,7 +82,7 @@ export interface VisionDualModelMetadata {
 export type VisionAnalysisMetadata = VisionModelMetadata | VisionDualModelMetadata;
 
 export interface VisionModelMetadata {
-  provider: 'gemini' | 'openai';
+  provider: 'gemini';
   mode: 'single' | 'htf' | 'ltf';
   primaryModel: string;
   fallbackModel: string | null;
@@ -387,63 +387,13 @@ const generateVisionResponse = async (
   ]);
 };
 
-const generateOpenAIVisionResponse = async (
-  modelName: string,
-  prompt: string,
-  base64Image: string,
-  mimeType: string
-) => {
-  const response = await fetch(`${config.openai.baseUrl.replace(/\/$/, '')}/responses`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${config.openai.apiKey}`,
-    },
-    body: JSON.stringify({
-      model: modelName,
-      input: [
-        {
-          role: 'user',
-          content: [
-            { type: 'input_text', text: prompt },
-            { type: 'input_image', image_url: `data:${mimeType};base64,${base64Image}` },
-          ],
-        },
-      ],
-      reasoning: { effort: 'low' },
-      text: { format: { type: 'text' } },
-    }),
-  });
-
-  if (!response.ok) {
-    const details = await response.text();
-    throw new Error(`OpenAI request failed: ${response.status} ${details}`);
-  }
-
-  const payload = await response.json() as {
-    output_text?: string;
-    output?: Array<{ content?: Array<{ type?: string; text?: string }> }>;
-  };
-
-  const text = payload.output_text
-    ?? payload.output?.flatMap((item) => item.content ?? []).find((item) => item.type === 'output_text' && typeof item.text === 'string')?.text
-    ?? '';
-
-  if (!text.trim()) {
-    throw new Error('OpenAI vision service returned an empty response');
-  }
-
-  return { text };
-};
-
 const createVisionModelMetadata = (
-  provider: VisionModelMetadata['provider'],
   mode: VisionModelMetadata['mode'],
   primaryModel: string,
   fallbackModel: string | null,
   actualModel: string
 ): VisionModelMetadata => ({
-  provider,
+  provider: 'gemini',
   mode,
   primaryModel,
   fallbackModel,
@@ -480,13 +430,12 @@ export async function analyzeVisionStructure(
 
   const genAI = new GoogleGenerativeAI(config.gemini.apiKey);
   const primaryModel = getGeminiModelForSubscription(subscription);
-  const primaryProvider: VisionModelMetadata['provider'] = 'gemini';
   const fallbackModel = normalizeGeminiModelName(config.gemini.freeModel);
   const resolvedFallbackModel = primaryModel !== fallbackModel ? fallbackModel : null;
 
   const basePromptHeader = `You are an institutional-level Smart Money Concepts (SMC) trading analyst.
 
-Your job is to analyze the chart with direct, structured, low-token output.
+Your job is to analyze the provided chart like a professional trader, not a signal generator.
 
 You MUST think in terms of:
 - Market structure
@@ -552,7 +501,7 @@ Timeframe: ${timeframe}`;
   "take_profit_1": number | null,
   "take_profit_2": number | null,
   "take_profit_3": number | null,
-  "reasoning": "3-5 short lines: structure, liquidity, zone, trigger, action",
+  "reasoning": "Full professional explanation using SMC logic",
   "visible_price_range": {
     "min": "lowest price number visible on the right-side Y-axis",
     "max": "highest price number visible on the right-side Y-axis"
@@ -609,7 +558,7 @@ Timeframe: ${timeframe}`;
     "action": "enter | wait | avoid",
     "message": "Clear instruction for the user"
   },
-  "reasoning": "2-3 short lines with only the key facts",
+  "reasoning": "Concise explanation of the setup using SMC logic",
   "visible_price_range": {
     "min": "lowest price number visible on the right-side Y-axis",
     "max": "highest price number visible on the right-side Y-axis"
@@ -669,16 +618,7 @@ STRICT RULES (DO NOT BREAK)
    - take_profit_1: conservative target (nearest structure level)
    - take_profit_2: moderate target (next key level)
    - take_profit_3: aggressive target (major structure or liquidity pool)
-  - Risk:Reward ratio must be at least 1:2 for take_profit_1
-
-13. TOKEN EFFICIENCY
-  - Keep every string short and direct
-  - No filler, no motivational language, no generic disclaimers
-  - reasoning must be a compact 3-5 line summary
-  - final_verdict.message must be 8-18 words
-  - entry_plan.reason max 24 words
-  - liquidity.description max 20 words
-  - price_position.explanation max 18 words`;
+   - Risk:Reward ratio must be at least 1:2 for take_profit_1`;
 
   const freeRules = `
 ========================================
@@ -708,24 +648,23 @@ STRICT RULES (DO NOT BREAK)
 
 9. VISIBLE PRICE RANGE
    - Read the lowest and highest price labels on the right Y-axis of the chart
-  - Return these exact numbers as visible_price_range min and max
-
-10. TOKEN EFFICIENCY
-  - Keep all text fields compact and direct
-  - reasoning max 3 short lines
-  - final_verdict.message max 14 words`;
+   - Return these exact numbers as visible_price_range min and max`;
 
   const proGoal = `
 ========================================
 GOAL
 ========================================
 
+Your output must feel like:
+- a professional trader's breakdown
+- not a random AI opinion
+- not a generic explanation
+
 It must be:
 - precise
 - disciplined
 - realistic
-- easy to scan
-- low-token
+- trustworthy
 
 Return STRICT JSON ONLY.
 Do not use markdown.
@@ -750,24 +689,21 @@ Do not add commentary outside the JSON.`;
 
   let result;
   let actualModel = primaryModel;
-  let actualProvider = primaryProvider;
 
   try {
     try {
       result = await generateVisionResponse(genAI, primaryModel, prompt, base64Image, mimeType);
     } catch (error) {
-      if (subscription === 'PRO' && resolvedFallbackModel && genAI) {
-        console.warn(`[visionAnalysis] Primary model "${primaryModel}" failed on provider "${primaryProvider}". Falling back to Gemini model "${resolvedFallbackModel}".`);
+      if (subscription === 'PRO' && resolvedFallbackModel && isUnsupportedModelError(error)) {
+        console.warn(`[visionAnalysis] Pro model "${primaryModel}" is unavailable. Falling back to "${resolvedFallbackModel}".`);
         actualModel = resolvedFallbackModel;
-        actualProvider = 'gemini';
         result = await generateVisionResponse(genAI, resolvedFallbackModel, prompt, base64Image, mimeType);
       } else {
         throw error;
       }
     }
 
-    const rawText = result.response.text();
-    const parsed = parseJsonObject(rawText);
+    const parsed = parseJsonObject(result.response.text());
     const structure = parsed.structure as Record<string, unknown> | undefined;
     const liquidity = parsed.liquidity as Record<string, unknown> | undefined;
     const zones = parsed.zones as Record<string, unknown> | undefined;
@@ -776,7 +712,7 @@ Do not add commentary outside the JSON.`;
     const riskManagement = parsed.risk_management as Record<string, unknown> | undefined;
     const quality = parsed.quality as Record<string, unknown> | undefined;
     const finalVerdict = parsed.final_verdict as Record<string, unknown> | undefined;
-    const metadata = createVisionModelMetadata(actualProvider, 'single', primaryModel, resolvedFallbackModel, actualModel);
+    const metadata = createVisionModelMetadata('single', primaryModel, resolvedFallbackModel, actualModel);
 
     return withVisionModelMetadata({
       trend: normalizeTrend(parsed.trend),
@@ -842,7 +778,7 @@ Do not add commentary outside the JSON.`;
       takeProfit3: normalizeNumeric(parsed.take_profit_3),
     }, metadata);
   } catch (error) {
-    throw toVisionAnalysisError(error, createVisionModelMetadata(actualProvider, 'single', primaryModel, resolvedFallbackModel, actualModel));
+    throw toVisionAnalysisError(error, createVisionModelMetadata('single', primaryModel, resolvedFallbackModel, actualModel));
   }
 }
 
@@ -863,7 +799,6 @@ export async function analyzeHTFVisionStructure(
 
   const genAI = new GoogleGenerativeAI(config.gemini.apiKey);
   const primaryModel = normalizeGeminiModelName(config.gemini.proModel);
-  const primaryProvider: VisionModelMetadata['provider'] = 'gemini';
   const fallbackModel = normalizeGeminiModelName(config.gemini.freeModel);
   const resolvedFallbackModel = primaryModel !== fallbackModel ? fallbackModel : null;
 
@@ -941,7 +876,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
   "take_profit_1": null,
   "take_profit_2": null,
   "take_profit_3": null,
-  "reasoning": "3-4 short lines: structure, liquidity, zones, bias",
+  "reasoning": "Full breakdown of the higher timeframe structure, zones, and why the bias is what it is",
   "visible_price_range": {
     "min": "lowest price on right Y-axis",
     "max": "highest price on right Y-axis"
@@ -959,29 +894,25 @@ STRICT RULES
 6. Do NOT force a directional bias. If ranging, say ranging.
 7. Mark the most significant supply zone (institutional selling area) AND demand zone (institutional buying area).
 8. Premium/discount MUST be relative to the last major impulse leg, not the entire visible chart.
-9. Keep every text field compact. No filler. reasoning max 4 short lines. final_verdict.message max 14 words.
 
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 
   let result;
   let actualModel = primaryModel;
-  let actualProvider = primaryProvider;
 
   try {
     try {
       result = await generateVisionResponse(genAI, primaryModel, prompt, base64Image, mimeType);
     } catch (error) {
-      if (resolvedFallbackModel && genAI) {
+      if (resolvedFallbackModel && isUnsupportedModelError(error)) {
         actualModel = resolvedFallbackModel;
-        actualProvider = 'gemini';
         result = await generateVisionResponse(genAI, resolvedFallbackModel, prompt, base64Image, mimeType);
       } else {
         throw error;
       }
     }
 
-    const rawText = result.response.text();
-    const parsed = parseJsonObject(rawText);
+    const parsed = parseJsonObject(result.response.text());
     const structure = parsed.structure as Record<string, unknown> | undefined;
     const liquidity = parsed.liquidity as Record<string, unknown> | undefined;
     const zones = parsed.zones as Record<string, unknown> | undefined;
@@ -990,7 +921,7 @@ Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
     const riskManagement = parsed.risk_management as Record<string, unknown> | undefined;
     const quality = parsed.quality as Record<string, unknown> | undefined;
     const finalVerdict = parsed.final_verdict as Record<string, unknown> | undefined;
-    const metadata = createVisionModelMetadata(actualProvider, 'htf', primaryModel, resolvedFallbackModel, actualModel);
+    const metadata = createVisionModelMetadata('htf', primaryModel, resolvedFallbackModel, actualModel);
 
     return withVisionModelMetadata({
       trend: normalizeTrend(parsed.trend),
@@ -1038,7 +969,7 @@ Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
       takeProfit3: null,
     }, metadata);
   } catch (error) {
-    throw toVisionAnalysisError(error, createVisionModelMetadata(actualProvider, 'htf', primaryModel, resolvedFallbackModel, actualModel));
+    throw toVisionAnalysisError(error, createVisionModelMetadata('htf', primaryModel, resolvedFallbackModel, actualModel));
   }
 }
 
@@ -1059,7 +990,6 @@ export async function analyzeLTFVisionStructure(
 
   const genAI = new GoogleGenerativeAI(config.gemini.apiKey);
   const primaryModel = normalizeGeminiModelName(config.gemini.proModel);
-  const primaryProvider: VisionModelMetadata['provider'] = 'gemini';
   const fallbackModel = normalizeGeminiModelName(config.gemini.freeModel);
   const resolvedFallbackModel = primaryModel !== fallbackModel ? fallbackModel : null;
 
@@ -1144,7 +1074,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
   "take_profit_1": number | null,
   "take_profit_2": number | null,
   "take_profit_3": number | null,
-  "reasoning": "3-5 short lines: sweep, shift, entry, SL, TP",
+  "reasoning": "Step-by-step breakdown: liquidity sweep → structural shift → entry zone → SL/TP logic",
   "visible_price_range": {
     "min": "lowest price on right Y-axis",
     "max": "highest price on right Y-axis"
@@ -1164,29 +1094,25 @@ STRICT RULES
 8. Read the Y-axis carefully for visible_price_range.
 9. DO NOT force an entry. If the lower timeframe doesn't confirm, action = "wait".
 10. The entry_plan.reason must specifically reference: what was swept, what shifted, and where the entry sits.
-11. Keep wording compact. No filler. reasoning max 5 short lines. final_verdict.message max 14 words. entry_plan.reason max 24 words.
 
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 
   let result;
   let actualModel = primaryModel;
-  let actualProvider = primaryProvider;
 
   try {
     try {
       result = await generateVisionResponse(genAI, primaryModel, prompt, base64Image, mimeType);
     } catch (error) {
-      if (resolvedFallbackModel && genAI) {
+      if (resolvedFallbackModel && isUnsupportedModelError(error)) {
         actualModel = resolvedFallbackModel;
-        actualProvider = 'gemini';
         result = await generateVisionResponse(genAI, resolvedFallbackModel, prompt, base64Image, mimeType);
       } else {
         throw error;
       }
     }
 
-    const rawText = result.response.text();
-    const parsed = parseJsonObject(rawText);
+    const parsed = parseJsonObject(result.response.text());
     const structure = parsed.structure as Record<string, unknown> | undefined;
     const liquidity = parsed.liquidity as Record<string, unknown> | undefined;
     const zones = parsed.zones as Record<string, unknown> | undefined;
@@ -1195,7 +1121,7 @@ Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
     const riskManagement = parsed.risk_management as Record<string, unknown> | undefined;
     const quality = parsed.quality as Record<string, unknown> | undefined;
     const finalVerdict = parsed.final_verdict as Record<string, unknown> | undefined;
-    const metadata = createVisionModelMetadata(actualProvider, 'ltf', primaryModel, resolvedFallbackModel, actualModel);
+    const metadata = createVisionModelMetadata('ltf', primaryModel, resolvedFallbackModel, actualModel);
 
     return withVisionModelMetadata({
       trend: normalizeTrend(parsed.trend),
@@ -1243,6 +1169,6 @@ Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
       takeProfit3: normalizeNumeric(parsed.take_profit_3),
     }, metadata);
   } catch (error) {
-    throw toVisionAnalysisError(error, createVisionModelMetadata(actualProvider, 'ltf', primaryModel, resolvedFallbackModel, actualModel));
+    throw toVisionAnalysisError(error, createVisionModelMetadata('ltf', primaryModel, resolvedFallbackModel, actualModel));
   }
 }

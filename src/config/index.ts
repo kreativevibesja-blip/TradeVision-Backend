@@ -58,12 +58,6 @@ export const config = {
     proModel: process.env.GEMINI_PRO_MODEL || 'gemini-3-flash-preview',
     model: process.env.GEMINI_FREE_MODEL || process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite-preview',
   },
-
-  openai: {
-    apiKey: process.env.OPENAI_API_KEY || '',
-    proModel: process.env.OPENAI_PRO_MODEL || 'gpt-5.1',
-    baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
-  },
   
   paypal: {
     clientId: process.env.PAYPAL_CLIENT_ID || '',

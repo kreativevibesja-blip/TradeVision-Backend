@@ -3,7 +3,7 @@ import { analyzeVisionStructure, analyzeHTFVisionStructure, analyzeLTFVisionStru
 import { generateFinalSignal } from '../signalEngine';
 import { drawChartMarkup, drawHTFChartMarkup, drawLTFChartMarkup, isChartMarkupEnabledForPlan } from '../chartMarkup';
 import type { SubscriptionTier } from '../../lib/supabase';
-import type { VisionAnalysisResult, VisionModelMetadata } from '../visionAnalysis';
+import type { VisionModelMetadata } from '../visionAnalysis';
 
 interface SecondaryChartInput {
   base64Image: string;
@@ -48,8 +48,6 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
   try {
     const isDualChart = secondaryChart !== null;
     let analysisMeta: Record<string, unknown> | null = null;
-    let htfVision: VisionAnalysisResult | null = null;
-    let ltfVision: VisionAnalysisResult | null = null;
 
     await updateAnalysis(analysisId, {
       status: 'PROCESSING',
@@ -62,7 +60,7 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
 
     if (isDualChart) {
       // Dual-chart mode: HTF (chart 1) for structure + LTF (chart 2) for entry
-      [htfVision, ltfVision] = await Promise.all([
+      const [htfVision, ltfVision] = await Promise.all([
         analyzeHTFVisionStructure(base64Image, mimeType, pair, timeframe),
         analyzeLTFVisionStructure(secondaryChart.base64Image, secondaryChart.mimeType, pair, secondaryChart.timeframe),
       ]);
@@ -86,7 +84,7 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
           confidence: Math.round((htfVision.quality.confidence + ltfVision.quality.confidence) / 2),
         },
         finalVerdict: ltfVision.finalVerdict,
-        reasoning: `HTF (${timeframe}): ${htfVision.reasoning}\n\nLTF (${secondaryChart.timeframe}): ${ltfVision.reasoning}`,
+        reasoning: `**Higher Timeframe (${timeframe}):** ${htfVision.reasoning}\n\n**Lower Timeframe (${secondaryChart.timeframe}):** ${ltfVision.reasoning}`,
         visiblePriceRange: htfVision.visiblePriceRange,
         stopLoss: ltfVision.stopLoss,
         takeProfit1: ltfVision.takeProfit1,
@@ -128,10 +126,6 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
 
     if (markupEnabled) {
       if (isDualChart) {
-        if (!htfVision || !ltfVision) {
-          throw new Error('Dual-chart analysis did not return both timeframe results');
-        }
-
         // Generate separate markups for HTF and LTF charts
         const [htfResult, ltfResult] = await Promise.all([
           drawHTFChartMarkup(Buffer.from(base64Image, 'base64'), signal, { minPrice: chartMinPrice, maxPrice: chartMaxPrice }),
@@ -149,20 +143,6 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
       }
     }
 
-    const dualChartContext = isDualChart && secondaryChart && htfVision && ltfVision ? {
-      isDualChart: true,
-      htfTimeframe: timeframe,
-      ltfTimeframe: secondaryChart.timeframe,
-      htfOriginalImageUrl: imageUrl,
-      ltfOriginalImageUrl: secondaryChart.imageUrl,
-      htfMarkedImageUrl: htfMarkup.markedImageUrl,
-      ltfMarkedImageUrl: ltfMarkup.markedImageUrl,
-      htfChartBounds: htfMarkup.chartBounds,
-      ltfChartBounds: ltfMarkup.chartBounds,
-      htfVisiblePriceRange: htfVision.visiblePriceRange,
-      ltfVisiblePriceRange: ltfVision.visiblePriceRange,
-    } : {};
-
     const enrichedSignal = {
       ...signal,
       analysisMeta,
@@ -170,7 +150,18 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
       markedImageUrl: markup.markedImageUrl,
       hasMarkup: markup.hasMarkup,
       chartBounds: markup.chartBounds,
-      ...dualChartContext,
+      // Dual-chart specific fields
+      ...(isDualChart ? {
+        isDualChart: true,
+        htfTimeframe: timeframe,
+        ltfTimeframe: secondaryChart.timeframe,
+        htfOriginalImageUrl: imageUrl,
+        ltfOriginalImageUrl: secondaryChart.imageUrl,
+        htfMarkedImageUrl: htfMarkup.markedImageUrl,
+        ltfMarkedImageUrl: ltfMarkup.markedImageUrl,
+        htfChartBounds: htfMarkup.chartBounds,
+        ltfChartBounds: ltfMarkup.chartBounds,
+      } : {}),
     };
 
     const bias = signal.trend === 'bullish' ? 'BULLISH' : signal.trend === 'bearish' ? 'BEARISH' : 'NEUTRAL';

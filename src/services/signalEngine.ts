@@ -106,55 +106,6 @@ const mapSetupQuality = (rating: VisionAnalysisResult['quality']['setupRating'])
   return 'low';
 };
 
-const formatLevel = (value: number | null | undefined) => {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    return null;
-  }
-
-  return Math.abs(value) >= 1000 ? value.toFixed(2) : value.toFixed(4);
-};
-
-const formatEntryZone = (zone: VisionAnalysisResult['entryPlan']['entryZone']) => {
-  if (!zone || typeof zone.min !== 'number' || typeof zone.max !== 'number') {
-    return null;
-  }
-
-  return `${formatLevel(zone.min)}-${formatLevel(zone.max)}`;
-};
-
-const buildSignalMessage = (
-  aiData: VisionAnalysisResult,
-  interpretedMessage: string,
-  hasValidEntry: boolean
-) => {
-  const zone = formatEntryZone(aiData.entryPlan.entryZone);
-  const bias = aiData.entryPlan.bias;
-  const confirmation = mapConfirmation(aiData.entryPlan.confirmation);
-
-  if (!hasValidEntry) {
-    return zone ? `Wait for price to reach ${zone}.` : 'Wait for price to reach the planned area.';
-  }
-
-  if (aiData.finalVerdict.action === 'avoid' || bias === 'none') {
-    return interpretedMessage;
-  }
-
-  if (aiData.entryPlan.entryType === 'confirmation') {
-    if (zone && confirmation !== 'none') {
-      return `Wait for ${confirmation.toUpperCase()} in ${zone} before ${bias}.`;
-    }
-    if (confirmation !== 'none') {
-      return `Wait for ${confirmation.toUpperCase()} before ${bias}.`;
-    }
-  }
-
-  if (aiData.finalVerdict.action === 'enter' && zone) {
-    return `${bias === 'buy' ? 'Buy' : 'Sell'} from ${zone}.`;
-  }
-
-  return interpretedMessage;
-};
-
 export function generateFinalSignal(aiData: VisionAnalysisResult, currentPrice: number): TradeSignalResult {
   const interpreted = interpretSMC(aiData);
   const confirmation = mapConfirmation(aiData.entryPlan.confirmation);
@@ -167,7 +118,7 @@ export function generateFinalSignal(aiData: VisionAnalysisResult, currentPrice: 
 
   const finalSignalType = hasValidEntry ? signalType : 'wait';
   const finalRecommendation = hasValidEntry ? interpreted.recommendation : 'wait';
-  const finalMessage = buildSignalMessage(aiData, interpreted.message, hasValidEntry);
+  const finalMessage = hasValidEntry ? interpreted.message : 'Price is not in a valid execution zone yet. Wait for price to reach a key area.';
 
   return {
     trend: aiData.trend,
