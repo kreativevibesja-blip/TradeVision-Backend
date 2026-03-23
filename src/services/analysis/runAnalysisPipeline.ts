@@ -142,10 +142,37 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
 
     if (markupEnabled) {
       if (isDualChart) {
+        const htfMarkupAnalysis = {
+          zones: {
+            supplyZone: htfVision.zones.supply,
+            demandZone: htfVision.zones.demand,
+          },
+          liquidity: htfVision.liquidity,
+          visiblePriceRange: htfVision.visiblePriceRange,
+          currentPrice,
+        };
+
+        const ltfMarkupAnalysis = {
+          zones: {
+            supplyZone: ltfVision.zones.supply,
+            demandZone: ltfVision.zones.demand,
+          },
+          entryPlan: ltfVision.entryPlan,
+          entryZone: ltfVision.entryPlan.entryZone,
+          liquidity: ltfVision.liquidity,
+          invalidationLevel: ltfVision.riskManagement.invalidationLevel,
+          currentPrice,
+          visiblePriceRange: ltfVision.visiblePriceRange,
+          stopLoss: ltfVision.stopLoss,
+          takeProfit1: ltfVision.takeProfit1,
+          takeProfit2: ltfVision.takeProfit2,
+          takeProfit3: ltfVision.takeProfit3,
+        };
+
         // Generate separate markups for HTF and LTF charts
         const [htfResult, ltfResult] = await Promise.all([
-          drawHTFChartMarkup(Buffer.from(base64Image, 'base64'), signal, { minPrice: chartMinPrice, maxPrice: chartMaxPrice }),
-          drawLTFChartMarkup(Buffer.from(secondaryChart.base64Image, 'base64'), signal, { minPrice: null, maxPrice: null }),
+          drawHTFChartMarkup(Buffer.from(base64Image, 'base64'), htfMarkupAnalysis, { minPrice: chartMinPrice, maxPrice: chartMaxPrice }),
+          drawLTFChartMarkup(Buffer.from(secondaryChart.base64Image, 'base64'), ltfMarkupAnalysis, { minPrice: null, maxPrice: null }),
         ]);
         htfMarkup = htfResult;
         ltfMarkup = ltfResult;

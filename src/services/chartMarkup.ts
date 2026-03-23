@@ -144,6 +144,9 @@ const priceToY = (price: number, context: DrawContext) => {
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
+const isPriceWithinBounds = (price: number, context: DrawContext) =>
+  price >= context.bounds.minPrice && price <= context.bounds.maxPrice;
+
 const escapeXml = (value: string) =>
   value
     .replace(/&/g, '&amp;')
@@ -188,8 +191,15 @@ const drawZone = (context: DrawContext, zone: NumericZone | null | undefined, co
     return '';
   }
 
-  const y1 = priceToY(zone.max, context);
-  const y2 = priceToY(zone.min, context);
+  if (zone.max < context.bounds.minPrice || zone.min > context.bounds.maxPrice) {
+    return '';
+  }
+
+  const visibleMin = clamp(zone.min, context.bounds.minPrice, context.bounds.maxPrice);
+  const visibleMax = clamp(zone.max, context.bounds.minPrice, context.bounds.maxPrice);
+
+  const y1 = priceToY(visibleMax, context);
+  const y2 = priceToY(visibleMin, context);
 
   if (!isFiniteNumber(y1) || !isFiniteNumber(y2)) {
     return '';
@@ -286,6 +296,10 @@ const drawLiquidityMarker = (context: DrawContext, analysis: MarkupAnalysis) => 
     return '';
   }
 
+  if (!isPriceWithinBounds(level, context)) {
+    return '';
+  }
+
   const y = priceToY(level, context);
   if (!isFiniteNumber(y)) {
     return '';
@@ -334,6 +348,7 @@ const buildOverlay = (context: DrawContext, analysis: MarkupAnalysis) => {
 
 const drawPriceLevel = (context: DrawContext, price: number | null | undefined, color: string, label: string) => {
   if (!isFiniteNumber(price)) return '';
+  if (!isPriceWithinBounds(price, context)) return '';
   const y = priceToY(price, context);
   if (!isFiniteNumber(y)) return '';
   const safeY = clamp(y, context.plotArea.top + 4, context.plotArea.bottom - 4);
