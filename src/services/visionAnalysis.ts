@@ -358,6 +358,22 @@ const normalizeGeminiModelName = (modelName: string) => {
 const getGeminiModelForSubscription = (subscription: SubscriptionTier) =>
   normalizeGeminiModelName(subscription === 'PRO' ? config.gemini.proModel : config.gemini.freeModel);
 
+interface LTFPromptContext {
+  higherTimeframe: string;
+  higherTimeframeBias: 'bullish' | 'bearish' | 'ranging';
+  higherTimeframeSupplyZone: SMCQualifiedZone | null;
+  higherTimeframeDemandZone: SMCQualifiedZone | null;
+  higherTimeframePricePosition: SMCPricePosition['location'];
+}
+
+const formatZoneRange = (zone: SMCQualifiedZone | null) => {
+  if (!zone || zone.min === null || zone.max === null) {
+    return 'none identified';
+  }
+
+  return `${zone.min} - ${zone.max} (${zone.reason})`;
+};
+
 const advancedSmcGuidance = `
 ADVANCED SMC CONCEPTS YOU MUST APPLY WHEN CLEARLY VISIBLE
 - Treat equal highs and equal lows as liquidity pools when relevant.
@@ -831,28 +847,32 @@ export async function analyzeHTFVisionStructure(
   const fallbackModel = normalizeGeminiModelName(config.gemini.freeModel);
   const resolvedFallbackModel = primaryModel !== fallbackModel ? fallbackModel : null;
 
-  const prompt = `You are an elite institutional Smart Money Concepts (SMC) analyst reviewing A HIGHER TIMEFRAME chart.
+  const prompt = `You are an advanced Smart Money Concepts (SMC) trading analyst.
 
-Your role: Determine the MACRO BIAS and structural context. Think like a hedge fund desk — structure first, everything else follows.
+You are analyzing the HIGHER TIMEFRAME chart from a dual-chart setup.
+
+Chart context:
+- Trading pair/index: ${pair}
+- Higher timeframe image timeframe: ${timeframe}
 
 ${advancedSmcGuidance}
 
-Trading pair/index: ${pair}
-Timeframe: ${timeframe} (HIGHER TIMEFRAME — this sets the directional bias)
+Follow these rules strictly:
 
-========================================
-YOUR FOCUS FOR THIS HIGHER TIMEFRAME CHART
-========================================
+===============================
+STEP 1 - ANALYSIS (HIGH TIMEFRAME)
+===============================
 
-1. **Market Structure** — Is price making higher highs/higher lows (bullish) or lower highs/lower lows (bearish)? Identify the MOST RECENT Break of Structure (BOS) or Change of Character (CHoCH). Separate external structure from internal noise.
+- Identify market structure (bullish or bearish)
+- Mark the most recent Break of Structure (BOS) or Change of Character (CHoCH)
+- Determine directional bias (ONLY ONE: bullish or bearish, unless structure is truly unclear)
+- Identify premium and discount zones using the active dealing range
+- Identify key supply and demand zones
+- Identify major liquidity pools (equal highs/lows, previous highs/lows)
+- Separate external structure from internal noise
+- Distinguish inducement from the real external liquidity target
 
-2. **Supply & Demand Zones** — Mark the KEY institutional supply and demand zones that are most likely to cause a reaction. These are where large orders were placed (order blocks, imbalances, or major structural pivots). Be PRECISE with zone boundaries.
-
-3. **Premium vs Discount** — Relative to the active dealing range / last major impulse leg controlling price, is current price in premium (top 50%), discount (bottom 50%), or equilibrium? This is CRITICAL for determining whether to look for buys or sells on the lower timeframe.
-
-4. **Liquidity Pools** — Where are the obvious equal highs/lows or stop-loss clusters that smart money will target? Identify the nearest untouched liquidity pool and distinguish inducement from the true external liquidity objective.
-
-5. **Overall Directional Bias** — What direction should the lower timeframe trader be looking? BUY from discount in bullish structure, SELL from premium in bearish structure.
+This chart sets the directional bias for the lower timeframe execution chart.
 
 ========================================
 OUTPUT FORMAT (STRICT JSON ONLY)
@@ -917,17 +937,15 @@ OUTPUT FORMAT (STRICT JSON ONLY)
 ========================================
 STRICT RULES
 ========================================
-1. This is the HIGHER TIMEFRAME — do NOT provide entry, SL, or TP levels. Those come from the lower timeframe.
-2. Focus on STRUCTURE, ZONES, and BIAS only.
-3. Zone boundaries must be TIGHT (0.5-2% of visible price range).
-4. Read the Y-axis carefully for visible_price_range.
-5. If structure is unclear, setup_rating = "avoid" and bias = "none".
-6. Do NOT force a directional bias. If ranging, say ranging.
-7. Mark the most significant supply zone (institutional selling area) AND demand zone (institutional buying area).
-8. Premium/discount MUST be relative to the active dealing range / last major impulse leg, not the entire visible chart.
-9. Distinguish external structure from internal structure and prioritize external structure for directional bias.
-10. If multiple zones exist, prefer the cleanest fresh structure-aligned order block, breaker block, mitigation block, or fair value gap.
-11. Keep reasoning concise: 2-3 short sentences, no long paragraph, no repeated points.
+1. This is the HIGHER TIMEFRAME only. Do NOT provide a live executable entry from this chart.
+2. Focus on STRUCTURE, BIAS, LIQUIDITY, PREMIUM/DISCOUNT, and POIs only.
+3. Directional bias should be a single clear bias when structure supports it.
+4. Supply and demand zones must be tight and institutionally justified.
+5. Premium/discount MUST be based on the active dealing range, not the full visible chart.
+6. Mention equal highs/lows or previous highs/lows if they are the obvious liquidity draw.
+7. Distinguish inducement from the real external liquidity objective when visible.
+8. Prefer the cleanest fresh structure-aligned order block, breaker block, mitigation block, or fair value gap.
+9. Keep reasoning concise: 2-3 short sentences, no long paragraph, no repeated points.
 
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 
@@ -1016,7 +1034,8 @@ export async function analyzeLTFVisionStructure(
   base64Image: string,
   mimeType: string,
   pair: string,
-  timeframe: string
+  timeframe: string,
+  context: LTFPromptContext
 ): Promise<VisionAnalysisResult> {
   if (!config.gemini.apiKey) {
     throw new Error('TradeVision AI is not configured correctly');
@@ -1027,32 +1046,46 @@ export async function analyzeLTFVisionStructure(
   const fallbackModel = normalizeGeminiModelName(config.gemini.freeModel);
   const resolvedFallbackModel = primaryModel !== fallbackModel ? fallbackModel : null;
 
-  const prompt = `You are an elite institutional Smart Money Concepts (SMC) execution analyst reviewing A LOWER TIMEFRAME chart.
+  const prompt = `You are an advanced Smart Money Concepts (SMC) trading analyst.
 
-Your role: Find the PRECISE ENTRY, stop loss, and take profit levels. Think like a prop firm trader executing off the desk's bias — precision is everything.
+You are given the LOWER TIMEFRAME chart from a dual-chart setup.
+
+Chart context:
+- Trading pair/index: ${pair}
+- Higher timeframe image timeframe: ${context.higherTimeframe}
+- Lower timeframe image timeframe: ${timeframe}
+- Higher timeframe directional bias: ${context.higherTimeframeBias}
+- Higher timeframe supply zone: ${formatZoneRange(context.higherTimeframeSupplyZone)}
+- Higher timeframe demand zone: ${formatZoneRange(context.higherTimeframeDemandZone)}
+- Higher timeframe price position: ${context.higherTimeframePricePosition}
 
 ${advancedSmcGuidance}
 
-Trading pair/index: ${pair}
-Timeframe: ${timeframe} (LOWER TIMEFRAME — this is where you find the sniper entry)
+Follow these rules strictly:
 
-========================================
-YOUR FOCUS FOR THIS LOWER TIMEFRAME CHART
-========================================
+===============================
+STEP 2 - LOWER TIMEFRAME ANALYSIS (ENTRY LOGIC)
+===============================
 
-1. **Internal Structure** — Identify the micro BOS/CHoCH within the lower timeframe. Where has internal structure shifted? This is your entry confirmation. Respect the broader external structure when it is clear.
+- ONLY look for trades in the direction of the higher timeframe bias unless that bias is unclear
+- Wait for price to enter a higher timeframe POI (supply/demand or premium/discount zone)
+- Identify a lower timeframe CHoCH or BOS for confirmation
+- Identify Fair Value Gaps (FVG) near the POI
+- Entry must be:
+  - at or near POI
+  - preferably inside or just below/above FVG
+  - aligned with liquidity sweep
 
-2. **Liquidity Sweeps** — Has price swept any recent internal highs or lows? A liquidity sweep followed by a structural shift is the highest probability entry. Distinguish inducement from the real liquidity grab.
+===============================
+STEP 3 - TRADE SETUP RULES
+===============================
 
-3. **Order Blocks & Imbalances** — Find the most recent unmitigated order block, breaker block, mitigation block, or fair value gap where price is likely to react. This is your entry zone.
-
-4. **Entry Level** — Provide the EXACT entry zone (min/max). This should be at an internal order block or imbalance AFTER a liquidity sweep and structural confirmation.
-
-5. **Stop Loss** — Place it below/above the most recent structural low/high that would invalidate the entry. Must be logical, not arbitrary.
-
-6. **Take Profit Levels** — TP1 (conservative, nearest internal structure), TP2 (moderate, next key level), TP3 (aggressive, major liquidity pool or HTF zone). Minimum 1:2 Risk:Reward for TP1.
-
-7. **Confirmation Signal** — What specific confirmation do you see or need? CHoCH, BOS, rejection wick, engulfing candle at the order block.
+- Do NOT give an entry at current price unless conditions are met
+- If price is not at a valid POI, the setup should resolve to no valid trade yet
+- Prefer limit-style entries, not random market chasing
+- Ensure risk-to-reward is at least 1:2 for TP1
+- Distinguish inducement from the real liquidity grab
+- Prefer the freshest valid order block, breaker block, mitigation block, or FVG at the POI
 
 ========================================
 OUTPUT FORMAT (STRICT JSON ONLY)
@@ -1120,19 +1153,16 @@ OUTPUT FORMAT (STRICT JSON ONLY)
 ========================================
 STRICT RULES
 ========================================
-1. This is the LOWER TIMEFRAME — your job is to find the SNIPER ENTRY with precise SL and TP.
-2. Entry MUST be at an internal order block or imbalance, not a random level.
-3. A liquidity sweep BEFORE entry increases confidence significantly. If no sweep occurred, note this.
-4. SL must be at a structural level that invalidates the trade, NOT an arbitrary distance.
-5. TP1 must have at least 1:2 Risk:Reward ratio.
-6. Zone boundaries must be TIGHT (the order block body or imbalance range only).
-7. Prefer the freshest structure-aligned zone among order blocks, breaker blocks, mitigation blocks, and fair value gaps.
-8. If no clean entry exists, action = "wait" and explain what price action you need to see.
-9. Read the Y-axis carefully for visible_price_range.
-10. DO NOT force an entry. If the lower timeframe doesn't confirm, action = "wait".
-11. Premium/discount should be judged from the active dealing range controlling the execution leg.
-12. Keep reasoning concise: 2-3 short sentences max, with no filler or repeated explanation.
-13. The entry_plan.reason must specifically reference: what was swept, what shifted, and where the entry sits.
+1. This is the LOWER TIMEFRAME — your job is precise execution aligned with the higher timeframe bias.
+2. If the higher timeframe bias is bullish, do not build a bearish trade unless structure is clearly invalidated. If bearish, do not build a bullish trade unless clearly invalidated.
+3. Entry MUST be at or near a valid higher timeframe POI and refined by lower timeframe structure.
+4. A liquidity sweep plus CHoCH/BOS confirmation should carry the most weight.
+5. SL must be at a structural invalidation level, not arbitrary distance.
+6. TP1 must have at least 1:2 Risk:Reward ratio.
+7. If no clean POI + confirmation exists, action = "wait" and no forced trade.
+8. Read the Y-axis carefully for visible_price_range.
+9. Keep reasoning concise: 2-3 short sentences max, no filler.
+10. The entry_plan.reason must specifically reference: POI, sweep, structure shift, and why the zone is valid.
 
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 

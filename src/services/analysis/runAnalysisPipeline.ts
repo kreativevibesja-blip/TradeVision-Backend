@@ -59,11 +59,27 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
     let vision;
 
     if (isDualChart) {
-      // Dual-chart mode: HTF (chart 1) for structure + LTF (chart 2) for entry
-      const [htfVision, ltfVision] = await Promise.all([
-        analyzeHTFVisionStructure(base64Image, mimeType, pair, timeframe),
-        analyzeLTFVisionStructure(secondaryChart.base64Image, secondaryChart.mimeType, pair, secondaryChart.timeframe),
-      ]);
+      // Dual-chart mode: analyze HTF first so LTF can use the actual HTF bias and POIs.
+      const htfVision = await analyzeHTFVisionStructure(base64Image, mimeType, pair, timeframe);
+
+      await updateAnalysis(analysisId, {
+        progress: 30,
+        currentStage: 'Analyzing lower timeframe entry logic...',
+      });
+
+      const ltfVision = await analyzeLTFVisionStructure(
+        secondaryChart.base64Image,
+        secondaryChart.mimeType,
+        pair,
+        secondaryChart.timeframe,
+        {
+          higherTimeframe: timeframe,
+          higherTimeframeBias: htfVision.trend,
+          higherTimeframeSupplyZone: htfVision.zones.supply,
+          higherTimeframeDemandZone: htfVision.zones.demand,
+          higherTimeframePricePosition: htfVision.pricePosition.location,
+        }
+      );
 
       await updateAnalysis(analysisId, {
         progress: 50,
