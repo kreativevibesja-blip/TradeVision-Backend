@@ -766,7 +766,7 @@ Do not add commentary outside the JSON.`;
       }
     }
 
-    const rawText = 'response' in result ? result.response.text() : result.text;
+    const rawText = result.response.text();
     const parsed = parseJsonObject(rawText);
     const structure = parsed.structure as Record<string, unknown> | undefined;
     const liquidity = parsed.liquidity as Record<string, unknown> | undefined;
@@ -980,7 +980,7 @@ Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
       }
     }
 
-    const rawText = 'response' in result ? result.response.text() : result.text;
+    const rawText = result.response.text();
     const parsed = parseJsonObject(rawText);
     const structure = parsed.structure as Record<string, unknown> | undefined;
     const liquidity = parsed.liquidity as Record<string, unknown> | undefined;
@@ -1185,7 +1185,7 @@ Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
       }
     }
 
-    const rawText = 'response' in result ? result.response.text() : result.text;
+    const rawText = result.response.text();
     const parsed = parseJsonObject(rawText);
     const structure = parsed.structure as Record<string, unknown> | undefined;
     const liquidity = parsed.liquidity as Record<string, unknown> | undefined;
