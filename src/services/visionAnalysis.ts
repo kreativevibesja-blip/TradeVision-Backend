@@ -501,7 +501,7 @@ Timeframe: ${timeframe}`;
   "take_profit_1": number | null,
   "take_profit_2": number | null,
   "take_profit_3": number | null,
-  "reasoning": "Full professional explanation using SMC logic",
+  "reasoning": "Concise SMC explanation in 2-4 short sentences",
   "visible_price_range": {
     "min": "lowest price number visible on the right-side Y-axis",
     "max": "highest price number visible on the right-side Y-axis"
@@ -665,6 +665,12 @@ It must be:
 - disciplined
 - realistic
 - trustworthy
+
+Keep reasoning tight:
+- maximum 2-4 short sentences
+- roughly half the length of a normal full breakdown
+- mention only the most important structure, liquidity, zone, and verdict points
+- avoid repetition and filler
 
 Return STRICT JSON ONLY.
 Do not use markdown.
@@ -876,7 +882,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
   "take_profit_1": null,
   "take_profit_2": null,
   "take_profit_3": null,
-  "reasoning": "Full breakdown of the higher timeframe structure, zones, and why the bias is what it is",
+  "reasoning": "Concise higher timeframe bias explanation in 2-3 short sentences",
   "visible_price_range": {
     "min": "lowest price on right Y-axis",
     "max": "highest price on right Y-axis"
@@ -894,6 +900,7 @@ STRICT RULES
 6. Do NOT force a directional bias. If ranging, say ranging.
 7. Mark the most significant supply zone (institutional selling area) AND demand zone (institutional buying area).
 8. Premium/discount MUST be relative to the last major impulse leg, not the entire visible chart.
+9. Keep reasoning concise: 2-3 short sentences, no long paragraph, no repeated points.
 
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 
@@ -1074,7 +1081,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
   "take_profit_1": number | null,
   "take_profit_2": number | null,
   "take_profit_3": number | null,
-  "reasoning": "Step-by-step breakdown: liquidity sweep → structural shift → entry zone → SL/TP logic",
+  "reasoning": "Concise execution explanation in 2-3 short sentences covering sweep, structure, entry, and risk",
   "visible_price_range": {
     "min": "lowest price on right Y-axis",
     "max": "highest price on right Y-axis"
@@ -1093,6 +1100,7 @@ STRICT RULES
 7. If no clean entry exists, action = "wait" and explain what price action you need to see.
 8. Read the Y-axis carefully for visible_price_range.
 9. DO NOT force an entry. If the lower timeframe doesn't confirm, action = "wait".
+10. Keep reasoning concise: 2-3 short sentences max, with no filler or repeated explanation.
 10. The entry_plan.reason must specifically reference: what was swept, what shifted, and where the entry sits.
 
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
