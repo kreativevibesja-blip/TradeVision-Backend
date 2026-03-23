@@ -433,19 +433,34 @@ export async function analyzeVisionStructure(
   const fallbackModel = normalizeGeminiModelName(config.gemini.freeModel);
   const resolvedFallbackModel = primaryModel !== fallbackModel ? fallbackModel : null;
 
-  const basePromptHeader = `You are an institutional-level Smart Money Concepts (SMC) trading analyst.
+  const basePromptHeader = `You are an institutional Smart Money Concepts (SMC) analyst.
 
-Your job is to analyze the provided chart like a professional trader, not a signal generator.
+Analyze the chart like a disciplined trader. Stay concise, structured, and practical.
 
-You MUST think in terms of:
-- Market structure
-- Liquidity
-- Order flow
-- Premium vs Discount
-- Confirmation-based entries
+Focus on:
+- market structure
+- liquidity
+- premium vs discount
+- confirmation-based entries
 
 Trading pair/index: ${pair}
 Timeframe: ${timeframe}`;
+
+  const conciseStyleRules = `
+========================================
+TEXT STYLE
+========================================
+
+- Keep all text fields short, direct, and useful.
+- No fluff, hype, disclaimers, or generic trading phrases.
+- Do NOT say "based on the chart", "the chart suggests", or similar filler.
+- final_verdict.message: max 12 words.
+- liquidity.description: max 16 words.
+- price_position.explanation: max 16 words.
+- entry_plan.reason: max 16 words.
+- risk_management.invalidation_reason: max 12 words.
+- reasoning: exactly 3 short clauses separated by " | ".
+- reasoning clauses must cover: structure | location/liquidity | action.`;
 
   const proJsonSchema = `
 {
@@ -457,7 +472,7 @@ Timeframe: ${timeframe}`;
   },
   "liquidity": {
     "type": "buy-side | sell-side | none",
-    "description": "Where liquidity was taken and how price reacted"
+    "description": "Short liquidity summary, max 16 words"
   },
   "zones": {
     "supply": {
@@ -473,7 +488,7 @@ Timeframe: ${timeframe}`;
   },
   "price_position": {
     "location": "premium | discount | equilibrium",
-    "explanation": "Explain relative to the most recent impulse leg"
+    "explanation": "Short location summary, max 16 words"
   },
   "entry_plan": {
     "bias": "buy | sell | none",
@@ -483,11 +498,11 @@ Timeframe: ${timeframe}`;
       "max": number | null
     },
     "confirmation": "CHoCH | BOS | rejection | none",
-    "reason": "Why this entry makes sense based on structure"
+    "reason": "Short entry justification, max 16 words"
   },
   "risk_management": {
     "invalidation_level": number,
-    "invalidation_reason": "Explain what breaks the setup"
+    "invalidation_reason": "Short invalidation reason, max 12 words"
   },
   "quality": {
     "setup_rating": "A | B | C | avoid",
@@ -495,13 +510,13 @@ Timeframe: ${timeframe}`;
   },
   "final_verdict": {
     "action": "enter | wait | avoid",
-    "message": "Clear instruction for the user"
+    "message": "Direct instruction, max 12 words"
   },
   "stop_loss": number | null,
   "take_profit_1": number | null,
   "take_profit_2": number | null,
   "take_profit_3": number | null,
-  "reasoning": "Full professional explanation using SMC logic",
+  "reasoning": "3 short clauses: structure | location/liquidity | action",
   "visible_price_range": {
     "min": "lowest price number visible on the right-side Y-axis",
     "max": "highest price number visible on the right-side Y-axis"
@@ -518,7 +533,7 @@ Timeframe: ${timeframe}`;
   },
   "liquidity": {
     "type": "buy-side | sell-side | none",
-    "description": "Brief description of liquidity conditions"
+    "description": "Short liquidity summary, max 16 words"
   },
   "zones": {
     "supply": {
@@ -534,7 +549,7 @@ Timeframe: ${timeframe}`;
   },
   "price_position": {
     "location": "premium | discount | equilibrium",
-    "explanation": "Brief explanation of price position"
+    "explanation": "Short location summary, max 16 words"
   },
   "entry_plan": {
     "bias": "buy | sell | none",
@@ -544,11 +559,11 @@ Timeframe: ${timeframe}`;
       "max": number | null
     },
     "confirmation": "CHoCH | BOS | rejection | none",
-    "reason": "Brief reason for this entry"
+    "reason": "Short entry justification, max 16 words"
   },
   "risk_management": {
     "invalidation_level": number,
-    "invalidation_reason": "What breaks the setup"
+    "invalidation_reason": "Short invalidation reason, max 12 words"
   },
   "quality": {
     "setup_rating": "A | B | C | avoid",
@@ -556,9 +571,9 @@ Timeframe: ${timeframe}`;
   },
   "final_verdict": {
     "action": "enter | wait | avoid",
-    "message": "Clear instruction for the user"
+    "message": "Direct instruction, max 12 words"
   },
-  "reasoning": "Concise explanation of the setup using SMC logic",
+  "reasoning": "3 short clauses: structure | location/liquidity | action",
   "visible_price_range": {
     "min": "lowest price number visible on the right-side Y-axis",
     "max": "highest price number visible on the right-side Y-axis"
@@ -684,8 +699,8 @@ Do not use markdown.
 Do not add commentary outside the JSON.`;
 
   const prompt = subscription === 'PRO'
-    ? `${basePromptHeader}\n\n========================================\nOUTPUT FORMAT (STRICT JSON ONLY)\n========================================\n${proJsonSchema}\n${proRules}\n${proGoal}`
-    : `${basePromptHeader}\n\n========================================\nOUTPUT FORMAT (STRICT JSON ONLY)\n========================================\n${freeJsonSchema}\n${freeRules}\n${freeGoal}`;
+    ? `${basePromptHeader}\n\n========================================\nOUTPUT FORMAT (STRICT JSON ONLY)\n========================================\n${proJsonSchema}\n${proRules}\n${conciseStyleRules}\n${proGoal}`
+    : `${basePromptHeader}\n\n========================================\nOUTPUT FORMAT (STRICT JSON ONLY)\n========================================\n${freeJsonSchema}\n${freeRules}\n${conciseStyleRules}\n${freeGoal}`;
 
   let result;
   let actualModel = primaryModel;
@@ -894,6 +909,12 @@ STRICT RULES
 6. Do NOT force a directional bias. If ranging, say ranging.
 7. Mark the most significant supply zone (institutional selling area) AND demand zone (institutional buying area).
 8. Premium/discount MUST be relative to the last major impulse leg, not the entire visible chart.
+9. Keep all text short and structured.
+10. No fluff, hype, or generic commentary.
+11. Do NOT say "based on the chart" or similar filler.
+12. final_verdict.message max 12 words.
+13. liquidity.description, price_position.explanation, entry_plan.reason max 16 words each.
+14. reasoning must be exactly: structure | location/liquidity | action.
 
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 
@@ -1094,6 +1115,12 @@ STRICT RULES
 8. Read the Y-axis carefully for visible_price_range.
 9. DO NOT force an entry. If the lower timeframe doesn't confirm, action = "wait".
 10. The entry_plan.reason must specifically reference: what was swept, what shifted, and where the entry sits.
+11. Keep all text short and structured.
+12. No fluff, hype, or generic commentary.
+13. Do NOT say "based on the chart" or similar filler.
+14. final_verdict.message max 12 words.
+15. liquidity.description, price_position.explanation, entry_plan.reason max 16 words each.
+16. reasoning must be exactly: structure | location/liquidity | action.
 
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 
