@@ -3,7 +3,7 @@ import { analyzeVisionStructure, analyzeHTFVisionStructure, analyzeLTFVisionStru
 import { generateFinalSignal } from '../signalEngine';
 import { drawChartMarkup, drawHTFChartMarkup, drawLTFChartMarkup, isChartMarkupEnabledForPlan } from '../chartMarkup';
 import type { SubscriptionTier } from '../../lib/supabase';
-import type { VisionModelMetadata } from '../visionAnalysis';
+import type { VisionAnalysisResult, VisionModelMetadata } from '../visionAnalysis';
 
 interface SecondaryChartInput {
   base64Image: string;
@@ -57,17 +57,19 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
     });
 
     let vision;
+    let htfVision: VisionAnalysisResult | null = null;
+    let ltfVision: VisionAnalysisResult | null = null;
 
     if (isDualChart) {
       // Dual-chart mode: analyze HTF first so LTF can use the actual HTF bias and POIs.
-      const htfVision = await analyzeHTFVisionStructure(base64Image, mimeType, pair, timeframe);
+      htfVision = await analyzeHTFVisionStructure(base64Image, mimeType, pair, timeframe);
 
       await updateAnalysis(analysisId, {
         progress: 30,
         currentStage: 'Analyzing lower timeframe entry logic...',
       });
 
-      const ltfVision = await analyzeLTFVisionStructure(
+      ltfVision = await analyzeLTFVisionStructure(
         secondaryChart.base64Image,
         secondaryChart.mimeType,
         pair,
@@ -142,6 +144,10 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
 
     if (markupEnabled) {
       if (isDualChart) {
+        if (!htfVision || !ltfVision || !secondaryChart) {
+          throw new Error('Dual-chart markup could not be prepared because the chart analyses are incomplete');
+        }
+
         const htfMarkupAnalysis = {
           zones: {
             supplyZone: htfVision.zones.supply,
