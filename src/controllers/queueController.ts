@@ -7,6 +7,7 @@ import {
 import { serializeAnalysis } from './analysisController';
 
 const ESTIMATED_SECONDS_PER_JOB = 12;
+const USER_VISIBLE_QUEUE_FAILURE_MESSAGE = 'Analysis failed';
 
 export const getQueueStatus = async (req: AuthRequest, res: Response) => {
   try {
@@ -35,7 +36,7 @@ export const getQueueStatus = async (req: AuthRequest, res: Response) => {
       position,
       estimatedWait,
       result: job.status === 'completed' && job.result ? serializeAnalysis(job.result) : null,
-      error: job.status === 'failed' ? (job.error || 'Analysis failed') : null,
+      error: job.status === 'failed' ? USER_VISIBLE_QUEUE_FAILURE_MESSAGE : null,
       createdAt: job.createdAt,
     });
   } catch (error) {
