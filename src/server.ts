@@ -10,6 +10,8 @@ import adminRoutes from './routes/adminRoutes';
 import ticketRoutes from './routes/ticketRoutes';
 import couponRoutes from './routes/couponRoutes';
 import referralRoutes from './routes/referralRoutes';
+import queueRoutes from './routes/queueRoutes';
+import { startQueueWorker } from './workers/queueWorker';
 
 export const app = express();
 
@@ -65,6 +67,7 @@ app.use('/api/tickets', ticketRoutes);
 app.use('/api/coupons', couponRoutes);
 app.use('/api/referrals', referralRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api', queueRoutes);
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
@@ -86,4 +89,5 @@ app.get('/api/debug/config', (_req, res) => {
 export const startServer = () =>
   app.listen(config.port, () => {
     console.log(`TradeVision AI API running on port ${config.port}`);
+    startQueueWorker();
   });

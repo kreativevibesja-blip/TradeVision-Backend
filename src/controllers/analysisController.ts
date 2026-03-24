@@ -13,6 +13,9 @@ import {
   listAnalysesForUser,
   releaseUserDailyUsageReservation,
   reserveUserDailyUsage,
+  createQueueJob,
+  countActiveQueueJobs,
+  countRecentQueueJobs,
 } from '../lib/supabase';
 import { runAnalysisPipeline } from '../services/analysis/runAnalysisPipeline';
 
@@ -123,44 +126,7 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
       return res.status(403).json({ error: 'Dual-chart analysis is a Pro feature' });
     }
 
-    if (user.subscription === 'PRO') {
-      const monthlyUsage = await countAnalysesForUserSince(req.user!.id, getMonthStartIso());
-      if (monthlyUsage >= config.limits.proMonthly) {
-        return res.status(429).json({
-          error: 'Monthly fair use limit reached',
-          limit: config.limits.proMonthly,
-          usage: monthlyUsage,
-        });
-      }
-    } else {
-      const usageReservation = await reserveUserDailyUsage(req.user!.id, config.limits.freeDaily);
-      if (!usageReservation.allowed) {
-        return res.status(429).json({
-          error: 'Daily analysis limit reached',
-          limit: config.limits.freeDaily,
-          usage: usageReservation.user.dailyUsage,
-        });
-      }
-
-      usageReserved = true;
-    }
-
-    const imageUrl = chartFile ? `/uploads/${chartFile.filename}` : 'inline-upload';
-    const analysisId = randomUUID();
-
-    await createAnalysis({
-      id: analysisId,
-      jobId: analysisId,
-      userId: req.user!.id,
-      imageUrl,
-      pair,
-      timeframe,
-      assetClass: inferAssetClass(pair),
-      status: 'PROCESSING',
-      progress: 5,
-      currentStage: 'Preparing analysis...',
-    });
-
+    // Read image data up-front (needed for both instant and queued paths)
     const primaryImage = chartFile
       ? {
           base64Image: (await fs.readFile(path.join(process.cwd(), config.upload.dir, chartFile.filename))).toString('base64'),
@@ -170,6 +136,9 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
           base64Image: inlineImage!.base64Image,
           mimeType: inlineImage!.mimeType,
         };
+
+    const imageUrl = chartFile ? `/uploads/${chartFile.filename}` : 'inline-upload';
+    const analysisId = randomUUID();
 
     // Build secondary image data if present
     const secondaryImage = chart2File
@@ -181,21 +150,96 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
         }
       : null;
 
-    const analysis = await runAnalysisPipeline({
-      analysisId,
+    // ── PRO PATH: process instantly (no queue) ──────────────────────
+    if (user.subscription === 'PRO') {
+      const monthlyUsage = await countAnalysesForUserSince(req.user!.id, getMonthStartIso());
+      if (monthlyUsage >= config.limits.proMonthly) {
+        return res.status(429).json({
+          error: 'Monthly fair use limit reached',
+          limit: config.limits.proMonthly,
+          usage: monthlyUsage,
+        });
+      }
+
+      await createAnalysis({
+        id: analysisId,
+        jobId: analysisId,
+        userId: req.user!.id,
+        imageUrl,
+        pair,
+        timeframe,
+        assetClass: inferAssetClass(pair),
+        status: 'PROCESSING',
+        progress: 5,
+        currentStage: 'Preparing analysis...',
+      });
+
+      const analysis = await runAnalysisPipeline({
+        analysisId,
+        userId: req.user!.id,
+        pair,
+        timeframe,
+        subscription: user.subscription,
+        currentPrice,
+        chartMinPrice,
+        chartMaxPrice,
+        imageUrl,
+        ...primaryImage,
+        secondaryChart: secondaryImage,
+      });
+
+      return res.json({ analysis: serializeAnalysis(analysis) });
+    }
+
+    // ── FREE PATH: queue the job ────────────────────────────────────
+
+    // Rate limit: max 1 active job at a time
+    const activeJobs = await countActiveQueueJobs(req.user!.id);
+    if (activeJobs >= 1) {
+      return res.status(429).json({ error: 'You already have a pending analysis. Please wait for it to complete.' });
+    }
+
+    // Rate limit: max 5 jobs per hour
+    const recentJobs = await countRecentQueueJobs(req.user!.id, 60);
+    if (recentJobs >= 5) {
+      return res.status(429).json({ error: 'Hourly analysis limit reached. Upgrade to Pro for unlimited instant analysis.' });
+    }
+
+    // Reserve daily usage
+    const usageReservation = await reserveUserDailyUsage(req.user!.id, config.limits.freeDaily);
+    if (!usageReservation.allowed) {
+      return res.status(429).json({
+        error: 'Daily analysis limit reached',
+        limit: config.limits.freeDaily,
+        usage: usageReservation.user.dailyUsage,
+      });
+    }
+    usageReserved = true;
+
+    // Create queue job
+    const job = await createQueueJob({
       userId: req.user!.id,
-      pair,
-      timeframe,
-      subscription: user.subscription,
-      currentPrice,
-      chartMinPrice,
-      chartMaxPrice,
-      imageUrl,
-      ...primaryImage,
-      secondaryChart: secondaryImage,
+      priority: 0,
+      inputData: {
+        analysisId,
+        pair,
+        timeframe,
+        currentPrice,
+        chartMinPrice,
+        chartMaxPrice,
+        imageUrl,
+        base64Image: primaryImage.base64Image,
+        mimeType: primaryImage.mimeType,
+        secondaryChart: secondaryImage,
+      },
     });
 
-    return res.json({ analysis: serializeAnalysis(analysis) });
+    return res.json({
+      queued: true,
+      jobId: job.id,
+      analysisId,
+      message: 'Your analysis has been queued. You can track its progress.',
+    });
   } catch (error) {
     if (usageReserved && req.user?.id) {
       await releaseUserDailyUsageReservation(req.user.id).catch((releaseError) => {

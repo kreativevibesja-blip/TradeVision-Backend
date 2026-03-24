@@ -25,6 +25,7 @@ const REFERRAL_CODE_TABLE = 'ReferralCode';
 const REFERRAL_TABLE = 'Referral';
 const COMMISSION_TABLE = 'Commission';
 const PAYOUT_TABLE = 'Payout';
+const QUEUE_TABLE = 'AnalysisQueue';
 
 export type SubscriptionTier = 'FREE' | 'PRO';
 export type UserRole = 'USER' | 'ADMIN';
@@ -1152,4 +1153,117 @@ export const getReferralRevenueGenerated = async () => {
   // Instead, sum the payment amounts of referred users. This is more accurate.
   // For now, return total commission amounts as a proxy (admin sees total commissions).
   return rows.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+};
+
+// ============================================================
+// Analysis Queue
+// ============================================================
+
+export type QueueJobStatus = 'queued' | 'processing' | 'completed' | 'failed';
+
+export interface QueueJobRecord {
+  id: string;
+  userId: string;
+  analysisId: string | null;
+  status: QueueJobStatus;
+  priority: number;
+  inputData: Record<string, unknown>;
+  result: Record<string, unknown> | null;
+  error: string | null;
+  retryCount: number;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+export const createQueueJob = (values: Pick<QueueJobRecord, 'userId' | 'priority' | 'inputData'> & { analysisId?: string }) =>
+  insertSingle<QueueJobRecord>('createQueueJob', QUEUE_TABLE, {
+    status: 'queued',
+    retryCount: 0,
+    ...values,
+  });
+
+export const getQueueJobById = (id: string) =>
+  maybeSingle<QueueJobRecord>('getQueueJobById', supabase.from(QUEUE_TABLE).select('*').eq('id', id).maybeSingle());
+
+export const getQueueJobForUser = (id: string, userId: string) =>
+  maybeSingle<QueueJobRecord>('getQueueJobForUser', supabase.from(QUEUE_TABLE).select('*').eq('id', id).eq('userId', userId).maybeSingle());
+
+export const updateQueueJob = (id: string, values: Partial<QueueJobRecord>) =>
+  updateSingle<QueueJobRecord>('updateQueueJob', QUEUE_TABLE, values, (query) => query.eq('id', id));
+
+/** Atomically claim the next queued job (highest priority first, then FIFO). */
+export const claimNextQueueJob = async (): Promise<QueueJobRecord | null> => {
+  // Select the next eligible job
+  const { data: candidates, error: fetchError } = await supabase
+    .from(QUEUE_TABLE)
+    .select('id')
+    .eq('status', 'queued')
+    .order('priority', { ascending: false })
+    .order('createdAt', { ascending: true })
+    .limit(1);
+
+  if (fetchError || !candidates?.length) {
+    return null;
+  }
+
+  // Optimistic claim: update only if still queued
+  const { data: claimed, error: claimError } = await supabase
+    .from(QUEUE_TABLE)
+    .update({ status: 'processing', startedAt: new Date().toISOString() })
+    .eq('id', candidates[0].id)
+    .eq('status', 'queued') // CAS guard
+    .select('*')
+    .maybeSingle();
+
+  if (claimError || !claimed) {
+    return null;
+  }
+
+  return claimed as QueueJobRecord;
+};
+
+/** Count jobs ahead of a specific job in the queue. */
+export const getQueuePosition = async (jobId: string): Promise<number> => {
+  const job = await getQueueJobById(jobId);
+  if (!job || job.status !== 'queued') {
+    return 0;
+  }
+
+  const { count, error } = await supabase
+    .from(QUEUE_TABLE)
+    .select('*', { count: 'exact', head: true })
+    .eq('status', 'queued')
+    .lt('createdAt', job.createdAt);
+
+  if (error) {
+    return 0;
+  }
+
+  return (count ?? 0) + 1;
+};
+
+/** Count active (queued/processing) jobs for a user. */
+export const countActiveQueueJobs = async (userId: string): Promise<number> => {
+  const { count, error } = await supabase
+    .from(QUEUE_TABLE)
+    .select('*', { count: 'exact', head: true })
+    .eq('userId', userId)
+    .in('status', ['queued', 'processing']);
+
+  if (error) return 0;
+  return count ?? 0;
+};
+
+/** Count jobs created by a user in the last N minutes. */
+export const countRecentQueueJobs = async (userId: string, minutes: number): Promise<number> => {
+  const since = new Date(Date.now() - minutes * 60_000).toISOString();
+  const { count, error } = await supabase
+    .from(QUEUE_TABLE)
+    .select('*', { count: 'exact', head: true })
+    .eq('userId', userId)
+    .gte('createdAt', since);
+
+  if (error) return 0;
+  return count ?? 0;
 };
