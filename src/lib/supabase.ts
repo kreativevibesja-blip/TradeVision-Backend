@@ -486,6 +486,14 @@ const formatModelName = (value: string) => {
     return 'Gemini 3 Flash Preview';
   }
 
+  if (normalized === 'gpt-5.1') {
+    return 'GPT-5.1';
+  }
+
+  if (normalized === 'gpt-5' || normalized === 'gpt-5-mini') {
+    return value.trim().toUpperCase().replace('GPT-', 'GPT-');
+  }
+
   return value;
 };
 

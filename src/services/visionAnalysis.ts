@@ -1,6 +1,6 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { config } from '../config';
-import type { SubscriptionTier } from '../lib/supabase';
+import { getSystemSetting, type SubscriptionTier } from '../lib/supabase';
 
 export interface SMCZone {
   min: number | null;
@@ -81,8 +81,10 @@ export interface VisionDualModelMetadata {
 
 export type VisionAnalysisMetadata = VisionModelMetadata | VisionDualModelMetadata;
 
+type VisionProvider = 'gemini' | 'openai';
+
 export interface VisionModelMetadata {
-  provider: 'gemini';
+  provider: VisionProvider;
   mode: 'single' | 'htf' | 'ltf';
   primaryModel: string;
   fallbackModel: string | null;
@@ -355,8 +357,65 @@ const normalizeGeminiModelName = (modelName: string) => {
   return withoutPrefix;
 };
 
+const normalizeOpenAiModelName = (modelName: string) => modelName.trim();
+
 const getGeminiModelForSubscription = (subscription: SubscriptionTier) =>
   normalizeGeminiModelName(subscription === 'PRO' ? config.gemini.proModel : config.gemini.freeModel);
+
+const getOpenAiModelForSubscription = (subscription: SubscriptionTier) =>
+  normalizeOpenAiModelName(subscription === 'PRO' ? config.openai.proModel : config.openai.freeModel);
+
+const parseBooleanSetting = (value: unknown, fallback: boolean) => {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true') {
+      return true;
+    }
+
+    if (normalized === 'false') {
+      return false;
+    }
+  }
+
+  return fallback;
+};
+
+interface VisionProviderCandidate {
+  provider: VisionProvider;
+  modelName: string;
+}
+
+const getProviderSettingKey = (provider: VisionProvider, subscription: SubscriptionTier) =>
+  `ai_model_${provider}_${subscription.toLowerCase()}_enabled`;
+
+const getVisionProviderCandidates = async (subscription: SubscriptionTier): Promise<VisionProviderCandidate[]> => {
+  const [geminiSetting, openAiSetting] = await Promise.all([
+    getSystemSetting(getProviderSettingKey('gemini', subscription)),
+    getSystemSetting(getProviderSettingKey('openai', subscription)),
+  ]);
+
+  const geminiEnabled = parseBooleanSetting(geminiSetting?.value, true);
+  const openAiEnabled = parseBooleanSetting(openAiSetting?.value, false);
+  const candidates: VisionProviderCandidate[] = [];
+
+  if (geminiEnabled && config.gemini.apiKey.trim()) {
+    candidates.push({ provider: 'gemini', modelName: getGeminiModelForSubscription(subscription) });
+  }
+
+  if (openAiEnabled && config.openai.apiKey.trim()) {
+    candidates.push({ provider: 'openai', modelName: getOpenAiModelForSubscription(subscription) });
+  }
+
+  if (!candidates.length) {
+    throw new Error(`No AI providers are enabled or configured for the ${subscription} plan`);
+  }
+
+  return candidates;
+};
 
 interface LTFPromptContext {
   higherTimeframe: string;
@@ -411,13 +470,74 @@ const generateVisionResponse = async (
   ]);
 };
 
+const generateOpenAiVisionResponse = async (
+  modelName: string,
+  prompt: string,
+  base64Image: string,
+  mimeType: string
+) => {
+  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${config.openai.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: modelName,
+      response_format: { type: 'json_object' },
+      max_completion_tokens: 4000,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: prompt },
+            {
+              type: 'image_url',
+              image_url: {
+                url: `data:${mimeType};base64,${base64Image}`,
+              },
+            },
+          ],
+        },
+      ],
+    }),
+  });
+
+  const payload = await response.json().catch(() => null) as any;
+
+  if (!response.ok) {
+    throw new Error(payload?.error?.message || `OpenAI request failed with status ${response.status}`);
+  }
+
+  const content = payload?.choices?.[0]?.message?.content;
+
+  if (typeof content === 'string' && content.trim()) {
+    return content;
+  }
+
+  if (Array.isArray(content)) {
+    const text = content
+      .filter((item) => item && typeof item === 'object' && item.type === 'text' && typeof item.text === 'string')
+      .map((item) => item.text)
+      .join('\n')
+      .trim();
+
+    if (text) {
+      return text;
+    }
+  }
+
+  throw new Error('OpenAI did not return a valid text completion');
+};
+
 const createVisionModelMetadata = (
   mode: VisionModelMetadata['mode'],
   primaryModel: string,
   fallbackModel: string | null,
-  actualModel: string
+  actualModel: string,
+  provider: VisionProvider
 ): VisionModelMetadata => ({
-  provider: 'gemini',
+  provider,
   mode,
   primaryModel,
   fallbackModel,
@@ -441,6 +561,51 @@ const toVisionAnalysisError = (error: unknown, metadata: VisionModelMetadata) =>
   return new VisionAnalysisError(error instanceof Error ? error.message : 'Vision analysis failed', metadata);
 };
 
+const executeVisionJsonGeneration = async (
+  mode: VisionModelMetadata['mode'],
+  subscription: SubscriptionTier,
+  prompt: string,
+  base64Image: string,
+  mimeType: string
+) => {
+  const candidates = await getVisionProviderCandidates(subscription);
+  const primaryModel = candidates[0].modelName;
+  const fallbackModel = candidates[1]?.modelName ?? null;
+  let lastError: unknown = null;
+  let lastCandidate = candidates[0];
+
+  for (let index = 0; index < candidates.length; index += 1) {
+    const candidate = candidates[index];
+
+    try {
+      const responseText = candidate.provider === 'gemini'
+        ? await generateVisionResponse(new GoogleGenerativeAI(config.gemini.apiKey), candidate.modelName, prompt, base64Image, mimeType).then((result) => result.response.text())
+        : await generateOpenAiVisionResponse(candidate.modelName, prompt, base64Image, mimeType);
+
+      return {
+        parsed: parseJsonObject(responseText),
+        metadata: createVisionModelMetadata(mode, primaryModel, fallbackModel, candidate.modelName, candidate.provider),
+      };
+    } catch (error) {
+      lastError = error;
+      lastCandidate = candidate;
+
+      const nextCandidate = candidates[index + 1];
+      if (nextCandidate) {
+        console.warn(
+          `[visionAnalysis] ${candidate.provider} model "${candidate.modelName}" failed for ${mode}. Falling back to ${nextCandidate.provider} "${nextCandidate.modelName}".`,
+          error instanceof Error ? error.message : error
+        );
+      }
+    }
+  }
+
+  throw toVisionAnalysisError(
+    lastError,
+    createVisionModelMetadata(mode, primaryModel, fallbackModel, lastCandidate.modelName, lastCandidate.provider)
+  );
+};
+
 export async function analyzeVisionStructure(
   base64Image: string,
   mimeType: string,
@@ -448,15 +613,6 @@ export async function analyzeVisionStructure(
   timeframe: string,
   subscription: SubscriptionTier
 ): Promise<VisionAnalysisResult> {
-  if (!config.gemini.apiKey) {
-    throw new Error('TradeVision AI is not configured correctly');
-  }
-
-  const genAI = new GoogleGenerativeAI(config.gemini.apiKey);
-  const primaryModel = getGeminiModelForSubscription(subscription);
-  const fallbackModel = normalizeGeminiModelName(config.gemini.freeModel);
-  const resolvedFallbackModel = primaryModel !== fallbackModel ? fallbackModel : null;
-
   const basePromptHeader = `You are an institutional-level Smart Money Concepts (SMC) trading analyst.
 
 Your job is to analyze the provided chart like a professional trader, not a signal generator.
@@ -732,23 +888,8 @@ Do not add commentary outside the JSON.`;
     ? `${basePromptHeader}\n\n========================================\nOUTPUT FORMAT (STRICT JSON ONLY)\n========================================\n${proJsonSchema}\n${proRules}\n${proGoal}`
     : `${basePromptHeader}\n\n========================================\nOUTPUT FORMAT (STRICT JSON ONLY)\n========================================\n${freeJsonSchema}\n${freeRules}\n${freeGoal}`;
 
-  let result;
-  let actualModel = primaryModel;
-
   try {
-    try {
-      result = await generateVisionResponse(genAI, primaryModel, prompt, base64Image, mimeType);
-    } catch (error) {
-      if (subscription === 'PRO' && resolvedFallbackModel && isUnsupportedModelError(error)) {
-        console.warn(`[visionAnalysis] Pro model "${primaryModel}" is unavailable. Falling back to "${resolvedFallbackModel}".`);
-        actualModel = resolvedFallbackModel;
-        result = await generateVisionResponse(genAI, resolvedFallbackModel, prompt, base64Image, mimeType);
-      } else {
-        throw error;
-      }
-    }
-
-    const parsed = parseJsonObject(result.response.text());
+    const { parsed, metadata } = await executeVisionJsonGeneration('single', subscription, prompt, base64Image, mimeType);
     const structure = parsed.structure as Record<string, unknown> | undefined;
     const liquidity = parsed.liquidity as Record<string, unknown> | undefined;
     const zones = parsed.zones as Record<string, unknown> | undefined;
@@ -757,7 +898,6 @@ Do not add commentary outside the JSON.`;
     const riskManagement = parsed.risk_management as Record<string, unknown> | undefined;
     const quality = parsed.quality as Record<string, unknown> | undefined;
     const finalVerdict = parsed.final_verdict as Record<string, unknown> | undefined;
-    const metadata = createVisionModelMetadata('single', primaryModel, resolvedFallbackModel, actualModel);
 
     return withVisionModelMetadata({
       trend: normalizeTrend(parsed.trend),
@@ -823,7 +963,7 @@ Do not add commentary outside the JSON.`;
       takeProfit3: normalizeNumeric(parsed.take_profit_3),
     }, metadata);
   } catch (error) {
-    throw toVisionAnalysisError(error, createVisionModelMetadata('single', primaryModel, resolvedFallbackModel, actualModel));
+    throw error;
   }
 }
 
@@ -838,15 +978,6 @@ export async function analyzeHTFVisionStructure(
   pair: string,
   timeframe: string
 ): Promise<VisionAnalysisResult> {
-  if (!config.gemini.apiKey) {
-    throw new Error('TradeVision AI is not configured correctly');
-  }
-
-  const genAI = new GoogleGenerativeAI(config.gemini.apiKey);
-  const primaryModel = normalizeGeminiModelName(config.gemini.proModel);
-  const fallbackModel = normalizeGeminiModelName(config.gemini.freeModel);
-  const resolvedFallbackModel = primaryModel !== fallbackModel ? fallbackModel : null;
-
   const prompt = `You are an advanced Smart Money Concepts (SMC) trading analyst.
 
 You are analyzing the HIGHER TIMEFRAME chart from a dual-chart setup.
@@ -949,22 +1080,8 @@ STRICT RULES
 
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 
-  let result;
-  let actualModel = primaryModel;
-
   try {
-    try {
-      result = await generateVisionResponse(genAI, primaryModel, prompt, base64Image, mimeType);
-    } catch (error) {
-      if (resolvedFallbackModel && isUnsupportedModelError(error)) {
-        actualModel = resolvedFallbackModel;
-        result = await generateVisionResponse(genAI, resolvedFallbackModel, prompt, base64Image, mimeType);
-      } else {
-        throw error;
-      }
-    }
-
-    const parsed = parseJsonObject(result.response.text());
+    const { parsed, metadata } = await executeVisionJsonGeneration('htf', 'PRO', prompt, base64Image, mimeType);
     const structure = parsed.structure as Record<string, unknown> | undefined;
     const liquidity = parsed.liquidity as Record<string, unknown> | undefined;
     const zones = parsed.zones as Record<string, unknown> | undefined;
@@ -973,7 +1090,6 @@ Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
     const riskManagement = parsed.risk_management as Record<string, unknown> | undefined;
     const quality = parsed.quality as Record<string, unknown> | undefined;
     const finalVerdict = parsed.final_verdict as Record<string, unknown> | undefined;
-    const metadata = createVisionModelMetadata('htf', primaryModel, resolvedFallbackModel, actualModel);
 
     return withVisionModelMetadata({
       trend: normalizeTrend(parsed.trend),
@@ -1021,7 +1137,7 @@ Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
       takeProfit3: null,
     }, metadata);
   } catch (error) {
-    throw toVisionAnalysisError(error, createVisionModelMetadata('htf', primaryModel, resolvedFallbackModel, actualModel));
+    throw error;
   }
 }
 
@@ -1037,15 +1153,6 @@ export async function analyzeLTFVisionStructure(
   timeframe: string,
   context: LTFPromptContext
 ): Promise<VisionAnalysisResult> {
-  if (!config.gemini.apiKey) {
-    throw new Error('TradeVision AI is not configured correctly');
-  }
-
-  const genAI = new GoogleGenerativeAI(config.gemini.apiKey);
-  const primaryModel = normalizeGeminiModelName(config.gemini.proModel);
-  const fallbackModel = normalizeGeminiModelName(config.gemini.freeModel);
-  const resolvedFallbackModel = primaryModel !== fallbackModel ? fallbackModel : null;
-
   const prompt = `You are an advanced Smart Money Concepts (SMC) trading analyst.
 
 You are given the LOWER TIMEFRAME chart from a dual-chart setup.
@@ -1166,22 +1273,8 @@ STRICT RULES
 
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 
-  let result;
-  let actualModel = primaryModel;
-
   try {
-    try {
-      result = await generateVisionResponse(genAI, primaryModel, prompt, base64Image, mimeType);
-    } catch (error) {
-      if (resolvedFallbackModel && isUnsupportedModelError(error)) {
-        actualModel = resolvedFallbackModel;
-        result = await generateVisionResponse(genAI, resolvedFallbackModel, prompt, base64Image, mimeType);
-      } else {
-        throw error;
-      }
-    }
-
-    const parsed = parseJsonObject(result.response.text());
+    const { parsed, metadata } = await executeVisionJsonGeneration('ltf', 'PRO', prompt, base64Image, mimeType);
     const structure = parsed.structure as Record<string, unknown> | undefined;
     const liquidity = parsed.liquidity as Record<string, unknown> | undefined;
     const zones = parsed.zones as Record<string, unknown> | undefined;
@@ -1190,7 +1283,6 @@ Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
     const riskManagement = parsed.risk_management as Record<string, unknown> | undefined;
     const quality = parsed.quality as Record<string, unknown> | undefined;
     const finalVerdict = parsed.final_verdict as Record<string, unknown> | undefined;
-    const metadata = createVisionModelMetadata('ltf', primaryModel, resolvedFallbackModel, actualModel);
 
     return withVisionModelMetadata({
       trend: normalizeTrend(parsed.trend),
@@ -1238,6 +1330,6 @@ Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
       takeProfit3: normalizeNumeric(parsed.take_profit_3),
     }, metadata);
   } catch (error) {
-    throw toVisionAnalysisError(error, createVisionModelMetadata('ltf', primaryModel, resolvedFallbackModel, actualModel));
+    throw error;
   }
 }
