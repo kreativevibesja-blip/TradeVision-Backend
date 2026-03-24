@@ -81,6 +81,14 @@ const formatMarkupPrice = (value: number) => {
 };
 
 const inferChartBounds = (analysis: MarkupAnalysis, input: ChartBoundsInput): ChartBounds | null => {
+  if (isFiniteNumber(input.minPrice) && isFiniteNumber(input.maxPrice) && input.maxPrice > input.minPrice) {
+    return {
+      minPrice: input.minPrice,
+      maxPrice: input.maxPrice,
+      source: 'input',
+    };
+  }
+
   if (
     analysis.visiblePriceRange &&
     isFiniteNumber(analysis.visiblePriceRange.min) &&
@@ -91,14 +99,6 @@ const inferChartBounds = (analysis: MarkupAnalysis, input: ChartBoundsInput): Ch
       minPrice: analysis.visiblePriceRange.min,
       maxPrice: analysis.visiblePriceRange.max,
       source: 'inferred',
-    };
-  }
-
-  if (isFiniteNumber(input.minPrice) && isFiniteNumber(input.maxPrice) && input.maxPrice > input.minPrice) {
-    return {
-      minPrice: input.minPrice,
-      maxPrice: input.maxPrice,
-      source: 'input',
     };
   }
 
@@ -123,7 +123,7 @@ const inferChartBounds = (analysis: MarkupAnalysis, input: ChartBoundsInput): Ch
     return null;
   }
 
-  const padding = range * 0.25;
+  const padding = range * 0.12;
 
   return {
     minPrice: minPrice - padding,
@@ -217,17 +217,15 @@ const drawZone = (context: DrawContext, zone: NumericZone | null | undefined, co
   }
 
   const tagY = clamp(top - 26, context.plotArea.top + 2, context.plotArea.bottom - 36);
-  const priceRange = `${formatMarkupPrice(zone.min)} - ${formatMarkupPrice(zone.max)}`;
   const tagX = clamp(context.plotArea.left + 10, 8, context.plotArea.right - 180);
   const anchorX = context.plotArea.left + 6;
   const anchorY = clamp(center, context.plotArea.top + 4, context.plotArea.bottom - 4);
-  const reason = zone.reason || undefined;
 
   return `
     <rect x="${context.plotArea.left}" y="${top}" width="${context.plotArea.width}" height="${height}" fill="${color}18" stroke="${color}" stroke-width="1" rx="2" />
     <line x1="${anchorX}" y1="${anchorY}" x2="${tagX}" y2="${tagY + 14}" stroke="${color}" stroke-width="1" stroke-dasharray="4 3" opacity="0.6" />
     <circle cx="${anchorX}" cy="${anchorY}" r="2.5" fill="${color}" />
-    ${drawTag(tagX, tagY, color, label, reason ? `${priceRange} | ${reason}` : priceRange)}
+    ${drawTag(tagX, tagY, color, label)}
   `;
 };
 
@@ -356,8 +354,19 @@ const drawPriceLevel = (context: DrawContext, price: number | null | undefined, 
   const tagY = clamp(safeY - 14, context.plotArea.top + 4, context.plotArea.bottom - 26);
   return `
     <line x1="${context.plotArea.left}" y1="${safeY}" x2="${context.plotArea.right}" y2="${safeY}" stroke="${color}" stroke-width="1.5" stroke-dasharray="6 4" opacity="0.9" />
-    ${drawTag(tagX, tagY, color, label, formatMarkupPrice(price))}
+    ${drawTag(tagX, tagY, color, label)}
   `;
+};
+
+const resolveSafeExitLevels = (analysis: MarkupAnalysis & { takeProfit1?: number | null; takeProfit2?: number | null; takeProfit3?: number | null }) => {
+  const candidates = [analysis.takeProfit1, analysis.takeProfit2, analysis.takeProfit3].filter(isFiniteNumber);
+  const uniqueLevels = candidates.filter((level, index) => candidates.findIndex((candidate) => Math.abs(candidate - level) < 1e-8) === index);
+
+  return uniqueLevels.slice(0, 2).map((price, index) => ({
+    price,
+    label: `Safe Exit ${index + 1}`,
+    color: index === 0 ? '#10b981' : '#34d399',
+  }));
 };
 
 const buildHTFOverlay = (context: DrawContext, analysis: MarkupAnalysis) => {
@@ -422,11 +431,13 @@ const buildHTFOverlay = (context: DrawContext, analysis: MarkupAnalysis) => {
 };
 
 const buildLTFOverlay = (context: DrawContext, analysis: MarkupAnalysis & { stopLoss?: number | null; takeProfit1?: number | null; takeProfit2?: number | null; takeProfit3?: number | null }) => {
-  // LTF: Entry zone + SL + TP1/2/3 + internal zones + liquidity sweep
+  const safeExits = resolveSafeExitLevels(analysis);
+
+  // LTF: Entry zone + SL + safe exits + internal zones + liquidity sweep
   const ltfBadges = [
     (analysis.entryPlan?.entryZone ?? analysis.entryZone) ? { label: 'Entry', color: '#3b82f6' } : null,
     isFiniteNumber(analysis.stopLoss) ? { label: 'SL', color: '#ef4444' } : null,
-    isFiniteNumber(analysis.takeProfit1) ? { label: 'TP', color: '#10b981' } : null,
+    safeExits.length ? { label: 'Exits', color: '#10b981' } : null,
     analysis.zones?.supplyZone ? { label: 'Int. Supply', color: '#f97316' } : null,
     analysis.zones?.demandZone ? { label: 'Int. Demand', color: '#06b6d4' } : null,
     analysis.liquidity?.type && analysis.liquidity.type !== 'none'
@@ -457,9 +468,7 @@ const buildLTFOverlay = (context: DrawContext, analysis: MarkupAnalysis & { stop
     drawZone(context, analysis.zones?.demandZone, '#06b6d4', 'Internal demand'),
     drawZone(context, analysis.entryPlan?.entryZone ?? analysis.entryZone, '#3b82f6', 'Entry zone'),
     drawPriceLevel(context, analysis.stopLoss, '#ef4444', 'Stop Loss'),
-    drawPriceLevel(context, analysis.takeProfit1, '#10b981', 'TP1'),
-    drawPriceLevel(context, analysis.takeProfit2, '#34d399', 'TP2'),
-    drawPriceLevel(context, analysis.takeProfit3, '#6ee7b7', 'TP3'),
+    ...safeExits.map((exit) => drawPriceLevel(context, exit.price, exit.color, exit.label)),
     drawLiquidityMarker(context, analysis),
   ].filter(Boolean);
 
