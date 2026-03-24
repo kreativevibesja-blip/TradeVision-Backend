@@ -1,5 +1,6 @@
 import {
   claimNextQueueJob,
+  getQueueJobById,
   updateQueueJob,
   createAnalysis,
   updateAnalysis,
@@ -66,6 +67,18 @@ async function processJob(job: QueueJobRecord) {
       secondaryChart: input.secondaryChart ?? null,
     });
 
+    const latestJob = await getQueueJobById(job.id);
+    if (latestJob?.status === 'cancelled') {
+      await updateAnalysis(analysisId, {
+        status: 'FAILED',
+        progress: 100,
+        currentStage: 'Analysis cancelled',
+        errorMessage: 'Analysis cancelled',
+      }).catch(() => {});
+      console.log(`[queue-worker] job ${job.id} was cancelled before completion was persisted`);
+      return;
+    }
+
     await updateQueueJob(job.id, {
       status: 'completed',
       result: serializeAnalysis(analysis) as any,
@@ -76,6 +89,20 @@ async function processJob(job: QueueJobRecord) {
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Job processing failed';
     console.error(`[queue-worker] job ${job.id} failed:`, message);
+
+    const latestJob = await getQueueJobById(job.id).catch(() => null);
+    if (latestJob?.status === 'cancelled') {
+      const analysisId = (job.inputData as any).analysisId;
+      if (analysisId) {
+        await updateAnalysis(analysisId, {
+          status: 'FAILED',
+          progress: 100,
+          currentStage: 'Analysis cancelled',
+          errorMessage: 'Analysis cancelled',
+        }).catch(() => {});
+      }
+      return;
+    }
 
     if (job.retryCount < MAX_RETRIES) {
       // Re-queue for retry

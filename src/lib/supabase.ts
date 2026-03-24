@@ -1167,7 +1167,7 @@ export const getReferralRevenueGenerated = async () => {
 // Analysis Queue
 // ============================================================
 
-export type QueueJobStatus = 'queued' | 'processing' | 'completed' | 'failed';
+export type QueueJobStatus = 'queued' | 'processing' | 'completed' | 'failed' | 'cancelled';
 
 export interface QueueJobRecord {
   id: string;
@@ -1196,6 +1196,27 @@ export const getQueueJobById = (id: string) =>
 
 export const getQueueJobForUser = (id: string, userId: string) =>
   maybeSingle<QueueJobRecord>('getQueueJobForUser', supabase.from(QUEUE_TABLE).select('*').eq('id', id).eq('userId', userId).maybeSingle());
+
+export const cancelQueueJobForUser = async (id: string, userId: string): Promise<QueueJobRecord | null> => {
+  const { data, error } = await supabase
+    .from(QUEUE_TABLE)
+    .update({
+      status: 'cancelled',
+      error: null,
+      completedAt: new Date().toISOString(),
+    })
+    .eq('id', id)
+    .eq('userId', userId)
+    .in('status', ['queued', 'processing'])
+    .select('*')
+    .maybeSingle();
+
+  if (error) {
+    logDbError('cancelQueueJobForUser', error);
+  }
+
+  return (data as QueueJobRecord | null) ?? null;
+};
 
 export const updateQueueJob = (id: string, values: Partial<QueueJobRecord>) =>
   updateSingle<QueueJobRecord>('updateQueueJob', QUEUE_TABLE, values, (query) => query.eq('id', id));
