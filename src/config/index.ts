@@ -64,6 +64,13 @@ export const config = {
     freeModel: process.env.OPENAI_FREE_MODEL || 'gpt-5.1',
     proModel: process.env.OPENAI_PRO_MODEL || 'gpt-5.1',
   },
+
+  marketData: {
+    provider: process.env.MARKET_DATA_PROVIDER || 'twelvedata',
+    twelveDataApiKey: process.env.TWELVEDATA_API_KEY || '',
+    twelveDataBaseUrl: process.env.TWELVEDATA_BASE_URL || 'https://api.twelvedata.com',
+    candleLimit: parseInt(process.env.MARKET_DATA_CANDLE_LIMIT || '150', 10),
+  },
   
   paypal: {
     clientId: process.env.PAYPAL_CLIENT_ID || '',

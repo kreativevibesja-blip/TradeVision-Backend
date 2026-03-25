@@ -18,6 +18,8 @@ import {
   countRecentQueueJobs,
 } from '../lib/supabase';
 import { runAnalysisPipeline } from '../services/analysis/runAnalysisPipeline';
+import { fetchMarketDataForLiveChart, isSupportedLiveChartTimeframe, resolveLiveChartSymbol } from '../services/marketData';
+import { runLiveChartAnalysisPipeline } from '../services/analysis/runLiveChartAnalysisPipeline';
 
 const parseCurrentPrice = (value: unknown) => {
   if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
@@ -91,13 +93,66 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
   let usageReserved = false;
 
   try {
-    const { pair, timeframe } = req.body;
+    const liveChartSource = req.body.source === 'tradingview-live';
+    const requestedSymbol = typeof req.body.symbol === 'string' ? req.body.symbol.trim() : '';
+    const pair = liveChartSource ? requestedSymbol : req.body.pair;
+    const timeframe = typeof req.body.timeframe === 'string' ? req.body.timeframe.trim() : '';
     const currentPrice = parseCurrentPrice(req.body.currentPrice);
     const chartMinPrice = parseOptionalPrice(req.body.chartMinPrice);
     const chartMaxPrice = parseOptionalPrice(req.body.chartMaxPrice);
 
     if (!pair || !timeframe) {
       return res.status(400).json({ error: 'Pair and timeframe are required' });
+    }
+
+    const user = await getUserById(req.user!.id);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (liveChartSource) {
+      if (user.subscription !== 'PRO') {
+        return res.status(403).json({ error: 'Live TradingView analysis is a Pro feature' });
+      }
+
+      if (!resolveLiveChartSymbol(pair) || !isSupportedLiveChartTimeframe(timeframe)) {
+        return res.status(400).json({ error: 'Unsupported symbol or timeframe for live chart analysis' });
+      }
+
+      const monthlyUsage = await countAnalysesForUserSince(req.user!.id, getMonthStartIso());
+      if (monthlyUsage >= config.limits.proMonthly) {
+        return res.status(429).json({
+          error: 'Monthly fair use limit reached',
+          limit: config.limits.proMonthly,
+          usage: monthlyUsage,
+        });
+      }
+
+      const analysisId = randomUUID();
+      const marketData = await fetchMarketDataForLiveChart(pair, timeframe);
+
+      await createAnalysis({
+        id: analysisId,
+        jobId: analysisId,
+        userId: req.user!.id,
+        imageUrl: '',
+        pair: marketData.symbol,
+        timeframe,
+        assetClass: inferAssetClass(marketData.symbol),
+        status: 'PROCESSING',
+        progress: 5,
+        currentStage: 'Preparing live chart analysis...',
+      });
+
+      const analysis = await runLiveChartAnalysisPipeline({
+        analysisId,
+        pair: marketData.symbol,
+        timeframe,
+        currentPrice: marketData.currentPrice,
+        candles: marketData.candles,
+      });
+
+      return res.json({ analysis: serializeAnalysis(analysis) });
     }
 
     if (currentPrice === null) {
@@ -116,11 +171,6 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
 
     // Dual-chart is PRO only
     const timeframe2 = chart2File ? (req.body.timeframe2 || timeframe) : null;
-
-    const user = await getUserById(req.user!.id);
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
 
     if (chart2File && user.subscription !== 'PRO') {
       return res.status(403).json({ error: 'Dual-chart analysis is a Pro feature' });
