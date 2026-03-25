@@ -4,6 +4,9 @@ import type { VisionAnalysisResult } from './visionAnalysis';
 
 export interface TradeSignalResult {
   trend: VisionAnalysisResult['trend'];
+  marketCondition?: VisionAnalysisResult['marketCondition'];
+  primaryStrategy?: VisionAnalysisResult['primaryStrategy'];
+  confirmations?: VisionAnalysisResult['confirmations'];
   structure: {
     state: VisionAnalysisResult['structure']['state'];
     bos: VisionAnalysisResult['structure']['bos'];
@@ -122,6 +125,9 @@ export function generateFinalSignal(aiData: VisionAnalysisResult, currentPrice: 
 
   return {
     trend: aiData.trend,
+    marketCondition: aiData.marketCondition,
+    primaryStrategy: aiData.primaryStrategy ?? null,
+    confirmations: aiData.confirmations ?? [],
     structure: aiData.structure,
     liquidity: {
       type: aiData.liquidity.type,

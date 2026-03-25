@@ -90,6 +90,9 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
 
       // Merge: HTF provides structure/zones/trend/pricePosition, LTF provides entry/SL/TP/liquidity
       vision = {
+        marketCondition: htfVision.marketCondition ?? ltfVision.marketCondition,
+        primaryStrategy: htfVision.primaryStrategy ?? ltfVision.primaryStrategy ?? null,
+        confirmations: ltfVision.confirmations ?? [],
         trend: htfVision.trend,
         structure: htfVision.structure,
         liquidity: ltfVision.liquidity,
@@ -230,7 +233,7 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
       analysisText: enrichedSignal.reasoning,
       rawResponse: enrichedSignal,
       structure: enrichedSignal.structure,
-      strategy: `${enrichedSignal.trend.toUpperCase()} ${enrichedSignal.entryLogic.type.toUpperCase()} SMC setup`,
+      strategy: enrichedSignal.primaryStrategy ?? `${enrichedSignal.trend.toUpperCase()} ${enrichedSignal.entryLogic.type.toUpperCase()} SMC setup`,
       waitConditions: enrichedSignal.message,
       errorMessage: null,
     });

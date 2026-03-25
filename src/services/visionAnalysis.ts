@@ -55,8 +55,14 @@ export interface SMCFinalVerdict {
   message: string;
 }
 
+export type MarketCondition = 'trending' | 'ranging' | 'breakout' | 'consolidation';
+export type PrimaryStrategy = 'SMC' | 'Supply & Demand' | 'S&R' | 'Pattern';
+
 export interface VisionAnalysisResult {
   trend: 'bullish' | 'bearish' | 'ranging';
+  marketCondition?: MarketCondition;
+  primaryStrategy?: PrimaryStrategy | null;
+  confirmations?: string[];
   structure: SMCStructure;
   liquidity: SMCLiquidity;
   zones: SMCZones;
@@ -265,6 +271,53 @@ const normalizeFinalAction = (value: unknown): SMCFinalVerdict['action'] => {
   }
 
   return 'wait';
+};
+
+const normalizeMarketCondition = (value: unknown): MarketCondition => {
+  if (typeof value !== 'string') {
+    return 'ranging';
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'trending' || normalized === 'ranging' || normalized === 'breakout' || normalized === 'consolidation') {
+    return normalized;
+  }
+
+  return 'ranging';
+};
+
+const normalizePrimaryStrategy = (value: unknown): PrimaryStrategy | null => {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'smc') {
+    return 'SMC';
+  }
+  if (normalized === 'supply & demand' || normalized === 'supply and demand' || normalized === 'supply/demand') {
+    return 'Supply & Demand';
+  }
+  if (normalized === 's&r' || normalized === 'support & resistance' || normalized === 'support and resistance') {
+    return 'S&R';
+  }
+  if (normalized === 'pattern' || normalized === 'chart pattern') {
+    return 'Pattern';
+  }
+
+  return null;
+};
+
+const normalizeConfirmations = (value: unknown): string[] => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter((item): item is string => typeof item === 'string')
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .slice(0, 3);
 };
 
 const normalizeNumeric = (value: unknown): number | null => {
@@ -613,83 +666,6 @@ export async function analyzeVisionStructure(
   timeframe: string,
   subscription: SubscriptionTier
 ): Promise<VisionAnalysisResult> {
-  const basePromptHeader = `You are an institutional-level Smart Money Concepts (SMC) trading analyst.
-
-Your job is to analyze the provided chart like a professional trader, not a signal generator.
-
-You MUST think in terms of:
-- Market structure
-- Liquidity
-- Order flow
-- Premium vs Discount
-- Confirmation-based entries
-
-${advancedSmcGuidance}
-
-Trading pair/index: ${pair}
-Timeframe: ${timeframe}`;
-
-  const proJsonSchema = `
-{
-  "trend": "bullish | bearish | ranging",
-  "structure": {
-    "state": "higher highs | lower lows | transition",
-    "bos": "bullish | bearish | none",
-    "choch": "bullish | bearish | none"
-  },
-  "liquidity": {
-    "type": "buy-side | sell-side | none",
-    "description": "Where liquidity was taken and how price reacted"
-  },
-  "zones": {
-    "supply": {
-      "min": number,
-      "max": number,
-      "reason": "order block | imbalance | previous structure"
-    },
-    "demand": {
-      "min": number,
-      "max": number,
-      "reason": "order block | imbalance | previous structure"
-    }
-  },
-  "price_position": {
-    "location": "premium | discount | equilibrium",
-    "explanation": "Explain relative to the most recent impulse leg"
-  },
-  "entry_plan": {
-    "bias": "buy | sell | none",
-    "entry_type": "instant | confirmation | none",
-    "entry_zone": {
-      "min": number | null,
-      "max": number | null
-    },
-    "confirmation": "CHoCH | BOS | rejection | none",
-    "reason": "Why this entry makes sense based on structure"
-  },
-  "risk_management": {
-    "invalidation_level": number,
-    "invalidation_reason": "Explain what breaks the setup"
-  },
-  "quality": {
-    "setup_rating": "A | B | C | avoid",
-    "confidence": 1-100
-  },
-  "final_verdict": {
-    "action": "enter | wait | avoid",
-    "message": "Clear instruction for the user"
-  },
-  "stop_loss": number | null,
-  "take_profit_1": number | null,
-  "take_profit_2": number | null,
-  "take_profit_3": number | null,
-  "reasoning": "Concise SMC explanation in 2-4 short sentences",
-  "visible_price_range": {
-    "min": "lowest price number visible on the right-side Y-axis",
-    "max": "highest price number visible on the right-side Y-axis"
-  }
-}`;
-
   const freeJsonSchema = `
 {
   "trend": "bullish | bearish | ranging",
@@ -747,129 +723,21 @@ Timeframe: ${timeframe}`;
   }
 }`;
 
-  const proRules = `
-========================================
-STRICT RULES (DO NOT BREAK)
-========================================
-
-1. DO NOT force trades
-   - If no clear setup -> action MUST be "wait" or "avoid"
-
-2. ALWAYS explain liquidity
-   - Identify where stops were taken (above highs / below lows)
-  - Mention equal highs/equal lows when they are the obvious liquidity pool
-  - Distinguish inducement from the main liquidity target when visible
-
-3. ALWAYS justify zones
-   - You MUST explain WHY supply/demand exists
-   - No guessing levels
-
-4. ALWAYS include invalidation
-   - Define the exact price level where the setup fails
-
-5. ENTRY DISCIPLINE
-   - If price is NOT in a key zone -> entry_type MUST be "none"
-   - Prefer confirmation entries over instant entries
-
-6. PREMIUM vs DISCOUNT LOGIC
-   - In bearish markets -> prefer selling in premium
-   - In bullish markets -> prefer buying in discount
-
-7. NO MID-RANGE ENTRIES
-   - If price is in equilibrium -> action MUST be "wait"
-
-8. STRUCTURE FIRST
-   - If structure is unclear -> setup_rating MUST be "avoid"
-  - Separate major external structure from minor internal structure
-
-9. REALISM OVER COMPLETION
-   - It is better to say "no trade" than to give a bad trade
-
-10. PRECISE ZONE BOUNDARIES
-   - Read the Y-axis (right-side price scale) carefully
-   - Zone min/max must be TIGHT — only the order block body or key candle range
-   - Do NOT create wide supply/demand zones spanning large price ranges
-   - A typical zone should span 0.5-2% of the visible price range
-
-11. VISIBLE PRICE RANGE
-   - Read the lowest and highest price labels on the right Y-axis of the chart
-   - Return these exact numbers as visible_price_range min and max
-
-12. STOP LOSS AND TAKE PROFIT RULES
-   - If action is "enter" (immediate trade): provide DEFINITIVE stop_loss, take_profit_1, take_profit_2, and take_profit_3 with exact price levels
-   - If action is "wait": provide POTENTIAL/PROJECTED stop_loss and take_profit levels based on where you expect the setup to complete
-   - If action is "avoid": stop_loss and take_profits can be null
-   - stop_loss MUST be at a logical structural level (below demand for buys, above supply for sells)
-   - take_profit_1: conservative target (nearest structure level)
-   - take_profit_2: moderate target (next key level)
-   - take_profit_3: aggressive target (major structure or liquidity pool)
-  - Risk:Reward ratio must be at least 1:2 for take_profit_1
-
-13. ADVANCED SMC PRIORITY
-  - Prefer the cleanest fresh structure-aligned order block, breaker block, mitigation block, or fair value gap
-  - Premium/discount must be based on the active dealing range controlling price`;
-
   const freeRules = `
 ========================================
 STRICT RULES (DO NOT BREAK)
 ========================================
 
-1. DO NOT force trades
-   - If no clear setup -> action MUST be "wait" or "avoid"
-
-2. Identify general liquidity conditions briefly
-  - Mention equal highs/equal lows when they are clearly important
-  - Distinguish inducement from the main liquidity target when visible
-
-3. Justify supply/demand zones
-
-4. Include invalidation level
-
-5. ENTRY DISCIPLINE
-   - If price is NOT in a key zone -> entry_type MUST be "none"
-
-6. STRUCTURE FIRST
-   - If structure is unclear -> setup_rating MUST be "avoid"
-  - Separate broader structure from smaller internal structure when possible
-
-7. REALISM OVER COMPLETION
-   - It is better to say "no trade" than to give a bad trade
-
-8. PRECISE ZONE BOUNDARIES
-   - Zone min/max must be TIGHT — only the order block body or key candle range
-
-9. VISIBLE PRICE RANGE
-   - Read the lowest and highest price labels on the right Y-axis of the chart
-  - Return these exact numbers as visible_price_range min and max
-
-10. ADVANCED SMC PRIORITY
-  - Prefer the clearest structure-aligned institutional zone and use the active dealing range for premium/discount`;
-
-  const proGoal = `
-========================================
-GOAL
-========================================
-
-Your output must feel like:
-- a professional trader's breakdown
-- not a random AI opinion
-- not a generic explanation
-
-It must be:
-- precise
-- disciplined
-- realistic
-- trustworthy
-
-Keep reasoning tight:
-- maximum 2-4 short sentences
-- roughly half the length of a normal full breakdown
-- mention only the most important structure, liquidity, zone, and verdict points
-- avoid repetition and filler
-
-Return STRICT JSON ONLY.
-Do not use markdown.
-Do not add commentary outside the JSON.`;
+1. DO NOT force trades.
+2. If no clear setup exists, action MUST be "wait" or "avoid".
+3. Mention equal highs or equal lows when clearly relevant.
+4. Distinguish inducement from the main liquidity target when visible.
+5. Justify supply and demand zones.
+6. Include an invalidation level.
+7. If price is not in a key zone, entry_type MUST be "none".
+8. If structure is unclear, setup_rating MUST be "avoid".
+9. Zone min and max must be tight.
+10. Read the visible price range directly from the right-side Y-axis.`;
 
   const freeGoal = `
 ========================================
@@ -877,16 +745,157 @@ GOAL
 ========================================
 
 Provide a useful overview of the chart's market structure and key levels.
-Keep your reasoning concise — 2-3 sentences max.
-Do NOT include stop loss or take profit levels.
+Keep reasoning concise in 2-3 short sentences.
+Do not include stop loss or take profit levels.
 
 Return STRICT JSON ONLY.
 Do not use markdown.
 Do not add commentary outside the JSON.`;
 
+  const freePromptHeader = `You are an institutional-level Smart Money Concepts (SMC) trading analyst.
+
+Your job is to analyze the provided chart like a professional trader, not a signal generator.
+
+You MUST think in terms of:
+- Market structure
+- Liquidity
+- Order flow
+- Premium vs Discount
+- Confirmation-based entries
+
+${advancedSmcGuidance}
+
+Trading pair/index: ${pair}
+Timeframe: ${timeframe}`;
+
+  const proPrompt = `You are an elite multi-strategy trading analyst.
+
+You are given ONE chart image for timeframe ${timeframe} on ${pair}.
+
+If only one chart is uploaded, analyze ONLY the uploaded timeframe and choose the cleanest single strategy setup from that timeframe.
+
+${advancedSmcGuidance}
+
+================================
+STEP 1 - MARKET ANALYSIS
+================================
+
+Using ONLY the uploaded chart (${timeframe}):
+- Identify market condition: trending, ranging, breakout, or consolidation
+- Determine directional bias: ONE ONLY, bullish or bearish, when structure supports it
+- Identify key areas: supply and demand zones, premium/discount zones, and major liquidity pools
+
+================================
+STEP 2 - PRIMARY STRATEGY SELECTION
+================================
+
+Select ONE primary strategy based on the chart condition:
+- SMC
+- Supply & Demand
+- S&R
+- Pattern
+
+Do NOT mix strategies.
+
+================================
+STEP 3 - ENTRY ANALYSIS
+================================
+
+- Entry must come from a valid POI
+- A valid trade must include at least 2 confirmations
+- Confirmations can include liquidity sweep, CHoCH, BOS, FVG, rejection, or clear pattern confirmation
+
+================================
+STEP 4 - EXECUTION RULES
+================================
+
+- Prefer LIMIT entries over market entries
+- Minimum risk-to-reward = 1:2 for take_profit_1
+- Do NOT force trades
+
+========================================
+OUTPUT FORMAT (STRICT JSON ONLY)
+========================================
+{
+  "market_condition": "trending | ranging | breakout | consolidation",
+  "primary_strategy": "SMC | Supply & Demand | S&R | Pattern",
+  "confirmations": ["max 3 short bullet points"],
+  "trend": "bullish | bearish | ranging",
+  "structure": {
+    "state": "higher highs | lower lows | transition",
+    "bos": "bullish | bearish | none",
+    "choch": "bullish | bearish | none"
+  },
+  "liquidity": {
+    "type": "buy-side | sell-side | none",
+    "description": "Where liquidity was taken and how price reacted"
+  },
+  "zones": {
+    "supply": {
+      "min": number,
+      "max": number,
+      "reason": "order block | imbalance | previous structure"
+    },
+    "demand": {
+      "min": number,
+      "max": number,
+      "reason": "order block | imbalance | previous structure"
+    }
+  },
+  "price_position": {
+    "location": "premium | discount | equilibrium",
+    "explanation": "Explain relative to the active impulse/dealing range"
+  },
+  "entry_plan": {
+    "bias": "buy | sell | none",
+    "entry_type": "instant | confirmation | none",
+    "entry_zone": {
+      "min": number | null,
+      "max": number | null
+    },
+    "confirmation": "CHoCH | BOS | rejection | none",
+    "reason": "Explain the POI, the confirmations, and why the trade is valid"
+  },
+  "risk_management": {
+    "invalidation_level": number | null,
+    "invalidation_reason": "Explain what breaks the setup"
+  },
+  "quality": {
+    "setup_rating": "A | B | C | avoid",
+    "confidence": 1-100
+  },
+  "final_verdict": {
+    "action": "enter | wait | avoid",
+    "message": "Clear instruction for the user"
+  },
+  "stop_loss": number | null,
+  "take_profit_1": number | null,
+  "take_profit_2": number | null,
+  "take_profit_3": number | null,
+  "reasoning": "Concise explanation in 2-4 short sentences",
+  "visible_price_range": {
+    "min": "lowest price number visible on the right-side Y-axis",
+    "max": "highest price number visible on the right-side Y-axis"
+  }
+}
+
+================================
+STRICT RULES
+================================
+
+- Do NOT use multiple primary strategies
+- Do NOT give trades without at least 2 confirmations
+- Do NOT force trades
+- If no strong setup exists, return a no-trade outcome using wait or avoid
+- Be concise and structured
+- Read the Y-axis carefully for visible_price_range
+- Supply and demand zones must be tight and justified
+
+Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
+
   const prompt = subscription === 'PRO'
-    ? `${basePromptHeader}\n\n========================================\nOUTPUT FORMAT (STRICT JSON ONLY)\n========================================\n${proJsonSchema}\n${proRules}\n${proGoal}`
-    : `${basePromptHeader}\n\n========================================\nOUTPUT FORMAT (STRICT JSON ONLY)\n========================================\n${freeJsonSchema}\n${freeRules}\n${freeGoal}`;
+    ? proPrompt
+    : `${freePromptHeader}\n\n========================================\nOUTPUT FORMAT (STRICT JSON ONLY)\n========================================\n${freeJsonSchema}\n${freeRules}\n${freeGoal}`;
 
   try {
     const { parsed, metadata } = await executeVisionJsonGeneration('single', subscription, prompt, base64Image, mimeType);
@@ -901,6 +910,9 @@ Do not add commentary outside the JSON.`;
 
     return withVisionModelMetadata({
       trend: normalizeTrend(parsed.trend),
+      marketCondition: normalizeMarketCondition(parsed.market_condition),
+      primaryStrategy: normalizePrimaryStrategy(parsed.primary_strategy),
+      confirmations: normalizeConfirmations(parsed.confirmations),
       structure: {
         state: normalizeStructureState(structure?.state),
         bos: normalizeBosOrChoch(structure?.bos),
@@ -978,37 +990,58 @@ export async function analyzeHTFVisionStructure(
   pair: string,
   timeframe: string
 ): Promise<VisionAnalysisResult> {
-  const prompt = `You are an advanced Smart Money Concepts (SMC) trading analyst.
+  const prompt = `You are an elite multi-strategy trading analyst.
 
-You are analyzing the HIGHER TIMEFRAME chart from a dual-chart setup.
+You are given TWO chart images:
+- Image 1 = HIGHER TIMEFRAME (HTF): ${timeframe}
+- Image 2 = LOWER TIMEFRAME (LTF): provided separately
 
-Chart context:
-- Trading pair/index: ${pair}
-- Higher timeframe image timeframe: ${timeframe}
+You MUST strictly follow a top-down approach:
+HTF defines bias and key zones.
+LTF is ONLY used for entry execution.
 
-${advancedSmcGuidance}
+Do NOT mix roles.
 
-Follow these rules strictly:
+Using ONLY Image 1 (${timeframe}) on ${pair}:
 
-===============================
-STEP 1 - ANALYSIS (HIGH TIMEFRAME)
-===============================
+================================
+STEP 1 - HTF MARKET ANALYSIS
+================================
 
-- Identify market structure (bullish or bearish)
-- Mark the most recent Break of Structure (BOS) or Change of Character (CHoCH)
-- Determine directional bias (ONLY ONE: bullish or bearish, unless structure is truly unclear)
-- Identify premium and discount zones using the active dealing range
-- Identify key supply and demand zones
-- Identify major liquidity pools (equal highs/lows, previous highs/lows)
-- Separate external structure from internal noise
-- Distinguish inducement from the real external liquidity target
+1. Identify market condition:
+- Trending (bullish or bearish)
+- Ranging
+- Breakout or consolidation
 
-This chart sets the directional bias for the lower timeframe execution chart.
+2. Determine directional bias:
+- ONE ONLY: bullish or bearish
+
+3. Identify key areas:
+- Supply and demand zones
+- Premium and discount zones
+- Major liquidity pools:
+  - equal highs/lows
+  - previous highs/lows
+
+================================
+STEP 2 - PRIMARY STRATEGY SELECTION
+================================
+
+Select ONE primary strategy based on HTF condition:
+- SMC
+- Supply & Demand
+- S&R
+- Pattern
+
+Do NOT mix strategies.
 
 ========================================
 OUTPUT FORMAT (STRICT JSON ONLY)
 ========================================
 {
+  "market_condition": "trending | ranging | breakout | consolidation",
+  "primary_strategy": "SMC | Supply & Demand | S&R | Pattern",
+  "confirmations": [],
   "trend": "bullish | bearish | ranging",
   "structure": {
     "state": "higher highs | lower lows | transition",
@@ -1017,7 +1050,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
   },
   "liquidity": {
     "type": "buy-side | sell-side | none",
-    "description": "Where the nearest untouched liquidity pool sits and what it means for directional bias"
+    "description": "Describe the main HTF liquidity pool and directional implication"
   },
   "zones": {
     "supply": {
@@ -1033,18 +1066,18 @@ OUTPUT FORMAT (STRICT JSON ONLY)
   },
   "price_position": {
     "location": "premium | discount | equilibrium",
-    "explanation": "Explain relative to the most recent impulse leg — this determines the LTF trading direction"
+    "explanation": "Explain relative to the active dealing range"
   },
   "entry_plan": {
     "bias": "buy | sell | none",
     "entry_type": "none",
     "entry_zone": null,
     "confirmation": "none",
-    "reason": "HTF provides bias only — entry is determined by the lower timeframe"
+    "reason": "HTF defines bias and POIs only"
   },
   "risk_management": {
-    "invalidation_level": number,
-    "invalidation_reason": "The structural level that invalidates the current HTF bias"
+    "invalidation_level": number | null,
+    "invalidation_reason": "The HTF level that breaks the bias"
   },
   "quality": {
     "setup_rating": "A | B | C | avoid",
@@ -1058,25 +1091,19 @@ OUTPUT FORMAT (STRICT JSON ONLY)
   "take_profit_1": null,
   "take_profit_2": null,
   "take_profit_3": null,
-  "reasoning": "Concise higher timeframe bias explanation in 2-3 short sentences",
+  "reasoning": "Concise higher timeframe explanation in 2-3 short sentences",
   "visible_price_range": {
     "min": "lowest price on right Y-axis",
     "max": "highest price on right Y-axis"
   }
 }
 
-========================================
-STRICT RULES
-========================================
-1. This is the HIGHER TIMEFRAME only. Do NOT provide a live executable entry from this chart.
-2. Focus on STRUCTURE, BIAS, LIQUIDITY, PREMIUM/DISCOUNT, and POIs only.
-3. Directional bias should be a single clear bias when structure supports it.
-4. Supply and demand zones must be tight and institutionally justified.
-5. Premium/discount MUST be based on the active dealing range, not the full visible chart.
-6. Mention equal highs/lows or previous highs/lows if they are the obvious liquidity draw.
-7. Distinguish inducement from the real external liquidity objective when visible.
-8. Prefer the cleanest fresh structure-aligned order block, breaker block, mitigation block, or fair value gap.
-9. Keep reasoning concise: 2-3 short sentences, no long paragraph, no repeated points.
+STRICT RULES:
+- Do NOT mix HTF and LTF roles
+- Do NOT use multiple primary strategies
+- Do NOT force a trade from HTF alone
+- Keep reasoning concise and structured
+- Read the Y-axis carefully
 
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 
@@ -1093,6 +1120,9 @@ Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 
     return withVisionModelMetadata({
       trend: normalizeTrend(parsed.trend),
+      marketCondition: normalizeMarketCondition(parsed.market_condition),
+      primaryStrategy: normalizePrimaryStrategy(parsed.primary_strategy),
+      confirmations: normalizeConfirmations(parsed.confirmations),
       structure: {
         state: normalizeStructureState(structure?.state),
         bos: normalizeBosOrChoch(structure?.bos),
@@ -1153,14 +1183,20 @@ export async function analyzeLTFVisionStructure(
   timeframe: string,
   context: LTFPromptContext
 ): Promise<VisionAnalysisResult> {
-  const prompt = `You are an advanced Smart Money Concepts (SMC) trading analyst.
+  const prompt = `You are an elite multi-strategy trading analyst.
 
-You are given the LOWER TIMEFRAME chart from a dual-chart setup.
+You are given TWO chart images:
+- Image 1 = HIGHER TIMEFRAME (HTF): ${context.higherTimeframe}
+- Image 2 = LOWER TIMEFRAME (LTF): ${timeframe}
+
+You MUST strictly follow a top-down approach:
+HTF defines bias and key zones.
+LTF is ONLY used for entry execution.
+
+Do NOT mix roles.
 
 Chart context:
 - Trading pair/index: ${pair}
-- Higher timeframe image timeframe: ${context.higherTimeframe}
-- Lower timeframe image timeframe: ${timeframe}
 - Higher timeframe directional bias: ${context.higherTimeframeBias}
 - Higher timeframe supply zone: ${formatZoneRange(context.higherTimeframeSupplyZone)}
 - Higher timeframe demand zone: ${formatZoneRange(context.higherTimeframeDemandZone)}
@@ -1168,36 +1204,40 @@ Chart context:
 
 ${advancedSmcGuidance}
 
-Follow these rules strictly:
+================================
+STEP 3 - LTF ENTRY ANALYSIS
+================================
 
-===============================
-STEP 2 - LOWER TIMEFRAME ANALYSIS (ENTRY LOGIC)
-===============================
+Using ONLY Image 2 (${timeframe}):
+- ONLY look for trades in HTF bias direction
+- Price MUST be at or near an HTF key zone (POI)
+- Identify liquidity sweep
+- Identify CHoCH or BOS confirmation
+- Identify FVG and pattern confirmation if applicable
 
-- ONLY look for trades in the direction of the higher timeframe bias unless that bias is unclear
-- Wait for price to enter a higher timeframe POI (supply/demand or premium/discount zone)
-- Identify a lower timeframe CHoCH or BOS for confirmation
-- Identify Fair Value Gaps (FVG) near the POI
-- Entry must be:
-  - at or near POI
-  - preferably inside or just below/above FVG
-  - aligned with liquidity sweep
+================================
+STEP 4 - CONFIRMATION SYSTEM
+================================
 
-===============================
-STEP 3 - TRADE SETUP RULES
-===============================
+A valid trade MUST include at least 2 confirmations.
+If confirmations are weak, return no valid trade setup.
 
-- Do NOT give an entry at current price unless conditions are met
-- If price is not at a valid POI, the setup should resolve to no valid trade yet
-- Prefer limit-style entries, not random market chasing
-- Ensure risk-to-reward is at least 1:2 for TP1
-- Distinguish inducement from the real liquidity grab
-- Prefer the freshest valid order block, breaker block, mitigation block, or FVG at the POI
+================================
+STEP 5 - TRADE EXECUTION RULES
+================================
+
+- Prefer LIMIT entries over market entries
+- Entry must be at POI
+- Minimum risk-to-reward = 1:2
+- Do NOT force trades
 
 ========================================
 OUTPUT FORMAT (STRICT JSON ONLY)
 ========================================
 {
+  "market_condition": "trending | ranging | breakout | consolidation",
+  "primary_strategy": "SMC | Supply & Demand | S&R | Pattern",
+  "confirmations": ["max 3 short bullet points"],
   "trend": "bullish | bearish | ranging",
   "structure": {
     "state": "higher highs | lower lows | transition",
@@ -1206,7 +1246,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
   },
   "liquidity": {
     "type": "buy-side | sell-side | none",
-    "description": "Describe the liquidity sweep — which highs/lows were taken, and how price reacted after the sweep"
+    "description": "Describe the liquidity sweep and how price reacted after it"
   },
   "zones": {
     "supply": {
@@ -1232,10 +1272,10 @@ OUTPUT FORMAT (STRICT JSON ONLY)
       "max": number | null
     },
     "confirmation": "CHoCH | BOS | rejection | none",
-    "reason": "Explain the specific price action that justifies this entry — reference the liquidity sweep, order block, and structural shift"
+    "reason": "Explain the POI, the confirmations, and why the entry is valid"
   },
   "risk_management": {
-    "invalidation_level": number,
+    "invalidation_level": number | null,
     "invalidation_reason": "The exact structural level that invalidates this entry"
   },
   "quality": {
@@ -1244,32 +1284,26 @@ OUTPUT FORMAT (STRICT JSON ONLY)
   },
   "final_verdict": {
     "action": "enter | wait | avoid",
-    "message": "Precise execution instruction — what to do RIGHT NOW"
+    "message": "Precise execution instruction"
   },
   "stop_loss": number | null,
   "take_profit_1": number | null,
   "take_profit_2": number | null,
   "take_profit_3": number | null,
-  "reasoning": "Concise execution explanation in 2-3 short sentences covering sweep, structure, entry, and risk",
+  "reasoning": "Concise execution explanation in 2-3 short sentences",
   "visible_price_range": {
     "min": "lowest price on right Y-axis",
     "max": "highest price on right Y-axis"
   }
 }
 
-========================================
-STRICT RULES
-========================================
-1. This is the LOWER TIMEFRAME — your job is precise execution aligned with the higher timeframe bias.
-2. If the higher timeframe bias is bullish, do not build a bearish trade unless structure is clearly invalidated. If bearish, do not build a bullish trade unless clearly invalidated.
-3. Entry MUST be at or near a valid higher timeframe POI and refined by lower timeframe structure.
-4. A liquidity sweep plus CHoCH/BOS confirmation should carry the most weight.
-5. SL must be at a structural invalidation level, not arbitrary distance.
-6. TP1 must have at least 1:2 Risk:Reward ratio.
-7. If no clean POI + confirmation exists, action = "wait" and no forced trade.
-8. Read the Y-axis carefully for visible_price_range.
-9. Keep reasoning concise: 2-3 short sentences max, no filler.
-10. The entry_plan.reason must specifically reference: POI, sweep, structure shift, and why the zone is valid.
+STRICT RULES:
+- Do NOT mix HTF and LTF roles
+- Do NOT give trades against HTF bias
+- Do NOT give trades without confirmations
+- If no strong setup exists, return wait or avoid
+- Be concise and structured
+- The entry_plan.reason must mention POI and confirmations
 
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 
@@ -1286,6 +1320,9 @@ Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 
     return withVisionModelMetadata({
       trend: normalizeTrend(parsed.trend),
+      marketCondition: normalizeMarketCondition(parsed.market_condition),
+      primaryStrategy: normalizePrimaryStrategy(parsed.primary_strategy),
+      confirmations: normalizeConfirmations(parsed.confirmations),
       structure: {
         state: normalizeStructureState(structure?.state),
         bos: normalizeBosOrChoch(structure?.bos),
