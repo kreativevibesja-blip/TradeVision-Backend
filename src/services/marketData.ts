@@ -22,6 +22,22 @@ export interface LiveChartSymbolDefinition {
   dataSymbol: string;
 }
 
+interface TwelveDataValueRow {
+  datetime?: string;
+  open?: string | number;
+  high?: string | number;
+  low?: string | number;
+  close?: string | number;
+}
+
+interface ParsedMarketDataRow {
+  timestamp: string;
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  close: number | null;
+}
+
 const LIVE_CHART_SYMBOLS: LiveChartSymbolDefinition[] = [
   { id: 'EURUSD', label: 'EUR/USD', tvSymbol: 'OANDA:EURUSD', dataSymbol: 'EUR/USD' },
   { id: 'GBPUSD', label: 'GBP/USD', tvSymbol: 'OANDA:GBPUSD', dataSymbol: 'GBP/USD' },
@@ -93,25 +109,41 @@ export const fetchMarketDataForLiveChart = async (symbol: string, timeframe: str
     throw new Error(payload?.message || 'Market data provider returned an error');
   }
 
-  const candles = Array.isArray(payload?.values)
-    ? payload.values
-        .map((row: any) => ({
-          timestamp: typeof row?.datetime === 'string' ? row.datetime : '',
-          open: toNumeric(row?.open),
-          high: toNumeric(row?.high),
-          low: toNumeric(row?.low),
-          close: toNumeric(row?.close),
-        }))
-        .filter((row) => row.timestamp && row.open !== null && row.high !== null && row.low !== null && row.close !== null)
-        .map((row) => ({
-          timestamp: row.timestamp,
-          open: row.open!,
-          high: row.high!,
-          low: row.low!,
-          close: row.close!,
-        }))
-        .reverse()
-    : [];
+  const candles: MarketCandle[] = [];
+
+  if (Array.isArray(payload?.values)) {
+    const parsedRows: ParsedMarketDataRow[] = [];
+
+    for (const valueRow of payload.values as TwelveDataValueRow[]) {
+      parsedRows.push({
+        timestamp: typeof valueRow?.datetime === 'string' ? valueRow.datetime : '',
+        open: toNumeric(valueRow?.open),
+        high: toNumeric(valueRow?.high),
+        low: toNumeric(valueRow?.low),
+        close: toNumeric(valueRow?.close),
+      });
+    }
+
+    for (const parsedRow of parsedRows) {
+      if (
+        parsedRow.timestamp &&
+        parsedRow.open !== null &&
+        parsedRow.high !== null &&
+        parsedRow.low !== null &&
+        parsedRow.close !== null
+      ) {
+        candles.push({
+          timestamp: parsedRow.timestamp,
+          open: parsedRow.open,
+          high: parsedRow.high,
+          low: parsedRow.low,
+          close: parsedRow.close,
+        });
+      }
+    }
+
+    candles.reverse();
+  }
 
   if (candles.length < 50) {
     throw new Error('Market data provider did not return enough candles for analysis');
