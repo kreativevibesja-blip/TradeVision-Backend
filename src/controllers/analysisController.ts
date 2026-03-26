@@ -41,6 +41,39 @@ const parseOptionalPrice = (value: unknown) => {
   return parsed === null ? null : parsed;
 };
 
+const parseDerivCandles = (value: unknown) => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((item) => {
+      if (!item || typeof item !== 'object') {
+        return null;
+      }
+
+      const record = item as Record<string, unknown>;
+      const timeValue = typeof record.time === 'number' ? record.time : Number(String(record.time ?? '').trim());
+      const open = parseCurrentPrice(record.open);
+      const high = parseCurrentPrice(record.high);
+      const low = parseCurrentPrice(record.low);
+      const close = parseCurrentPrice(record.close);
+
+      if (!Number.isFinite(timeValue) || open === null || high === null || low === null || close === null) {
+        return null;
+      }
+
+      return {
+        timestamp: new Date(timeValue * 1000).toISOString(),
+        open,
+        high,
+        low,
+        close,
+      };
+    })
+    .filter((candle): candle is { timestamp: string; open: number; high: number; low: number; close: number } => candle !== null);
+};
+
 const parseInlineImage = (value: unknown) => {
   if (typeof value !== 'string' || !value.trim()) {
     return null;
@@ -93,7 +126,8 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
   let usageReserved = false;
 
   try {
-    const liveChartSource = req.body.source === 'tradingview-live';
+    const liveChartSource = req.body.source === 'tradingview-live' || req.body.source === 'deriv-live';
+    const derivLiveSource = req.body.source === 'deriv-live';
     const requestedSymbol = typeof req.body.symbol === 'string' ? req.body.symbol.trim() : '';
     const pair = liveChartSource ? requestedSymbol : req.body.pair;
     const timeframe = typeof req.body.timeframe === 'string' ? req.body.timeframe.trim() : '';
@@ -112,11 +146,16 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
 
     if (liveChartSource) {
       if (user.subscription !== 'PRO') {
-        return res.status(403).json({ error: 'Live TradingView analysis is a Pro feature' });
+        return res.status(403).json({ error: 'Live chart analysis is a Pro feature' });
       }
 
-      if (!resolveLiveChartSymbol(pair) || !isSupportedLiveChartTimeframe(timeframe)) {
+      if (!derivLiveSource && (!resolveLiveChartSymbol(pair) || !isSupportedLiveChartTimeframe(timeframe))) {
         return res.status(400).json({ error: 'Unsupported symbol or timeframe for live chart analysis' });
+      }
+
+      const derivCandles = derivLiveSource ? parseDerivCandles(req.body.candles) : null;
+      if (derivLiveSource && (!derivCandles || derivCandles.length < 50)) {
+        return res.status(400).json({ error: 'At least 50 Deriv candles are required for persisted live analysis' });
       }
 
       const monthlyUsage = await countAnalysesForUserSince(req.user!.id, getMonthStartIso());
@@ -129,16 +168,25 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
       }
 
       const analysisId = randomUUID();
-      const marketData = await fetchMarketDataForLiveChart(pair, timeframe);
+      const marketData = derivLiveSource
+        ? {
+            symbol: pair,
+            timeframe,
+            candles: derivCandles!,
+            currentPrice: derivCandles![derivCandles!.length - 1].close,
+          }
+        : null;
+
+      const resolvedMarketData = marketData ?? await fetchMarketDataForLiveChart(pair, timeframe);
 
       await createAnalysis({
         id: analysisId,
         jobId: analysisId,
         userId: req.user!.id,
         imageUrl: '',
-        pair: marketData.symbol,
+        pair: resolvedMarketData.symbol,
         timeframe,
-        assetClass: inferAssetClass(marketData.symbol),
+        assetClass: inferAssetClass(resolvedMarketData.symbol),
         status: 'PROCESSING',
         progress: 5,
         currentStage: 'Preparing live chart analysis...',
@@ -146,10 +194,10 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
 
       const analysis = await runLiveChartAnalysisPipeline({
         analysisId,
-        pair: marketData.symbol,
+        pair: resolvedMarketData.symbol,
         timeframe,
-        currentPrice: marketData.currentPrice,
-        candles: marketData.candles,
+        currentPrice: resolvedMarketData.currentPrice,
+        candles: resolvedMarketData.candles,
       });
 
       return res.json({ analysis: serializeAnalysis(analysis) });
