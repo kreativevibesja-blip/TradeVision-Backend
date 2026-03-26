@@ -595,13 +595,37 @@ const summarizeFailureReason = (message: string | null) => {
   return firstSentence.length > 120 ? `${firstSentence.slice(0, 117).trim()}...` : firstSentence;
 };
 
-export const listAllAnalysesPage = async (page: number, limit: number) => {
+export const listAllAnalysesPage = async (page: number, limit: number, search?: string) => {
   const skip = (page - 1) * limit;
-  const { data, count, error } = await supabase
+  const trimmedSearch = typeof search === 'string' ? search.trim() : '';
+
+  let userIds: string[] | null = null;
+  if (trimmedSearch) {
+    const matchedUsers = await many<UserRecord>(
+      'listAllAnalysesPage.searchUsers',
+      supabase
+        .from(USER_TABLE)
+        .select('*')
+        .or(`email.ilike.%${trimmedSearch}%,name.ilike.%${trimmedSearch}%`)
+        .limit(100)
+    );
+
+    userIds = matchedUsers.map((user) => user.id);
+    if (userIds.length === 0) {
+      return { analyses: [], total: 0 };
+    }
+  }
+
+  let query = supabase
     .from(ANALYSIS_TABLE)
     .select('*', { count: 'exact' })
-    .order('createdAt', { ascending: false })
-    .range(skip, skip + limit - 1);
+    .order('createdAt', { ascending: false });
+
+  if (userIds) {
+    query = query.in('userId', userIds);
+  }
+
+  const { data, count, error } = await query.range(skip, skip + limit - 1);
 
   if (error) {
     logDbError('listAllAnalysesPage', error);

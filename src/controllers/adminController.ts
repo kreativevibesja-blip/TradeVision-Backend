@@ -171,8 +171,9 @@ export const getAnalysisLogs = async (req: Request, res: Response) => {
   try {
     const page = parseInt(req.query.page as string) || 1;
     const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
+    const search = typeof req.query.search === 'string' ? req.query.search : undefined;
 
-    const { analyses, total } = await listAllAnalysesPage(page, limit);
+    const { analyses, total } = await listAllAnalysesPage(page, limit, search);
 
     return res.json({ analyses, total, page, pages: Math.ceil(total / limit) });
   } catch (error) {
