@@ -46,7 +46,7 @@ export interface SMCRiskManagement {
 }
 
 export interface SMCQuality {
-  setupRating: 'A' | 'B' | 'C' | 'avoid';
+  setupRating: 'A+' | 'B' | 'avoid';
   confidence: number;
 }
 
@@ -253,8 +253,11 @@ const normalizeSetupRating = (value: unknown): SMCQuality['setupRating'] => {
   }
 
   const normalized = value.trim().toUpperCase();
-  if (normalized === 'A' || normalized === 'B' || normalized === 'C') {
+  if (normalized === 'A+' || normalized === 'B') {
     return normalized;
+  }
+  if (normalized === 'A') {
+    return 'A+';
   }
 
   return 'avoid';
@@ -709,7 +712,7 @@ export async function analyzeVisionStructure(
     "invalidation_reason": "What breaks the setup"
   },
   "quality": {
-    "setup_rating": "A | B | C | avoid",
+    "setup_rating": "A+ | B | avoid",
     "confidence": 1-100
   },
   "final_verdict": {
@@ -736,7 +739,8 @@ STRICT RULES (DO NOT BREAK)
 6. Include an invalidation level.
 7. If price is not in a key zone, entry_type MUST be "none".
 8. If structure is unclear, setup_rating MUST be "avoid".
-9. Zone min and max must be tight.
+9. setup_rating must be "A+" for strong confluence, "B" for weaker but valid structure, otherwise "avoid".
+10. Zone min and max must be tight.
 10. Read the visible price range directly from the right-side Y-axis.`;
 
   const freeGoal = `
@@ -768,7 +772,9 @@ ${advancedSmcGuidance}
 Trading pair/index: ${pair}
 Timeframe: ${timeframe}`;
 
-  const proPrompt = `You are an elite multi-strategy trading analyst.
+  const proPrompt = `You are an advanced trading analyst.
+
+Your job is NOT to find trades, but to FILTER OUT low-probability setups and only return high-quality opportunities.
 
 You are given ONE chart image for timeframe ${timeframe} on ${pair}.
 
@@ -776,20 +782,49 @@ If only one chart is uploaded, analyze ONLY the uploaded timeframe and choose th
 
 ${advancedSmcGuidance}
 
+Use multi-strategy confluence including:
+- Market structure (HH, HL, LH, LL)
+- Supply & Demand
+- Fair Value Gaps (FVG)
+- Liquidity (equal highs/lows, stop hunts)
+- Momentum / displacement
+- Price behavior inside zones
+
 ================================
-STEP 1 - MARKET ANALYSIS
+STEP 1 - DETERMINE CONTEXT
 ================================
 
 Using ONLY the uploaded chart (${timeframe}):
-- Identify market condition: trending, ranging, breakout, or consolidation
+- Identify current market condition: bullish trend, bearish trend, or range / consolidation
+- Identify recent structure: higher highs / higher lows OR lower highs / lower lows
 - Determine directional bias: ONE ONLY, bullish or bearish, when structure supports it
+- If market is ranging, consolidating, or unclear, you MUST return a no-trade outcome
 - Identify key areas: supply and demand zones, premium/discount zones, and major liquidity pools
 
 ================================
-STEP 2 - PRIMARY STRATEGY SELECTION
+STEP 2 - IDENTIFY ZONES, BUT DO NOT TRUST THEM YET
 ================================
 
-Select ONE primary strategy based on the chart condition:
+- Detect supply zones, demand zones, and fair value gaps
+- Classify zone quality internally as fresh, lightly mitigated, or heavily mitigated
+- Ignore zones that are heavily mitigated or tapped multiple times
+
+================================
+STEP 3 - FILTER BAD CONDITIONS
+================================
+
+- Do NOT allow a trade if price is consolidating inside the zone
+- Do NOT allow a trade if multiple wicks appear inside the zone
+- Do NOT allow a trade if there is no strong rejection or displacement
+- Do NOT allow a trade if the zone has been tapped multiple times
+- Do NOT allow a trade if structure is conflicting or direction is unclear
+- If any invalid condition exists, return a no-trade outcome
+
+================================
+STEP 4 - PRIMARY STRATEGY SELECTION
+================================
+
+Select ONE primary strategy based on the cleanest chart condition:
 - SMC
 - Supply & Demand
 - S&R
@@ -798,20 +833,29 @@ Select ONE primary strategy based on the chart condition:
 Do NOT mix strategies.
 
 ================================
-STEP 3 - ENTRY ANALYSIS
+STEP 5 - CONFIRMATION LOGIC
 ================================
 
+- Only consider a trade if ALL are true:
+  - Zone is fresh or lightly mitigated
+  - Price enters the zone and shows strong rejection OR clear displacement
+  - Market structure aligns with direction
+  - Momentum confirms direction
+- A simple engulfing candle is NOT enough
+- Require a clear momentum shift, displacement, or break of structure
 - Entry must come from a valid POI
 - A valid trade must include at least 2 confirmations
 - Confirmations can include liquidity sweep, CHoCH, BOS, FVG, rejection, or clear pattern confirmation
 
 ================================
-STEP 4 - EXECUTION RULES
+STEP 6 - EXECUTION RULES
 ================================
 
 - Prefer LIMIT entries over market entries
 - Minimum risk-to-reward = 1:2 for take_profit_1
 - Do NOT force trades
+- If the setup is not clear, clean, and high probability, return NO TRADE
+- You are a filter, not a signal generator
 
 ========================================
 OUTPUT FORMAT (STRICT JSON ONLY)
@@ -861,7 +905,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
     "invalidation_reason": "Explain what breaks the setup"
   },
   "quality": {
-    "setup_rating": "A | B | C | avoid",
+    "setup_rating": "A+ | B | avoid",
     "confidence": 1-100
   },
   "final_verdict": {
@@ -885,8 +929,13 @@ STRICT RULES
 
 - Do NOT use multiple primary strategies
 - Do NOT give trades without at least 2 confirmations
+- Do NOT give trades when the market is ranging, consolidating, or structurally unclear
+- Do NOT use heavily mitigated or multi-tapped zones as the main entry zone
+- Do NOT approve setups with weak zone behavior, internal chop, or repeated wicks inside the zone
+- Do NOT accept an engulfing candle alone as confirmation
 - Do NOT force trades
-- If no strong setup exists, return a no-trade outcome using wait or avoid
+- If no strong setup exists, return a no-trade outcome using wait or avoid with bias = none
+- setup_rating must be A+ for strong confluence, B for valid but weaker confirmation, otherwise avoid
 - Be concise and structured
 - Read the Y-axis carefully for visible_price_range
 - Supply and demand zones must be tight and justified
@@ -990,7 +1039,9 @@ export async function analyzeHTFVisionStructure(
   pair: string,
   timeframe: string
 ): Promise<VisionAnalysisResult> {
-  const prompt = `You are an elite multi-strategy trading analyst.
+  const prompt = `You are an advanced trading analyst.
+
+Your job is NOT to find trades, but to FILTER OUT low-probability setups and only return high-quality opportunities.
 
 You are given TWO chart images:
 - Image 1 = HIGHER TIMEFRAME (HTF): ${timeframe}
@@ -1000,23 +1051,30 @@ You MUST strictly follow a top-down approach:
 HTF defines bias and key zones.
 LTF is ONLY used for entry execution.
 
+Higher timeframe determines bias.
+Lower timeframe is ONLY for entry precision.
+
 Do NOT mix roles.
 
 Using ONLY Image 1 (${timeframe}) on ${pair}:
 
 ================================
-STEP 1 - HTF MARKET ANALYSIS
+STEP 1 - DETERMINE CONTEXT
 ================================
 
-1. Identify market condition:
-- Trending (bullish or bearish)
-- Ranging
-- Breakout or consolidation
+1. Identify current market condition:
+- Bullish trend
+- Bearish trend
+- Range / consolidation
 
-2. Determine directional bias:
-- ONE ONLY: bullish or bearish
+2. Identify recent structure:
+- Higher highs / higher lows OR
+- Lower highs / lower lows
 
-3. Identify key areas:
+3. If market is ranging or unclear:
+- Return a no-trade or non-actionable bias outcome
+
+4. Identify key areas:
 - Supply and demand zones
 - Premium and discount zones
 - Major liquidity pools:
@@ -1024,7 +1082,14 @@ STEP 1 - HTF MARKET ANALYSIS
   - previous highs/lows
 
 ================================
-STEP 2 - PRIMARY STRATEGY SELECTION
+STEP 2 - IDENTIFY ZONES, BUT DO NOT TRUST THEM YET
+================================
+
+- Detect supply zones, demand zones, and fair value gaps
+- Ignore heavily mitigated or multi-tapped zones
+
+================================
+STEP 3 - PRIMARY STRATEGY SELECTION
 ================================
 
 Select ONE primary strategy based on HTF condition:
@@ -1080,7 +1145,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
     "invalidation_reason": "The HTF level that breaks the bias"
   },
   "quality": {
-    "setup_rating": "A | B | C | avoid",
+    "setup_rating": "A+ | B | avoid",
     "confidence": 1-100
   },
   "final_verdict": {
@@ -1102,6 +1167,9 @@ STRICT RULES:
 - Do NOT mix HTF and LTF roles
 - Do NOT use multiple primary strategies
 - Do NOT force a trade from HTF alone
+- If HTF is ranging, consolidating, or unclear, bias should not be actionable
+- Ignore heavily mitigated or repeatedly tapped HTF zones
+- setup_rating must be A+ for very clean context, B for usable but weaker context, otherwise avoid
 - Keep reasoning concise and structured
 - Read the Y-axis carefully
 
@@ -1183,7 +1251,9 @@ export async function analyzeLTFVisionStructure(
   timeframe: string,
   context: LTFPromptContext
 ): Promise<VisionAnalysisResult> {
-  const prompt = `You are an elite multi-strategy trading analyst.
+  const prompt = `You are an advanced trading analyst.
+
+Your job is NOT to find trades, but to FILTER OUT low-probability setups and only return high-quality opportunities.
 
 You are given TWO chart images:
 - Image 1 = HIGHER TIMEFRAME (HTF): ${context.higherTimeframe}
@@ -1192,6 +1262,12 @@ You are given TWO chart images:
 You MUST strictly follow a top-down approach:
 HTF defines bias and key zones.
 LTF is ONLY used for entry execution.
+
+Higher timeframe determines bias.
+Lower timeframe is ONLY for entry precision.
+
+If lower timeframe contradicts higher timeframe:
+DO NOT TRADE.
 
 Do NOT mix roles.
 
@@ -1204,23 +1280,55 @@ Chart context:
 
 ${advancedSmcGuidance}
 
+Use multi-strategy confluence including:
+- Market structure (HH, HL, LH, LL)
+- Supply & Demand
+- Fair Value Gaps (FVG)
+- Liquidity (equal highs/lows, stop hunts)
+- Momentum / displacement
+- Price behavior inside zones
+
 ================================
-STEP 3 - LTF ENTRY ANALYSIS
+STEP 1 - DETERMINE CONTEXT
 ================================
 
 Using ONLY Image 2 (${timeframe}):
 - ONLY look for trades in HTF bias direction
+- If LTF contradicts HTF bias or structure, return NO TRADE
 - Price MUST be at or near an HTF key zone (POI)
-- Identify liquidity sweep
-- Identify CHoCH or BOS confirmation
-- Identify FVG and pattern confirmation if applicable
+- Identify recent structure and whether momentum aligns with HTF bias
+- If market is ranging, consolidating, or unclear, return no-trade
+
+================================
+STEP 2 - IDENTIFY ZONES, BUT DO NOT TRUST THEM YET
+================================
+
+- Detect supply zones, demand zones, and fair value gaps
+- Ignore heavily mitigated or multi-tapped zones
+
+================================
+STEP 3 - FILTER BAD CONDITIONS
+================================
+
+- Do NOT allow a trade if price is consolidating inside the zone
+- Do NOT allow a trade if multiple wicks appear inside the zone
+- Do NOT allow a trade if there is no strong rejection or displacement
+- Do NOT allow a trade if the zone has been tapped multiple times
+- Do NOT allow a trade if structure is conflicting with HTF direction
 
 ================================
 STEP 4 - CONFIRMATION SYSTEM
 ================================
 
-A valid trade MUST include at least 2 confirmations.
-If confirmations are weak, return no valid trade setup.
+- Only consider a trade if ALL are true:
+  - Zone is fresh or lightly mitigated
+  - Price enters the zone and shows strong rejection OR clear displacement
+  - Market structure aligns with HTF direction
+  - Momentum confirms direction
+- A simple engulfing candle is NOT enough
+- Require a clear momentum shift, CHoCH, BOS, or displacement
+- A valid trade MUST include at least 2 confirmations
+- If confirmations are weak, return no valid trade setup
 
 ================================
 STEP 5 - TRADE EXECUTION RULES
@@ -1230,6 +1338,8 @@ STEP 5 - TRADE EXECUTION RULES
 - Entry must be at POI
 - Minimum risk-to-reward = 1:2
 - Do NOT force trades
+- If the setup is not clear, clean, and high probability, return NO TRADE
+- You are a filter, not a signal generator
 
 ========================================
 OUTPUT FORMAT (STRICT JSON ONLY)
@@ -1279,7 +1389,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
     "invalidation_reason": "The exact structural level that invalidates this entry"
   },
   "quality": {
-    "setup_rating": "A | B | C | avoid",
+    "setup_rating": "A+ | B | avoid",
     "confidence": 1-100
   },
   "final_verdict": {
@@ -1300,8 +1410,13 @@ OUTPUT FORMAT (STRICT JSON ONLY)
 STRICT RULES:
 - Do NOT mix HTF and LTF roles
 - Do NOT give trades against HTF bias
+- Do NOT give trades if LTF contradicts HTF bias or structure
 - Do NOT give trades without confirmations
-- If no strong setup exists, return wait or avoid
+- Do NOT use heavily mitigated or repeatedly tapped zones as the entry zone
+- Do NOT accept internal consolidation, repeated wicks, or weak rejection as valid zone behavior
+- Do NOT accept an engulfing candle alone as confirmation
+- If no strong setup exists, return wait or avoid with bias = none
+- setup_rating must be A+ for strong confluence, B for valid but weaker confirmation, otherwise avoid
 - Be concise and structured
 - The entry_plan.reason must mention POI and confirmations
 

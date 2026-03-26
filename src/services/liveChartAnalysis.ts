@@ -81,8 +81,14 @@ const normalizeConfirmation = (value: unknown): VisionAnalysisResult['entryPlan'
 };
 
 const normalizeSetupRating = (value: unknown): VisionAnalysisResult['quality']['setupRating'] => {
-  const trimmed = typeof value === 'string' ? value.trim() : '';
-  return trimmed === 'A' || trimmed === 'B' || trimmed === 'C' ? trimmed : 'avoid';
+  const trimmed = typeof value === 'string' ? value.trim().toUpperCase() : '';
+  if (trimmed === 'A+' || trimmed === 'B') {
+    return trimmed;
+  }
+  if (trimmed === 'A') {
+    return 'A+';
+  }
+  return 'avoid';
 };
 
 const normalizeConfidence = (value: unknown) => {
@@ -273,7 +279,9 @@ const buildPrompt = (symbol: string, timeframe: string, candles: MarketCandle[])
     c: candle.close,
   }));
 
-  return `You are an elite multi-strategy trading analyst.
+  return `You are an advanced trading analyst.
+
+Your job is NOT to find trades, but to FILTER OUT low-probability setups and only return high-quality opportunities.
 
 Analyze this live market dataset for ${symbol} on ${timeframe}.
 
@@ -290,16 +298,43 @@ ADVANCED SMC CONCEPTS YOU MUST APPLY WHEN CLEARLY VISIBLE
 - Prioritize the best structure-aligned zone among order blocks, breaker blocks, mitigation blocks, and fair value gaps.
 - Judge premium, discount, and equilibrium from the active dealing range / impulse leg controlling current price.
 
+Use multi-strategy confluence including:
+- Market structure (HH, HL, LH, LL)
+- Supply & Demand
+- Fair Value Gaps (FVG)
+- Liquidity (equal highs/lows, stop hunts)
+- Momentum / displacement
+- Price behavior inside zones
+
 ================================
-STEP 1 - MARKET ANALYSIS
+STEP 1 - DETERMINE CONTEXT
 ================================
-- Identify market condition: trending, ranging, breakout, or consolidation
+- Identify current market condition: bullish trend, bearish trend, or range / consolidation
+- Identify recent structure: higher highs / higher lows OR lower highs / lower lows
 - Determine directional bias: bullish, bearish, or ranging
+- If market is ranging, consolidating, or unclear, return a no-trade outcome
 - Identify key supply and demand zones from actual OHLC values
 - Identify liquidity pools and recent sweeps from the candle data
 
 ================================
-STEP 2 - PRIMARY STRATEGY SELECTION
+STEP 2 - IDENTIFY ZONES, BUT DO NOT TRUST THEM YET
+================================
+
+- Detect supply zones, demand zones, and fair value gaps
+- Ignore heavily mitigated or multi-tapped zones
+
+================================
+STEP 3 - FILTER BAD CONDITIONS
+================================
+
+- Do NOT allow a trade if price is consolidating inside the zone
+- Do NOT allow a trade if multiple wicks appear inside the zone
+- Do NOT allow a trade if there is no strong rejection or displacement
+- Do NOT allow a trade if the zone has been tapped multiple times
+- Do NOT allow a trade if structure is conflicting or unclear
+
+================================
+STEP 4 - PRIMARY STRATEGY SELECTION
 ================================
 Select ONE primary strategy only:
 - SMC
@@ -308,12 +343,21 @@ Select ONE primary strategy only:
 - Pattern
 
 ================================
-STEP 3 - ENTRY ANALYSIS
+STEP 5 - CONFIRMATION LOGIC
 ================================
+- Only consider a trade if ALL are true:
+  - Zone is fresh or lightly mitigated
+  - Price enters the zone and shows strong rejection OR clear displacement
+  - Market structure aligns with direction
+  - Momentum confirms direction
+- A simple engulfing candle is NOT enough
+- Require a clear momentum shift, CHoCH, BOS, or displacement
 - Entry must come from a valid POI supported by the candle data
 - A valid trade must include at least 2 confirmations
 - If the setup is weak, return wait or avoid instead of forcing a trade
 - Minimum risk-to-reward must be 1:2 for take_profit_1
+- If the setup is not clear, clean, and high probability, return NO TRADE
+- You are a filter, not a signal generator
 
 ========================================
 OUTPUT FORMAT (STRICT JSON ONLY)
@@ -363,7 +407,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
     "invalidation_reason": "Explain what breaks the setup"
   },
   "quality": {
-    "setup_rating": "A | B | C | avoid",
+    "setup_rating": "A+ | B | avoid",
     "confidence": 1-100
   },
   "final_verdict": {
@@ -391,6 +435,14 @@ Dataset summary:
 
 Candles JSON:
 ${JSON.stringify(recentCandles)}
+
+STRICT RULES:
+- Do NOT give trades when the market is ranging, consolidating, or structurally unclear
+- Do NOT use heavily mitigated or repeatedly tapped zones as the main entry zone
+- Do NOT approve setups with weak zone behavior, internal chop, or repeated wicks inside the zone
+- Do NOT accept an engulfing candle alone as confirmation
+- setup_rating must be A+ for strong confluence, B for valid but weaker confirmation, otherwise avoid
+- If no strong setup exists, return a no-trade outcome using wait or avoid with bias = none
 
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 };

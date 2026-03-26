@@ -100,7 +100,7 @@ const mapConfirmation = (
 };
 
 const mapSetupQuality = (rating: VisionAnalysisResult['quality']['setupRating']): 'high' | 'medium' | 'low' => {
-  if (rating === 'A') {
+  if (rating === 'A+') {
     return 'high';
   }
   if (rating === 'B') {
