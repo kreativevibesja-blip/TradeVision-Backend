@@ -32,6 +32,17 @@ import {
   updateAdminPayout,
   updateReferralSettings,
 } from '../controllers/adminReferralController';
+import {
+  getEmailCampaigns,
+  getEmailCampaignById,
+  createEmailCampaign,
+  sendEmailCampaign,
+  sendTestCampaignEmail,
+  retryFailedEmails,
+  getEmailTemplates,
+  previewEmailTemplate,
+  searchUsers,
+} from '../controllers/emailCampaignController';
 
 const router = Router();
 
@@ -74,5 +85,16 @@ router.patch('/referrals/commissions/:id', updateAdminCommission);
 router.get('/referrals/payouts', getAdminPayouts);
 router.patch('/referrals/payouts/:id', updateAdminPayout);
 router.post('/referrals/settings', updateReferralSettings);
+
+// Email campaigns
+router.get('/email-campaigns', getEmailCampaigns);
+router.post('/email-campaigns', createEmailCampaign);
+router.post('/email-campaigns/test', sendTestCampaignEmail);
+router.get('/email-campaigns/:id', getEmailCampaignById);
+router.post('/email-campaigns/:id/send', sendEmailCampaign);
+router.post('/email-campaigns/:id/retry', retryFailedEmails);
+router.get('/email-templates', getEmailTemplates);
+router.get('/email-templates/:key/preview', previewEmailTemplate);
+router.get('/users/search', searchUsers);
 
 export default router;
