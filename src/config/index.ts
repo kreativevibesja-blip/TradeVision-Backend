@@ -69,7 +69,7 @@ export const config = {
     provider: process.env.MARKET_DATA_PROVIDER || 'twelvedata',
     twelveDataApiKey: process.env.TWELVEDATA_API_KEY || '',
     twelveDataBaseUrl: process.env.TWELVEDATA_BASE_URL || 'https://api.twelvedata.com',
-    candleLimit: parseInt(process.env.MARKET_DATA_CANDLE_LIMIT || '150', 10),
+    candleLimit: parseInt(process.env.MARKET_DATA_CANDLE_LIMIT || '5000', 10),
   },
   
   paypal: {

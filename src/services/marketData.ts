@@ -20,6 +20,7 @@ export interface LiveChartSymbolDefinition {
   label: string;
   tvSymbol: string;
   dataSymbol: string;
+  category: 'forex-major' | 'forex-minor' | 'commodities' | 'indices' | 'crypto';
 }
 
 interface TwelveDataValueRow {
@@ -39,17 +40,44 @@ interface ParsedMarketDataRow {
 }
 
 const LIVE_CHART_SYMBOLS: LiveChartSymbolDefinition[] = [
-  { id: 'EURUSD', label: 'EUR/USD', tvSymbol: 'OANDA:EURUSD', dataSymbol: 'EUR/USD' },
-  { id: 'GBPUSD', label: 'GBP/USD', tvSymbol: 'OANDA:GBPUSD', dataSymbol: 'GBP/USD' },
-  { id: 'USDJPY', label: 'USD/JPY', tvSymbol: 'OANDA:USDJPY', dataSymbol: 'USD/JPY' },
-  { id: 'AUDUSD', label: 'AUD/USD', tvSymbol: 'OANDA:AUDUSD', dataSymbol: 'AUD/USD' },
-  { id: 'USDCAD', label: 'USD/CAD', tvSymbol: 'OANDA:USDCAD', dataSymbol: 'USD/CAD' },
-  { id: 'XAUUSD', label: 'XAU/USD', tvSymbol: 'OANDA:XAUUSD', dataSymbol: 'XAU/USD' },
-  { id: 'BTCUSD', label: 'BTC/USD', tvSymbol: 'BITSTAMP:BTCUSD', dataSymbol: 'BTC/USD' },
-  { id: 'ETHUSD', label: 'ETH/USD', tvSymbol: 'BITSTAMP:ETHUSD', dataSymbol: 'ETH/USD' },
-  { id: 'NAS100', label: 'NAS100', tvSymbol: 'CAPITALCOM:US100', dataSymbol: 'NAS100' },
-  { id: 'US30', label: 'US30', tvSymbol: 'CAPITALCOM:US30', dataSymbol: 'DJI' },
-  { id: 'SPX500', label: 'SPX500', tvSymbol: 'CAPITALCOM:US500', dataSymbol: 'SPX' },
+  { id: 'EURUSD', label: 'EUR/USD', tvSymbol: 'OANDA:EURUSD', dataSymbol: 'EUR/USD', category: 'forex-major' },
+  { id: 'GBPUSD', label: 'GBP/USD', tvSymbol: 'OANDA:GBPUSD', dataSymbol: 'GBP/USD', category: 'forex-major' },
+  { id: 'USDJPY', label: 'USD/JPY', tvSymbol: 'OANDA:USDJPY', dataSymbol: 'USD/JPY', category: 'forex-major' },
+  { id: 'USDCHF', label: 'USD/CHF', tvSymbol: 'OANDA:USDCHF', dataSymbol: 'USD/CHF', category: 'forex-major' },
+  { id: 'USDCAD', label: 'USD/CAD', tvSymbol: 'OANDA:USDCAD', dataSymbol: 'USD/CAD', category: 'forex-major' },
+  { id: 'AUDUSD', label: 'AUD/USD', tvSymbol: 'OANDA:AUDUSD', dataSymbol: 'AUD/USD', category: 'forex-major' },
+  { id: 'NZDUSD', label: 'NZD/USD', tvSymbol: 'OANDA:NZDUSD', dataSymbol: 'NZD/USD', category: 'forex-major' },
+  { id: 'EURGBP', label: 'EUR/GBP', tvSymbol: 'OANDA:EURGBP', dataSymbol: 'EUR/GBP', category: 'forex-minor' },
+  { id: 'EURJPY', label: 'EUR/JPY', tvSymbol: 'OANDA:EURJPY', dataSymbol: 'EUR/JPY', category: 'forex-minor' },
+  { id: 'EURCHF', label: 'EUR/CHF', tvSymbol: 'OANDA:EURCHF', dataSymbol: 'EUR/CHF', category: 'forex-minor' },
+  { id: 'EURAUD', label: 'EUR/AUD', tvSymbol: 'OANDA:EURAUD', dataSymbol: 'EUR/AUD', category: 'forex-minor' },
+  { id: 'EURNZD', label: 'EUR/NZD', tvSymbol: 'OANDA:EURNZD', dataSymbol: 'EUR/NZD', category: 'forex-minor' },
+  { id: 'GBPJPY', label: 'GBP/JPY', tvSymbol: 'OANDA:GBPJPY', dataSymbol: 'GBP/JPY', category: 'forex-minor' },
+  { id: 'GBPCHF', label: 'GBP/CHF', tvSymbol: 'OANDA:GBPCHF', dataSymbol: 'GBP/CHF', category: 'forex-minor' },
+  { id: 'GBPAUD', label: 'GBP/AUD', tvSymbol: 'OANDA:GBPAUD', dataSymbol: 'GBP/AUD', category: 'forex-minor' },
+  { id: 'AUDJPY', label: 'AUD/JPY', tvSymbol: 'OANDA:AUDJPY', dataSymbol: 'AUD/JPY', category: 'forex-minor' },
+  { id: 'AUDNZD', label: 'AUD/NZD', tvSymbol: 'OANDA:AUDNZD', dataSymbol: 'AUD/NZD', category: 'forex-minor' },
+  { id: 'AUDCAD', label: 'AUD/CAD', tvSymbol: 'OANDA:AUDCAD', dataSymbol: 'AUD/CAD', category: 'forex-minor' },
+  { id: 'CADJPY', label: 'CAD/JPY', tvSymbol: 'OANDA:CADJPY', dataSymbol: 'CAD/JPY', category: 'forex-minor' },
+  { id: 'CHFJPY', label: 'CHF/JPY', tvSymbol: 'OANDA:CHFJPY', dataSymbol: 'CHF/JPY', category: 'forex-minor' },
+  { id: 'NZDJPY', label: 'NZD/JPY', tvSymbol: 'OANDA:NZDJPY', dataSymbol: 'NZD/JPY', category: 'forex-minor' },
+  { id: 'XAUUSD', label: 'Gold', tvSymbol: 'OANDA:XAUUSD', dataSymbol: 'XAU/USD', category: 'commodities' },
+  { id: 'XAGUSD', label: 'Silver', tvSymbol: 'OANDA:XAGUSD', dataSymbol: 'XAG/USD', category: 'commodities' },
+  { id: 'USOIL', label: 'WTI Oil', tvSymbol: 'TVC:USOIL', dataSymbol: 'USOIL', category: 'commodities' },
+  { id: 'BRENT', label: 'Brent Oil', tvSymbol: 'TVC:UKOIL', dataSymbol: 'BRENT', category: 'commodities' },
+  { id: 'NATGAS', label: 'Natural Gas', tvSymbol: 'TVC:NATGAS', dataSymbol: 'NATGAS', category: 'commodities' },
+  { id: 'NAS100', label: 'NAS100', tvSymbol: 'CAPITALCOM:US100', dataSymbol: 'NAS100', category: 'indices' },
+  { id: 'US30', label: 'US30', tvSymbol: 'CAPITALCOM:US30', dataSymbol: 'DJI', category: 'indices' },
+  { id: 'SPX500', label: 'SPX500', tvSymbol: 'CAPITALCOM:US500', dataSymbol: 'SPX', category: 'indices' },
+  { id: 'GER40', label: 'GER40', tvSymbol: 'CAPITALCOM:DE40', dataSymbol: 'GER40', category: 'indices' },
+  { id: 'UK100', label: 'UK100', tvSymbol: 'CAPITALCOM:UK100', dataSymbol: 'UK100', category: 'indices' },
+  { id: 'JP225', label: 'JP225', tvSymbol: 'CAPITALCOM:JPN225', dataSymbol: 'JP225', category: 'indices' },
+  { id: 'BTCUSD', label: 'BTC/USD', tvSymbol: 'BITSTAMP:BTCUSD', dataSymbol: 'BTC/USD', category: 'crypto' },
+  { id: 'ETHUSD', label: 'ETH/USD', tvSymbol: 'BITSTAMP:ETHUSD', dataSymbol: 'ETH/USD', category: 'crypto' },
+  { id: 'SOLUSD', label: 'SOL/USD', tvSymbol: 'BINANCE:SOLUSDT', dataSymbol: 'SOL/USD', category: 'crypto' },
+  { id: 'XRPUSD', label: 'XRP/USD', tvSymbol: 'BITSTAMP:XRPUSD', dataSymbol: 'XRP/USD', category: 'crypto' },
+  { id: 'ADAUSD', label: 'ADA/USD', tvSymbol: 'BINANCE:ADAUSDT', dataSymbol: 'ADA/USD', category: 'crypto' },
+  { id: 'LTCUSD', label: 'LTC/USD', tvSymbol: 'BITSTAMP:LTCUSD', dataSymbol: 'LTC/USD', category: 'crypto' },
 ];
 
 const TIMEFRAME_INTERVALS: Record<string, string> = {
