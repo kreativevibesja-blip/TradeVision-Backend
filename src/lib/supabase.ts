@@ -30,6 +30,8 @@ const QUEUE_TABLE = 'AnalysisQueue';
 export type SubscriptionTier = 'FREE' | 'PRO';
 export type UserRole = 'USER' | 'ADMIN';
 export type PaymentStatus = 'PENDING' | 'COMPLETED' | 'FAILED' | 'REFUNDED';
+export type PaymentMethod = 'PAYPAL' | 'CARD' | 'BANK_TRANSFER' | 'COUPON';
+export type BankTransferBank = 'SCOTIABANK' | 'NCB';
 export type AnalysisStatus = 'QUEUED' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
 export type TicketStatus = 'OPEN' | 'IN_PROGRESS' | 'WAITING_ON_USER' | 'RESOLVED' | 'CLOSED';
 export type TicketPriority = 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT';
@@ -88,7 +90,10 @@ export interface PaymentRecord {
   amount: number;
   currency: string;
   status: PaymentStatus;
+  paymentMethod: PaymentMethod;
+  bankTransferBank: BankTransferBank | null;
   plan: SubscriptionTier;
+  verifiedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -96,6 +101,7 @@ export interface PaymentRecord {
 interface ListPaymentsFilters {
   plan?: SubscriptionTier;
   status?: PaymentStatus;
+  paymentMethod?: PaymentMethod;
   createdAfter?: string;
 }
 
@@ -699,7 +705,13 @@ export const deletePricingPlan = (id: string) =>
   deleteSingle('deletePricingPlan', PRICING_PLAN_TABLE, (query) => query.eq('id', id));
 
 export const createPaymentRecord = (values: Partial<PaymentRecord> & Pick<PaymentRecord, 'userId' | 'paypalOrderId' | 'amount' | 'status' | 'plan'>) =>
-  insertSingle<PaymentRecord>('createPaymentRecord', PAYMENT_TABLE, { currency: 'USD', ...values });
+  insertSingle<PaymentRecord>('createPaymentRecord', PAYMENT_TABLE, { currency: 'USD', paymentMethod: 'PAYPAL', ...values });
+
+export const getPaymentById = (id: string) =>
+  maybeSingle<PaymentRecord>('getPaymentById', supabase.from(PAYMENT_TABLE).select('*').eq('id', id).maybeSingle());
+
+export const updatePaymentById = (id: string, values: Partial<PaymentRecord>) =>
+  updateSingle<PaymentRecord>('updatePaymentById', PAYMENT_TABLE, values, (query) => query.eq('id', id));
 
 export const updatePaymentByOrderId = (paypalOrderId: string, values: Partial<PaymentRecord>) =>
   updateSingle<PaymentRecord>('updatePaymentByOrderId', PAYMENT_TABLE, values, (query) => query.eq('paypalOrderId', paypalOrderId));
@@ -723,6 +735,10 @@ export const listAllPaymentsPage = async (page: number, limit: number, filters: 
 
   if (filters.status) {
     query = query.eq('status', filters.status);
+  }
+
+  if (filters.paymentMethod) {
+    query = query.eq('paymentMethod', filters.paymentMethod);
   }
 
   if (filters.createdAfter) {

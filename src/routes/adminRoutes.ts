@@ -8,6 +8,7 @@ import {
   updateUser,
   getAnalysisLogs,
   getPayments,
+  updatePaymentStatus,
   getAnalytics,
   getPricingPlans,
   getPublicPricingPlans,
@@ -57,6 +58,7 @@ router.patch('/users/:id', updateUser);
 router.get('/analyses', getAnalysisLogs);
 router.get('/analyses/:id', getAdminAnalysisById);
 router.get('/payments', getPayments);
+router.patch('/payments/:id', updatePaymentStatus);
 router.get('/analytics', getAnalytics);
 router.get('/pricing-plans', getPricingPlans);
 router.post('/pricing-plans', createPricingPlan);

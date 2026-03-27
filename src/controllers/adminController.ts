@@ -9,6 +9,7 @@ import {
   getAnalysisById,
   getAnalyticsBuckets,
   getCompletedRevenue,
+  getPaymentById,
   listAllAnalysesPage,
   listActiveAnnouncements,
   listAllPaymentsPage,
@@ -23,9 +24,13 @@ import {
   createAnnouncementRecord,
   type AnnouncementContentPayload,
   type AnnouncementRecord,
+  type PaymentMethod,
+  updatePaymentById,
 } from '../lib/supabase';
 import { serializeAnalysis } from './analysisController';
 import { setBillingStateFromAdmin } from '../services/billing';
+import { setBillingStateFromPayment } from '../services/billing';
+import { processReferralPayment } from '../services/referralService';
 
 const ANNOUNCEMENT_CONTENT_VERSION = 1;
 
@@ -205,6 +210,9 @@ export const getPayments = async (req: Request, res: Response) => {
     const status = req.query.status === 'PENDING' || req.query.status === 'COMPLETED' || req.query.status === 'FAILED' || req.query.status === 'REFUNDED'
       ? req.query.status
       : undefined;
+    const paymentMethod = req.query.paymentMethod === 'PAYPAL' || req.query.paymentMethod === 'CARD' || req.query.paymentMethod === 'BANK_TRANSFER' || req.query.paymentMethod === 'COUPON'
+      ? req.query.paymentMethod as PaymentMethod
+      : undefined;
     const dateRange = typeof req.query.dateRange === 'string' ? req.query.dateRange : 'all';
 
     const createdAfter = (() => {
@@ -225,6 +233,7 @@ export const getPayments = async (req: Request, res: Response) => {
     const { payments, total } = await listAllPaymentsPage(page, limit, {
       plan,
       status,
+      paymentMethod,
       createdAfter,
     });
 
@@ -232,6 +241,40 @@ export const getPayments = async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Admin payments error:', error);
     return res.status(500).json({ error: 'Failed to get payments' });
+  }
+};
+
+export const updatePaymentStatus = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    if (status !== 'COMPLETED' && status !== 'FAILED') {
+      return res.status(400).json({ error: 'Invalid payment status' });
+    }
+
+    const existingPayment = await getPaymentById(id);
+    if (!existingPayment) {
+      return res.status(404).json({ error: 'Payment not found' });
+    }
+
+    const now = new Date().toISOString();
+    const payment = await updatePaymentById(id, {
+      status,
+      verifiedAt: status === 'COMPLETED' ? now : null,
+    });
+
+    if (existingPayment.status !== 'COMPLETED' && status === 'COMPLETED') {
+      await setBillingStateFromPayment(payment.userId, now);
+      await processReferralPayment(payment.userId, payment.amount ?? 0).catch((error) => {
+        console.error('Failed to process referral payment from admin approval:', error);
+      });
+    }
+
+    return res.json({ payment });
+  } catch (error) {
+    console.error('Admin payment update error:', error);
+    return res.status(500).json({ error: 'Failed to update payment' });
   }
 };
 

@@ -1,6 +1,7 @@
 import {
   getSystemSetting,
   listPaymentsForUserId,
+  type PaymentMethod,
   type PaymentRecord,
   type SubscriptionTier,
   updateUser,
@@ -25,6 +26,10 @@ export interface BillingSummary extends BillingState {
 const BILLING_PERIOD_DAYS = 30;
 const BILLING_SETTING_PREFIX = 'billing:';
 
+const isPaidMethod = (paymentMethod: PaymentMethod) => paymentMethod === 'PAYPAL' || paymentMethod === 'CARD' || paymentMethod === 'BANK_TRANSFER' || paymentMethod === 'COUPON';
+
+const getPaymentEffectiveAt = (payment: PaymentRecord) => payment.verifiedAt || payment.createdAt;
+
 const addDays = (dateIso: string, days: number) => {
   const date = new Date(dateIso);
   date.setUTCDate(date.getUTCDate() + days);
@@ -34,7 +39,9 @@ const addDays = (dateIso: string, days: number) => {
 const getBillingKey = (userId: string) => `${BILLING_SETTING_PREFIX}${userId}`;
 
 const getLatestCompletedProPayment = (payments: PaymentRecord[]) =>
-  payments.find((payment) => payment.status === 'COMPLETED' && payment.plan === 'PRO') || null;
+  payments
+    .filter((payment) => payment.status === 'COMPLETED' && payment.plan === 'PRO' && isPaidMethod(payment.paymentMethod))
+    .sort((left, right) => new Date(getPaymentEffectiveAt(right)).getTime() - new Date(getPaymentEffectiveAt(left)).getTime())[0] || null;
 
 const isBillingState = (value: unknown): value is BillingState => {
   if (!value || typeof value !== 'object') {
@@ -64,7 +71,8 @@ export async function persistBillingState(userId: string, state: BillingState) {
 
 const bootstrapBillingState = async (userId: string, subscription: SubscriptionTier, payments: PaymentRecord[]) => {
   const latestCompletedProPayment = getLatestCompletedProPayment(payments);
-  const expiresAt = latestCompletedProPayment ? addDays(latestCompletedProPayment.createdAt, BILLING_PERIOD_DAYS) : null;
+  const lastPaymentAt = latestCompletedProPayment ? getPaymentEffectiveAt(latestCompletedProPayment) : null;
+  const expiresAt = lastPaymentAt ? addDays(lastPaymentAt, BILLING_PERIOD_DAYS) : null;
   const hasActivePaidPro = Boolean(subscription === 'PRO' && expiresAt && new Date(expiresAt).getTime() > Date.now());
 
   const state: BillingState = hasActivePaidPro
@@ -72,7 +80,7 @@ const bootstrapBillingState = async (userId: string, subscription: SubscriptionT
         currentPlan: 'PRO',
         status: 'active',
         expiresAt,
-        lastPaymentAt: latestCompletedProPayment!.createdAt,
+        lastPaymentAt,
         canceledAt: null,
         source: 'system',
       }
@@ -80,7 +88,7 @@ const bootstrapBillingState = async (userId: string, subscription: SubscriptionT
         currentPlan: 'FREE',
         status: latestCompletedProPayment && expiresAt && new Date(expiresAt).getTime() <= Date.now() ? 'expired' : 'free',
         expiresAt,
-        lastPaymentAt: latestCompletedProPayment?.createdAt ?? null,
+        lastPaymentAt,
         canceledAt: null,
         source: 'system',
       };
