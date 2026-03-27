@@ -129,7 +129,7 @@ const DEFAULT_PRICING_PLANS: Array<Pick<PricingPlanRecord, 'name' | 'tier' | 'pr
   {
     name: 'TradeVision AI Pro',
     tier: 'PRO',
-    price: 19,
+    price: 19.95,
     features: ['Unlimited daily analyses', 'Advanced Smart Money Concepts', 'Priority AI processing'],
     dailyLimit: 999999,
     isActive: true,

@@ -20,7 +20,7 @@ const createManualPaymentReference = () => `BANK-${Date.now()}-${Math.random().t
 
 const resolveProPaymentAmount = async (userId: string, couponCode?: string) => {
   const pricing = await getPricingPlanByTierWithFallback('PRO');
-  let amount = pricing ? pricing.price : 19;
+  let amount = pricing ? pricing.price : 19.95;
   const planName = pricing ? pricing.name : 'Pro';
   let appliedCouponId: string | null = null;
 
