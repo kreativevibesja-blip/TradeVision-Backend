@@ -9,6 +9,8 @@ import {
   type QueueJobRecord,
 } from '../lib/supabase';
 import { runAnalysisPipeline } from '../services/analysis/runAnalysisPipeline';
+import { runLiveChartAnalysisPipeline } from '../services/analysis/runLiveChartAnalysisPipeline';
+import { fetchMarketDataForLiveChart } from '../services/marketData';
 import { inferAssetClass } from '../utils/volatilityDetector';
 import { serializeAnalysis } from '../controllers/analysisController';
 
@@ -51,21 +53,41 @@ async function processJob(job: QueueJobRecord) {
 
     // Link queue job to analysis
     await updateQueueJob(job.id, { analysisId });
+    const isLiveChartJob = input.source === 'tradingview-live' || input.source === 'deriv-live';
 
-    const analysis = await runAnalysisPipeline({
-      analysisId,
-      userId: job.userId,
-      pair: input.pair,
-      timeframe: input.timeframe,
-      subscription: user.subscription,
-      currentPrice: input.currentPrice,
-      chartMinPrice: input.chartMinPrice ?? null,
-      chartMaxPrice: input.chartMaxPrice ?? null,
-      imageUrl: input.imageUrl,
-      base64Image: input.base64Image,
-      mimeType: input.mimeType,
-      secondaryChart: input.secondaryChart ?? null,
-    });
+    const analysis = isLiveChartJob
+      ? await (async () => {
+          const resolvedMarketData = input.source === 'deriv-live'
+            ? {
+                symbol: input.pair,
+                timeframe: input.timeframe,
+                candles: input.candles,
+                currentPrice: input.candles[input.candles.length - 1].close,
+              }
+            : await fetchMarketDataForLiveChart(input.pair, input.timeframe);
+
+          return runLiveChartAnalysisPipeline({
+            analysisId,
+            pair: resolvedMarketData.symbol,
+            timeframe: input.timeframe,
+            currentPrice: resolvedMarketData.currentPrice,
+            candles: resolvedMarketData.candles,
+          });
+        })()
+      : await runAnalysisPipeline({
+          analysisId,
+          userId: job.userId,
+          pair: input.pair,
+          timeframe: input.timeframe,
+          subscription: user.subscription,
+          currentPrice: input.currentPrice,
+          chartMinPrice: input.chartMinPrice ?? null,
+          chartMaxPrice: input.chartMaxPrice ?? null,
+          imageUrl: input.imageUrl,
+          base64Image: input.base64Image,
+          mimeType: input.mimeType,
+          secondaryChart: input.secondaryChart ?? null,
+        });
 
     const latestJob = await getQueueJobById(job.id);
     if (latestJob?.status === 'cancelled') {

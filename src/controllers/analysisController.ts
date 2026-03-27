@@ -168,39 +168,34 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
       }
 
       const analysisId = randomUUID();
-      const marketData = derivLiveSource
+      const queueInput = derivLiveSource
         ? {
-            symbol: pair,
+            source: 'deriv-live' as const,
+            analysisId,
+            pair,
             timeframe,
             candles: derivCandles!,
-            currentPrice: derivCandles![derivCandles!.length - 1].close,
           }
-        : null;
+        : {
+            source: 'tradingview-live' as const,
+            analysisId,
+            pair,
+            timeframe,
+          };
 
-      const resolvedMarketData = marketData ?? await fetchMarketDataForLiveChart(pair, timeframe);
-
-      await createAnalysis({
-        id: analysisId,
-        jobId: analysisId,
+      const job = await createQueueJob({
         userId: req.user!.id,
-        imageUrl: '',
-        pair: resolvedMarketData.symbol,
-        timeframe,
-        assetClass: inferAssetClass(resolvedMarketData.symbol),
-        status: 'PROCESSING',
-        progress: 5,
-        currentStage: 'Preparing live chart analysis...',
-      });
-
-      const analysis = await runLiveChartAnalysisPipeline({
+        priority: 2,
+        inputData: queueInput,
         analysisId,
-        pair: resolvedMarketData.symbol,
-        timeframe,
-        currentPrice: resolvedMarketData.currentPrice,
-        candles: resolvedMarketData.candles,
       });
 
-      return res.json({ analysis: serializeAnalysis(analysis) });
+      return res.json({
+        queued: true,
+        jobId: job.id,
+        analysisId,
+        message: 'Your live chart analysis has been queued. You can track its progress.',
+      });
     }
 
     if (currentPrice === null) {
