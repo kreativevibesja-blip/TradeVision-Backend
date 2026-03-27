@@ -345,6 +345,30 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
   }
 };
 
+export const getLiveChartMarketData = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    if (req.user.subscription !== 'PRO') {
+      return res.status(403).json({ error: 'Live chart market data is a Pro feature' });
+    }
+
+    const symbol = typeof req.query.symbol === 'string' ? req.query.symbol.trim() : '';
+    const timeframe = typeof req.query.timeframe === 'string' ? req.query.timeframe.trim() : '';
+
+    if (!resolveLiveChartSymbol(symbol) || !isSupportedLiveChartTimeframe(timeframe)) {
+      return res.status(400).json({ error: 'Unsupported symbol or timeframe for live chart market data' });
+    }
+
+    const marketData = await fetchMarketDataForLiveChart(symbol, timeframe);
+    return res.json({ marketData });
+  } catch (error: any) {
+    return res.status(500).json({ error: error?.message || 'Unable to fetch live chart market data.' });
+  }
+};
+
 export const getAnalyses = async (req: AuthRequest, res: Response) => {
   try {
     const page = parseInt(req.query.page as string) || 1;
