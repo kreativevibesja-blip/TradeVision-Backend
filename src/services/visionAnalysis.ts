@@ -492,15 +492,21 @@ const formatZoneRange = (zone: SMCQualifiedZone | null) => {
 const advancedSmcGuidance = `
 ADVANCED SMC CONCEPTS YOU MUST APPLY WHEN CLEARLY VISIBLE
 - Start with higher-timeframe or broader visible structure before thinking about entries.
+- If the broader chart shows lower highs and lower lows, default to bearish context unless price clearly invalidates that structure.
+- If the broader chart shows higher highs and higher lows, default to bullish context unless price clearly invalidates that structure.
 - Identify external highs and lows, protected highs and lows, and the liquidity resting around them.
+- Respect protected highs/lows: the trade idea remains valid until that protected swing is actually broken.
 - Treat BOS and CHoCH as valid only when price closes through structure, not when a wick briefly pokes through.
 - Treat equal highs and equal lows as liquidity pools when relevant.
 - Distinguish inducement from the main or external liquidity objective.
 - Separate external structure from internal structure.
 - Use the active dealing range to judge premium, discount, and equilibrium, with the 50% area as the core divider and OTE as the preferred retracement location.
+- In bearish conditions, shorts should come from premium/OTE, not discount; in bullish conditions, longs should come from discount/OTE, not premium.
 - Prioritize the best structure-aligned zone among order blocks, breaker blocks, mitigation blocks, and fair value gaps.
+- Give extra weight when higher-timeframe and lower-timeframe FVGs overlap or sit inside the same POI.
 - Treat fair value gaps as areas of interest, not blind entry signals, and require confluence with structure and location.
 - Pre-plan targets at prior highs/lows, equal highs/lows, and obvious liquidity pools before approving an entry.
+- Target 1 should usually be the nearest logical structure target; Target 2 should usually be the next deeper liquidity objective if continuation is likely.
 - Stops must sit at structural invalidation, not at arbitrary distances.`;
 
 const isUnsupportedModelError = (error: unknown) => {
@@ -809,6 +815,7 @@ Using ONLY the uploaded chart (${timeframe}):
 - Determine directional bias: ONE ONLY, bullish or bearish, when structure supports it
 - If market is ranging, consolidating, or unclear, you MUST return a no-trade outcome
 - Identify key areas: support/resistance zones, premium/discount zones, and major liquidity pools
+- State whether the current price is approaching a premium short area or a discount long area, or neither
 
 ================================
 STEP 2 - REQUIRE STRUCTURE CONFIRMATION
@@ -817,6 +824,7 @@ STEP 2 - REQUIRE STRUCTURE CONFIRMATION
 - A break of structure or change of character is only valid when a candle CLOSES through structure
 - Do not treat a wick through structure as confirmed BOS or CHoCH
 - If direction is not confirmed by structure, return wait or avoid
+- If the chart resembles a protected-high/protected-low situation, keep that structure in mind when choosing invalidation
 
 ================================
 STEP 3 - DEFINE LOCATION
@@ -827,6 +835,7 @@ STEP 3 - DEFINE LOCATION
 - Ignore zones that are heavily mitigated or tapped multiple times
 - Use the active dealing range to classify price as premium, discount, or equilibrium
 - Prefer trades from OTE-like retracement areas inside premium/discount, not from random mid-range price
+- If multiple FVGs from different visible structures/timeframes align in the same area, treat that overlap as stronger confluence
 
 ================================
 STEP 4 - FILTER BAD CONDITIONS
@@ -866,6 +875,7 @@ STEP 6 - CONFIRMATION LOGIC
 - Entry must come from a valid POI
 - A valid trade must include at least 2 confirmations
 - Confirmations can include liquidity sweep, CHoCH, BOS, FVG, rejection, or clear pattern confirmation
+- Prefer setups where price returns into an OTE/premium-discount area and then confirms with a close-based CHoCH or BOS
 
 ================================
 STEP 7 - EXECUTION RULES
@@ -878,6 +888,7 @@ STEP 7 - EXECUTION RULES
 - Do NOT force trades
 - If the setup is not clear, clean, and high probability, return NO TRADE
 - You are a filter, not a signal generator
+- When two logical targets exist, take_profit_1 should map to the first clear structure target and take_profit_2 to the next obvious liquidity target
 
 ========================================
 OUTPUT FORMAT (STRICT JSON ONLY)
@@ -964,6 +975,7 @@ STRICT RULES
 - Supply and demand zones must be tight and justified
 - stop_loss must align with structural invalidation, not a random distance
 - take_profit_1 should only be set when at least 3R is realistically available to a logical target
+- If price is in the wrong half of the dealing range for the intended direction, bias should usually be none and action should usually be wait or avoid
 
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 
@@ -1110,6 +1122,8 @@ STEP 1 - DETERMINE CONTEXT
 
 6. BOS or CHoCH is only valid when a candle closes through structure, not when a wick only sweeps it
 
+7. Note whether the current price is in premium or discount relative to the active dealing range and whether that location supports the HTF bias
+
 ================================
 STEP 2 - IDENTIFY ZONES, BUT DO NOT TRUST THEM YET
 ================================
@@ -1117,6 +1131,7 @@ STEP 2 - IDENTIFY ZONES, BUT DO NOT TRUST THEM YET
 - Detect supply zones, demand zones, and fair value gaps
 - Ignore heavily mitigated or multi-tapped zones
 - Prefer zones that align with the active dealing range and the most meaningful external liquidity
+- Give extra weight to zones/FVGs that would support an eventual OTE-style retracement entry on the lower timeframe
 
 ================================
 STEP 3 - PRIMARY STRATEGY SELECTION
@@ -1330,6 +1345,7 @@ Using ONLY Image 2 (${timeframe}):
 - Identify recent structure and whether momentum aligns with HTF bias
 - If market is ranging, consolidating, or unclear, return no-trade
 - Wait for lower-timeframe confirmation at the POI rather than assuming the first touch is tradable
+- Check whether price is also in the correct half of the dealing range for the intended direction before approving the setup
 
 ================================
 STEP 2 - IDENTIFY ZONES, BUT DO NOT TRUST THEM YET
@@ -1338,6 +1354,7 @@ STEP 2 - IDENTIFY ZONES, BUT DO NOT TRUST THEM YET
 - Detect supply zones, demand zones, and fair value gaps
 - Ignore heavily mitigated or multi-tapped zones
 - Prefer internal FVG/order-block/imbalance confluence that sits inside or near the HTF POI
+- Give extra weight when an LTF FVG overlaps an HTF or 1h-style FVG in the same entry area
 
 ================================
 STEP 3 - FILTER BAD CONDITIONS
@@ -1363,6 +1380,7 @@ STEP 4 - CONFIRMATION SYSTEM
 - Require a clear momentum shift, CHoCH, BOS, or displacement confirmed by candle close
 - A valid trade MUST include at least 2 confirmations
 - If confirmations are weak, return no valid trade setup
+- Prefer a clean close-confirmed LTF CHoCH as the entry trigger after price returns to the POI
 
 ================================
 STEP 5 - TRADE EXECUTION RULES
@@ -1376,6 +1394,7 @@ STEP 5 - TRADE EXECUTION RULES
 - Do NOT force trades
 - If the setup is not clear, clean, and high probability, return NO TRADE
 - You are a filter, not a signal generator
+- When two logical downside or upside targets exist, take_profit_1 should be the nearer structure target and take_profit_2 the next liquidity sweep objective
 
 ========================================
 OUTPUT FORMAT (STRICT JSON ONLY)

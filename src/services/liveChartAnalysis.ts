@@ -273,15 +273,21 @@ const generateGeminiResponse = async (modelName: string, prompt: string) => {
 const advancedSmcGuidance = `
 ADVANCED SMC CONCEPTS YOU MUST APPLY WHEN CLEARLY VISIBLE
 - Start with the broader visible structure before thinking about entries.
+- If the broader structure shows lower highs and lower lows, default to bearish context unless that structure is clearly invalidated.
+- If the broader structure shows higher highs and higher lows, default to bullish context unless that structure is clearly invalidated.
 - Identify external highs and lows, protected swing points, and the liquidity resting around them.
+- Respect protected highs/lows: the trade idea remains valid until that protected swing is actually broken.
 - Treat BOS and CHoCH as valid only when price closes through structure, not when a wick briefly pokes through.
 - Treat equal highs and equal lows as liquidity pools when relevant.
 - Distinguish inducement from the main or external liquidity objective.
 - Separate external structure from internal structure.
 - Use the active dealing range to judge premium, discount, and equilibrium, with the 50% area as the core divider and OTE as the preferred retracement location.
+- In bearish conditions, shorts should come from premium/OTE, not discount; in bullish conditions, longs should come from discount/OTE, not premium.
 - Prioritize the best structure-aligned zone among order blocks, breaker blocks, mitigation blocks, and fair value gaps.
+- Give extra weight when multiple FVGs or imbalances align in the same POI.
 - Treat fair value gaps as areas of interest, not blind entry signals, and require confluence with structure and location.
 - Pre-plan targets at prior highs/lows, equal highs/lows, and obvious liquidity pools before approving an entry.
+- Target 1 should usually be the nearest logical structure target; Target 2 should usually be the next deeper liquidity objective if continuation is likely.
 - Stops must sit at structural invalidation, not at arbitrary distances.`;
 
 const buildPrompt = (symbol: string, timeframe: string, candles: MarketCandle[]) => {
@@ -325,6 +331,7 @@ STEP 1 - DETERMINE CONTEXT FIRST
 - If market is ranging, consolidating, or unclear, return a no-trade outcome
 - Identify key supply and demand zones from actual OHLC values
 - Identify liquidity pools and recent sweeps from the candle data
+- State whether current price is approaching a premium short area or a discount long area, or neither
 
 ================================
 STEP 2 - REQUIRE STRUCTURE CONFIRMATION
@@ -333,6 +340,7 @@ STEP 2 - REQUIRE STRUCTURE CONFIRMATION
 - A break of structure or change of character is only valid when a candle CLOSES through structure
 - Do not treat a wick through structure as confirmed BOS or CHoCH
 - If direction is not confirmed by structure, return wait or avoid
+- If the dataset suggests a protected-high/protected-low setup, use that to guide invalidation
 
 ================================
 STEP 3 - DEFINE LOCATION
@@ -342,6 +350,7 @@ STEP 3 - DEFINE LOCATION
 - Ignore heavily mitigated or multi-tapped zones
 - Use the active dealing range to classify price as premium, discount, or equilibrium
 - Prefer trades from OTE-like retracement areas inside premium/discount, not from random mid-range price
+- If multiple FVGs or imbalances align in one area, treat that overlap as stronger confluence
 
 ================================
 STEP 4 - FILTER BAD CONDITIONS
@@ -381,6 +390,7 @@ STEP 6 - CONFIRMATION LOGIC
 - Minimum risk-to-reward must be 1:3 for take_profit_1
 - If the setup is not clear, clean, and high probability, return NO TRADE
 - You are a filter, not a signal generator
+- Prefer setups where price returns into an OTE/premium-discount area and then confirms with a close-based CHoCH or BOS
 
 ========================================
 OUTPUT FORMAT (STRICT JSON ONLY)
@@ -469,6 +479,7 @@ STRICT RULES:
 - If no strong setup exists, return a no-trade outcome using wait or avoid with bias = none
 - stop_loss must align with structural invalidation, not a random distance
 - take_profit_1 should only be set when at least 3R is realistically available to a logical target
+- If price is in the wrong half of the dealing range for the intended direction, bias should usually be none and action should usually be wait or avoid
 
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 };
