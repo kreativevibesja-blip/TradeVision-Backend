@@ -491,11 +491,17 @@ const formatZoneRange = (zone: SMCQualifiedZone | null) => {
 
 const advancedSmcGuidance = `
 ADVANCED SMC CONCEPTS YOU MUST APPLY WHEN CLEARLY VISIBLE
+- Start with higher-timeframe or broader visible structure before thinking about entries.
+- Identify external highs and lows, protected highs and lows, and the liquidity resting around them.
+- Treat BOS and CHoCH as valid only when price closes through structure, not when a wick briefly pokes through.
 - Treat equal highs and equal lows as liquidity pools when relevant.
 - Distinguish inducement from the main or external liquidity objective.
 - Separate external structure from internal structure.
+- Use the active dealing range to judge premium, discount, and equilibrium, with the 50% area as the core divider and OTE as the preferred retracement location.
 - Prioritize the best structure-aligned zone among order blocks, breaker blocks, mitigation blocks, and fair value gaps.
-- Judge premium, discount, and equilibrium from the active dealing range / impulse leg controlling current price.`;
+- Treat fair value gaps as areas of interest, not blind entry signals, and require confluence with structure and location.
+- Pre-plan targets at prior highs/lows, equal highs/lows, and obvious liquidity pools before approving an entry.
+- Stops must sit at structural invalidation, not at arbitrary distances.`;
 
 const isUnsupportedModelError = (error: unknown) => {
   if (!(error instanceof Error)) {
@@ -741,7 +747,9 @@ STRICT RULES (DO NOT BREAK)
 8. If structure is unclear, setup_rating MUST be "avoid".
 9. setup_rating must be "A+" for strong confluence, "B" for weaker but valid structure, otherwise "avoid".
 10. Zone min and max must be tight.
-10. Read the visible price range directly from the right-side Y-axis.`;
+11. BOS and CHoCH require a real candle close through structure, not a wick.
+12. Use structural invalidation, not arbitrary stop placement.
+13. Read the visible price range directly from the right-side Y-axis.`;
 
   const freeGoal = `
 ========================================
@@ -791,26 +799,37 @@ Use multi-strategy confluence including:
 - Price behavior inside zones
 
 ================================
-STEP 1 - DETERMINE CONTEXT
+STEP 1 - DETERMINE CONTEXT FIRST
 ================================
 
 Using ONLY the uploaded chart (${timeframe}):
 - Identify current market condition: bullish trend, bearish trend, or range / consolidation
 - Identify recent structure: higher highs / higher lows OR lower highs / lower lows
+- Mark the most relevant external highs/lows or protected swing points visible on the chart
 - Determine directional bias: ONE ONLY, bullish or bearish, when structure supports it
 - If market is ranging, consolidating, or unclear, you MUST return a no-trade outcome
-- Identify key areas: supply and demand zones, premium/discount zones, and major liquidity pools
+- Identify key areas: support/resistance zones, premium/discount zones, and major liquidity pools
 
 ================================
-STEP 2 - IDENTIFY ZONES, BUT DO NOT TRUST THEM YET
+STEP 2 - REQUIRE STRUCTURE CONFIRMATION
+================================
+
+- A break of structure or change of character is only valid when a candle CLOSES through structure
+- Do not treat a wick through structure as confirmed BOS or CHoCH
+- If direction is not confirmed by structure, return wait or avoid
+
+================================
+STEP 3 - DEFINE LOCATION
 ================================
 
 - Detect supply zones, demand zones, and fair value gaps
 - Classify zone quality internally as fresh, lightly mitigated, or heavily mitigated
 - Ignore zones that are heavily mitigated or tapped multiple times
+- Use the active dealing range to classify price as premium, discount, or equilibrium
+- Prefer trades from OTE-like retracement areas inside premium/discount, not from random mid-range price
 
 ================================
-STEP 3 - FILTER BAD CONDITIONS
+STEP 4 - FILTER BAD CONDITIONS
 ================================
 
 - Do NOT allow a trade if price is consolidating inside the zone
@@ -818,10 +837,11 @@ STEP 3 - FILTER BAD CONDITIONS
 - Do NOT allow a trade if there is no strong rejection or displacement
 - Do NOT allow a trade if the zone has been tapped multiple times
 - Do NOT allow a trade if structure is conflicting or direction is unclear
+- Do NOT allow a trade if price has not interacted with a meaningful POI or liquidity-backed area of interest
 - If any invalid condition exists, return a no-trade outcome
 
 ================================
-STEP 4 - PRIMARY STRATEGY SELECTION
+STEP 5 - PRIMARY STRATEGY SELECTION
 ================================
 
 Select ONE primary strategy based on the cleanest chart condition:
@@ -833,7 +853,7 @@ Select ONE primary strategy based on the cleanest chart condition:
 Do NOT mix strategies.
 
 ================================
-STEP 5 - CONFIRMATION LOGIC
+STEP 6 - CONFIRMATION LOGIC
 ================================
 
 - Only consider a trade if ALL are true:
@@ -842,17 +862,19 @@ STEP 5 - CONFIRMATION LOGIC
   - Market structure aligns with direction
   - Momentum confirms direction
 - A simple engulfing candle is NOT enough
-- Require a clear momentum shift, displacement, or break of structure
+- Require a clear momentum shift, displacement, or BOS/CHoCH confirmed by candle close
 - Entry must come from a valid POI
 - A valid trade must include at least 2 confirmations
 - Confirmations can include liquidity sweep, CHoCH, BOS, FVG, rejection, or clear pattern confirmation
 
 ================================
-STEP 6 - EXECUTION RULES
+STEP 7 - EXECUTION RULES
 ================================
 
 - Prefer LIMIT entries over market entries
-- Minimum risk-to-reward = 1:2 for take_profit_1
+- Stop loss must sit at the structural invalidation level that proves the idea wrong
+- Plan targets at prior highs/lows, equal highs/lows, and obvious liquidity pools before approving the trade
+- Minimum risk-to-reward = 1:3 for take_profit_1
 - Do NOT force trades
 - If the setup is not clear, clean, and high probability, return NO TRADE
 - You are a filter, not a signal generator
@@ -933,12 +955,15 @@ STRICT RULES
 - Do NOT use heavily mitigated or multi-tapped zones as the main entry zone
 - Do NOT approve setups with weak zone behavior, internal chop, or repeated wicks inside the zone
 - Do NOT accept an engulfing candle alone as confirmation
+- Do NOT validate BOS or CHoCH from wick-only breaks
 - Do NOT force trades
 - If no strong setup exists, return a no-trade outcome using wait or avoid with bias = none
 - setup_rating must be A+ for strong confluence, B for valid but weaker confirmation, otherwise avoid
 - Be concise and structured
 - Read the Y-axis carefully for visible_price_range
 - Supply and demand zones must be tight and justified
+- stop_loss must align with structural invalidation, not a random distance
+- take_profit_1 should only be set when at least 3R is realistically available to a logical target
 
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 
@@ -1030,7 +1055,7 @@ Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 
 // ============================================
 // Dual-Chart HTF Analysis (Higher Timeframe)
-// Focus: Market structure, supply/demand zones, premium/discount
+// Focus: structure, external liquidity, support/resistance zones, premium/discount
 // ============================================
 
 export async function analyzeHTFVisionStructure(
@@ -1081,12 +1106,17 @@ STEP 1 - DETERMINE CONTEXT
   - equal highs/lows
   - previous highs/lows
 
+5. Mark the most relevant external highs/lows and protected structure
+
+6. BOS or CHoCH is only valid when a candle closes through structure, not when a wick only sweeps it
+
 ================================
 STEP 2 - IDENTIFY ZONES, BUT DO NOT TRUST THEM YET
 ================================
 
 - Detect supply zones, demand zones, and fair value gaps
 - Ignore heavily mitigated or multi-tapped zones
+- Prefer zones that align with the active dealing range and the most meaningful external liquidity
 
 ================================
 STEP 3 - PRIMARY STRATEGY SELECTION
@@ -1169,6 +1199,7 @@ STRICT RULES:
 - Do NOT force a trade from HTF alone
 - If HTF is ranging, consolidating, or unclear, bias should not be actionable
 - Ignore heavily mitigated or repeatedly tapped HTF zones
+- Do NOT validate BOS or CHoCH from wick-only breaks
 - setup_rating must be A+ for very clean context, B for usable but weaker context, otherwise avoid
 - Keep reasoning concise and structured
 - Read the Y-axis carefully
@@ -1298,6 +1329,7 @@ Using ONLY Image 2 (${timeframe}):
 - Price MUST be at or near an HTF key zone (POI)
 - Identify recent structure and whether momentum aligns with HTF bias
 - If market is ranging, consolidating, or unclear, return no-trade
+- Wait for lower-timeframe confirmation at the POI rather than assuming the first touch is tradable
 
 ================================
 STEP 2 - IDENTIFY ZONES, BUT DO NOT TRUST THEM YET
@@ -1305,6 +1337,7 @@ STEP 2 - IDENTIFY ZONES, BUT DO NOT TRUST THEM YET
 
 - Detect supply zones, demand zones, and fair value gaps
 - Ignore heavily mitigated or multi-tapped zones
+- Prefer internal FVG/order-block/imbalance confluence that sits inside or near the HTF POI
 
 ================================
 STEP 3 - FILTER BAD CONDITIONS
@@ -1315,6 +1348,7 @@ STEP 3 - FILTER BAD CONDITIONS
 - Do NOT allow a trade if there is no strong rejection or displacement
 - Do NOT allow a trade if the zone has been tapped multiple times
 - Do NOT allow a trade if structure is conflicting with HTF direction
+- Do NOT allow a trade if BOS or CHoCH is only a wick sweep without a closing break
 
 ================================
 STEP 4 - CONFIRMATION SYSTEM
@@ -1326,7 +1360,7 @@ STEP 4 - CONFIRMATION SYSTEM
   - Market structure aligns with HTF direction
   - Momentum confirms direction
 - A simple engulfing candle is NOT enough
-- Require a clear momentum shift, CHoCH, BOS, or displacement
+- Require a clear momentum shift, CHoCH, BOS, or displacement confirmed by candle close
 - A valid trade MUST include at least 2 confirmations
 - If confirmations are weak, return no valid trade setup
 
@@ -1336,7 +1370,9 @@ STEP 5 - TRADE EXECUTION RULES
 
 - Prefer LIMIT entries over market entries
 - Entry must be at POI
-- Minimum risk-to-reward = 1:2
+- Stop loss must be placed at the structural invalidation swing that proves the setup wrong
+- Targets must be mapped to prior highs/lows, equal highs/lows, or other obvious liquidity pools before approving entry
+- Minimum risk-to-reward = 1:3
 - Do NOT force trades
 - If the setup is not clear, clean, and high probability, return NO TRADE
 - You are a filter, not a signal generator
@@ -1415,9 +1451,11 @@ STRICT RULES:
 - Do NOT use heavily mitigated or repeatedly tapped zones as the entry zone
 - Do NOT accept internal consolidation, repeated wicks, or weak rejection as valid zone behavior
 - Do NOT accept an engulfing candle alone as confirmation
+- Do NOT validate BOS or CHoCH from wick-only breaks
 - If no strong setup exists, return wait or avoid with bias = none
 - setup_rating must be A+ for strong confluence, B for valid but weaker confirmation, otherwise avoid
 - Be concise and structured
+- stop_loss must align with structural invalidation and take_profit_1 should only be set when at least 3R is realistic
 - The entry_plan.reason must mention POI and confirmations
 
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
