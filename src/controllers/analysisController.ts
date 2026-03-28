@@ -135,6 +135,38 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
     const chartMinPrice = parseOptionalPrice(req.body.chartMinPrice);
     const chartMaxPrice = parseOptionalPrice(req.body.chartMaxPrice);
 
+    const runLiveAnalysisImmediately = async (input: {
+      analysisId: string;
+      pair: string;
+      timeframe: string;
+      currentPrice: number;
+      imageUrl: string;
+      candles: Array<{ timestamp: string; open: number; high: number; low: number; close: number }>;
+    }) => {
+      await createAnalysis({
+        id: input.analysisId,
+        jobId: input.analysisId,
+        userId: req.user!.id,
+        imageUrl: input.imageUrl,
+        pair: input.pair,
+        timeframe: input.timeframe,
+        assetClass: inferAssetClass(input.pair),
+        status: 'PROCESSING',
+        progress: 5,
+        currentStage: 'Preparing live analysis...',
+      });
+
+      const analysis = await runLiveChartAnalysisPipeline({
+        analysisId: input.analysisId,
+        pair: input.pair,
+        timeframe: input.timeframe,
+        currentPrice: input.currentPrice,
+        candles: input.candles,
+      });
+
+      return res.json({ analysis: serializeAnalysis(analysis) });
+    };
+
     if (!pair || !timeframe) {
       return res.status(400).json({ error: 'Pair and timeframe are required' });
     }
@@ -183,19 +215,48 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
             timeframe,
           };
 
-      const job = await createQueueJob({
-        userId: req.user!.id,
-        priority: 2,
-        inputData: queueInput,
-        analysisId,
-      });
+      try {
+        const job = await createQueueJob({
+          userId: req.user!.id,
+          priority: 2,
+          inputData: queueInput,
+          analysisId,
+        });
 
-      return res.json({
-        queued: true,
-        jobId: job.id,
-        analysisId,
-        message: 'Your live chart analysis has been queued. You can track its progress.',
-      });
+        return res.json({
+          queued: true,
+          jobId: job.id,
+          analysisId,
+          message: 'Your live chart analysis has been queued. You can track its progress.',
+        });
+      } catch (queueError) {
+        console.error('Live chart queue creation failed, falling back to immediate analysis:', queueError);
+
+        if (derivLiveSource) {
+          const liveCandles = derivCandles!;
+          const latestCandle = liveCandles[liveCandles.length - 1];
+
+          return runLiveAnalysisImmediately({
+            analysisId,
+            pair,
+            timeframe,
+            currentPrice: latestCandle.close,
+            imageUrl: 'deriv-live',
+            candles: liveCandles,
+          });
+        }
+
+        const marketData = await fetchMarketDataForLiveChart(pair, timeframe);
+
+        return runLiveAnalysisImmediately({
+          analysisId,
+          pair: marketData.symbol,
+          timeframe,
+          currentPrice: marketData.currentPrice,
+          imageUrl: 'tradingview-live',
+          candles: marketData.candles,
+        });
+      }
     }
 
     if (currentPrice === null) {
