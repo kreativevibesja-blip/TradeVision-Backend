@@ -109,12 +109,70 @@ const mapSetupQuality = (rating: VisionAnalysisResult['quality']['setupRating'])
   return 'low';
 };
 
+const normalizeZoneBounds = (zone: VisionAnalysisResult['zones']['supply'] | VisionAnalysisResult['zones']['demand']) => {
+  if (!zone || zone.min == null || zone.max == null) {
+    return null;
+  }
+
+  return {
+    low: Math.min(zone.min, zone.max),
+    high: Math.max(zone.min, zone.max),
+  };
+};
+
+const getBreathingRoom = (
+  zone: { low: number; high: number } | null,
+  visiblePriceRange: VisionAnalysisResult['visiblePriceRange'],
+  referencePrice: number
+) => {
+  const zoneHeight = zone ? Math.abs(zone.high - zone.low) : 0;
+  const visibleRangeHeight = visiblePriceRange ? Math.abs(visiblePriceRange.max - visiblePriceRange.min) : 0;
+  const percentBuffer = Math.abs(referencePrice) * 0.0005;
+
+  return Math.max(zoneHeight * 0.2, visibleRangeHeight * 0.0025, percentBuffer);
+};
+
+const withBufferedStopLoss = (
+  bias: VisionAnalysisResult['entryPlan']['bias'],
+  zones: VisionAnalysisResult['zones'],
+  visiblePriceRange: VisionAnalysisResult['visiblePriceRange'],
+  currentPrice: number,
+  rawStopLoss: number | null,
+  invalidationLevel: number | null
+) => {
+  const baseStopLoss = rawStopLoss ?? invalidationLevel;
+  const demandZone = normalizeZoneBounds(zones.demand);
+  const supplyZone = normalizeZoneBounds(zones.supply);
+
+  if (bias === 'buy' && demandZone) {
+    const breathingRoom = getBreathingRoom(demandZone, visiblePriceRange, currentPrice);
+    const bufferedZoneStop = demandZone.low - breathingRoom;
+    return baseStopLoss == null ? bufferedZoneStop : Math.min(baseStopLoss, bufferedZoneStop);
+  }
+
+  if (bias === 'sell' && supplyZone) {
+    const breathingRoom = getBreathingRoom(supplyZone, visiblePriceRange, currentPrice);
+    const bufferedZoneStop = supplyZone.high + breathingRoom;
+    return baseStopLoss == null ? bufferedZoneStop : Math.max(baseStopLoss, bufferedZoneStop);
+  }
+
+  return baseStopLoss;
+};
+
 export function generateFinalSignal(aiData: VisionAnalysisResult, currentPrice: number): TradeSignalResult {
   const interpreted = interpretSMC(aiData);
   const confirmation = mapConfirmation(aiData.entryPlan.confirmation);
   const setupQuality = mapSetupQuality(aiData.quality.setupRating);
   const signalType = interpreted.signalType;
   const entryZone = aiData.entryPlan.entryZone;
+  const stopLoss = withBufferedStopLoss(
+    aiData.entryPlan.bias,
+    aiData.zones,
+    aiData.visiblePriceRange,
+    currentPrice,
+    aiData.stopLoss,
+    aiData.riskManagement.invalidationLevel
+  );
 
   const shouldValidateEntry = signalType !== 'wait' && aiData.entryPlan.entryType !== 'none';
   const hasValidEntry = !shouldValidateEntry || validateEntry(entryZone, currentPrice);
@@ -164,7 +222,7 @@ export function generateFinalSignal(aiData: VisionAnalysisResult, currentPrice: 
     invalidationLevel: aiData.riskManagement.invalidationLevel,
     invalidationReason: aiData.riskManagement.invalidationReason,
     visiblePriceRange: aiData.visiblePriceRange,
-    stopLoss: aiData.stopLoss,
+    stopLoss,
     takeProfit1: aiData.takeProfit1,
     takeProfit2: aiData.takeProfit2,
     takeProfit3: aiData.takeProfit3,
