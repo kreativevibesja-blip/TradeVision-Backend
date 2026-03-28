@@ -1456,8 +1456,8 @@ export const getLivePlatformMetrics = async (todayDate: string, todayStartIso: s
     ),
     countRows(
       'getLivePlatformMetrics activeAnalyses',
-      ANALYSIS_TABLE,
-      (query) => query.in('status', ['QUEUED', 'PROCESSING'])
+      QUEUE_TABLE,
+      (query) => query.in('status', ['queued', 'processing'])
     ),
     countRows(
       'getLivePlatformMetrics totalAnalysesToday',
