@@ -497,6 +497,9 @@ ADVANCED SMC CONCEPTS YOU MUST APPLY WHEN CLEARLY VISIBLE
 - Identify external highs and lows, protected highs and lows, and the liquidity resting around them.
 - Respect protected highs/lows: the trade idea remains valid until that protected swing is actually broken.
 - Treat BOS and CHoCH as valid only when price closes through structure, not when a wick briefly pokes through.
+- A strong model setup often looks like: structure break, liquidity sweep or inducement, return into a clean POI such as an order block or FVG, then continuation in the dominant direction.
+- Treat an order block retest after displacement or BOS as stronger than a random touch of a zone.
+- If liquidity or IDM is swept and price sharply reclaims or rejects from the POI, that increases setup quality.
 - Treat equal highs and equal lows as liquidity pools when relevant.
 - Distinguish inducement from the main or external liquidity objective.
 - Separate external structure from internal structure.
@@ -836,6 +839,7 @@ STEP 3 - DEFINE LOCATION
 - Use the active dealing range to classify price as premium, discount, or equilibrium
 - Prefer trades from OTE-like retracement areas inside premium/discount, not from random mid-range price
 - If multiple FVGs from different visible structures/timeframes align in the same area, treat that overlap as stronger confluence
+- If an order block, liquidity sweep, and FVG overlap in the same POI, treat that as premium confluence
 
 ================================
 STEP 4 - FILTER BAD CONDITIONS
@@ -876,6 +880,7 @@ STEP 6 - CONFIRMATION LOGIC
 - A valid trade must include at least 2 confirmations
 - Confirmations can include liquidity sweep, CHoCH, BOS, FVG, rejection, or clear pattern confirmation
 - Prefer setups where price returns into an OTE/premium-discount area and then confirms with a close-based CHoCH or BOS
+- Ideal A+ setups usually combine at least 3 of these: liquidity sweep/IDM, order block or FVG retest, close-confirmed CHoCH/BOS, correct premium-discount location, and clean target path
 
 ================================
 STEP 7 - EXECUTION RULES
@@ -889,6 +894,7 @@ STEP 7 - EXECUTION RULES
 - If the setup is not clear, clean, and high probability, return NO TRADE
 - You are a filter, not a signal generator
 - When two logical targets exist, take_profit_1 should map to the first clear structure target and take_profit_2 to the next obvious liquidity target
+- Entry should preferably come from a return into the order block/FVG rather than chasing the displacement candle
 
 ========================================
 OUTPUT FORMAT (STRICT JSON ONLY)
@@ -976,6 +982,7 @@ STRICT RULES
 - stop_loss must align with structural invalidation, not a random distance
 - take_profit_1 should only be set when at least 3R is realistically available to a logical target
 - If price is in the wrong half of the dealing range for the intended direction, bias should usually be none and action should usually be wait or avoid
+- setup_rating should only be A+ when the setup resembles a clean textbook entry model with structure, location, liquidity, and execution all aligned
 
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 
@@ -1132,6 +1139,7 @@ STEP 2 - IDENTIFY ZONES, BUT DO NOT TRUST THEM YET
 - Ignore heavily mitigated or multi-tapped zones
 - Prefer zones that align with the active dealing range and the most meaningful external liquidity
 - Give extra weight to zones/FVGs that would support an eventual OTE-style retracement entry on the lower timeframe
+- Give extra weight to order blocks that caused displacement or a clear structural shift
 
 ================================
 STEP 3 - PRIMARY STRATEGY SELECTION
@@ -1355,6 +1363,7 @@ STEP 2 - IDENTIFY ZONES, BUT DO NOT TRUST THEM YET
 - Ignore heavily mitigated or multi-tapped zones
 - Prefer internal FVG/order-block/imbalance confluence that sits inside or near the HTF POI
 - Give extra weight when an LTF FVG overlaps an HTF or 1h-style FVG in the same entry area
+- Give extra weight when the entry forms after liquidity or IDM is taken and price returns into an order block
 
 ================================
 STEP 3 - FILTER BAD CONDITIONS
@@ -1381,6 +1390,7 @@ STEP 4 - CONFIRMATION SYSTEM
 - A valid trade MUST include at least 2 confirmations
 - If confirmations are weak, return no valid trade setup
 - Prefer a clean close-confirmed LTF CHoCH as the entry trigger after price returns to the POI
+- A+ setups on LTF should usually show a textbook sequence: liquidity taken, POI retest, close-confirmed CHoCH/BOS, then clean expansion away from the zone
 
 ================================
 STEP 5 - TRADE EXECUTION RULES
@@ -1395,6 +1405,7 @@ STEP 5 - TRADE EXECUTION RULES
 - If the setup is not clear, clean, and high probability, return NO TRADE
 - You are a filter, not a signal generator
 - When two logical downside or upside targets exist, take_profit_1 should be the nearer structure target and take_profit_2 the next liquidity sweep objective
+- Prefer entries from the retest of the POI, not from chasing the impulse candle after confirmation
 
 ========================================
 OUTPUT FORMAT (STRICT JSON ONLY)

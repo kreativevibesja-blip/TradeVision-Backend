@@ -278,6 +278,9 @@ ADVANCED SMC CONCEPTS YOU MUST APPLY WHEN CLEARLY VISIBLE
 - Identify external highs and lows, protected swing points, and the liquidity resting around them.
 - Respect protected highs/lows: the trade idea remains valid until that protected swing is actually broken.
 - Treat BOS and CHoCH as valid only when price closes through structure, not when a wick briefly pokes through.
+- A strong model setup often looks like: structure break, liquidity sweep or inducement, return into a clean POI such as an order block or FVG, then continuation in the dominant direction.
+- Treat an order block retest after displacement or BOS as stronger than a random touch of a zone.
+- If liquidity or IDM is swept and price sharply reclaims or rejects from the POI, that increases setup quality.
 - Treat equal highs and equal lows as liquidity pools when relevant.
 - Distinguish inducement from the main or external liquidity objective.
 - Separate external structure from internal structure.
@@ -351,6 +354,7 @@ STEP 3 - DEFINE LOCATION
 - Use the active dealing range to classify price as premium, discount, or equilibrium
 - Prefer trades from OTE-like retracement areas inside premium/discount, not from random mid-range price
 - If multiple FVGs or imbalances align in one area, treat that overlap as stronger confluence
+- If an order block, liquidity sweep, and FVG overlap in the same POI, treat that as premium confluence
 
 ================================
 STEP 4 - FILTER BAD CONDITIONS
@@ -391,6 +395,8 @@ STEP 6 - CONFIRMATION LOGIC
 - If the setup is not clear, clean, and high probability, return NO TRADE
 - You are a filter, not a signal generator
 - Prefer setups where price returns into an OTE/premium-discount area and then confirms with a close-based CHoCH or BOS
+- Ideal A+ setups usually combine at least 3 of these: liquidity sweep/IDM, order block or FVG retest, close-confirmed CHoCH/BOS, correct premium-discount location, and clean target path
+- Entry should preferably come from a return into the order block/FVG rather than chasing the displacement candle
 
 ========================================
 OUTPUT FORMAT (STRICT JSON ONLY)
@@ -480,6 +486,7 @@ STRICT RULES:
 - stop_loss must align with structural invalidation, not a random distance
 - take_profit_1 should only be set when at least 3R is realistically available to a logical target
 - If price is in the wrong half of the dealing range for the intended direction, bias should usually be none and action should usually be wait or avoid
+- setup_rating should only be A+ when the setup resembles a clean textbook entry model with structure, location, liquidity, and execution all aligned
 
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 };
