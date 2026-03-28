@@ -318,8 +318,8 @@ const drawLiquidityMarker = (context: DrawContext, analysis: MarkupAnalysis) => 
 const buildOverlay = (context: DrawContext, analysis: MarkupAnalysis) => {
   const fragments = [
     drawLegendBadges(context, analysis),
-    drawZone(context, analysis.zones?.supplyZone, '#ef4444', 'Supply zone'),
-    drawZone(context, analysis.zones?.demandZone, '#22c55e', 'Demand zone'),
+    drawZone(context, analysis.zones?.supplyZone, '#ef4444', 'Resistance zone'),
+    drawZone(context, analysis.zones?.demandZone, '#22c55e', 'Support zone'),
     drawZone(context, analysis.entryPlan?.entryZone ?? analysis.entryZone, '#3b82f6', 'Entry zone'),
     drawLiquidityMarker(context, analysis),
   ].filter(Boolean);
@@ -370,7 +370,7 @@ const resolveSafeExitLevels = (analysis: MarkupAnalysis & { takeProfit1?: number
 };
 
 const buildHTFOverlay = (context: DrawContext, analysis: MarkupAnalysis) => {
-  // HTF: Supply/demand zones + premium/discount indicator + liquidity pool
+  // HTF: Resistance/support zones + premium/discount indicator + liquidity pool
   const premiumDiscountLabel = analysis.zones?.supplyZone && analysis.zones?.demandZone
     ? (() => {
         const supply = analysis.zones.supplyZone;
@@ -387,8 +387,8 @@ const buildHTFOverlay = (context: DrawContext, analysis: MarkupAnalysis) => {
     : '';
 
   const htfBadges = [
-    analysis.zones?.supplyZone ? { label: 'Supply', color: '#ef4444' } : null,
-    analysis.zones?.demandZone ? { label: 'Demand', color: '#22c55e' } : null,
+    analysis.zones?.supplyZone ? { label: 'Resistance', color: '#ef4444' } : null,
+    analysis.zones?.demandZone ? { label: 'Support', color: '#22c55e' } : null,
     { label: 'P/D', color: '#a78bfa' },
     analysis.liquidity?.type && analysis.liquidity.type !== 'none'
       ? { label: 'Liquidity', color: analysis.liquidity.type === 'buy-side' ? '#f59e0b' : '#06b6d4' }
@@ -414,8 +414,8 @@ const buildHTFOverlay = (context: DrawContext, analysis: MarkupAnalysis) => {
 
   const fragments = [
     badgesSvg,
-    drawZone(context, analysis.zones?.supplyZone, '#ef4444', 'HTF Supply'),
-    drawZone(context, analysis.zones?.demandZone, '#22c55e', 'HTF Demand'),
+    drawZone(context, analysis.zones?.supplyZone, '#ef4444', 'HTF Resistance'),
+    drawZone(context, analysis.zones?.demandZone, '#22c55e', 'HTF Support'),
     premiumDiscountLabel,
     drawLiquidityMarker(context, analysis),
   ].filter(Boolean);
@@ -433,13 +433,13 @@ const buildHTFOverlay = (context: DrawContext, analysis: MarkupAnalysis) => {
 const buildLTFOverlay = (context: DrawContext, analysis: MarkupAnalysis & { stopLoss?: number | null; takeProfit1?: number | null; takeProfit2?: number | null; takeProfit3?: number | null }) => {
   const safeExits = resolveSafeExitLevels(analysis);
 
-  // LTF: Entry zone + SL + safe exits + internal zones + liquidity sweep
+  // LTF: Entry zone + SL + safe exits + internal support/resistance zones + liquidity sweep
   const ltfBadges = [
     (analysis.entryPlan?.entryZone ?? analysis.entryZone) ? { label: 'Entry', color: '#3b82f6' } : null,
     isFiniteNumber(analysis.stopLoss) ? { label: 'SL', color: '#ef4444' } : null,
     safeExits.length ? { label: 'Exits', color: '#10b981' } : null,
-    analysis.zones?.supplyZone ? { label: 'Int. Supply', color: '#f97316' } : null,
-    analysis.zones?.demandZone ? { label: 'Int. Demand', color: '#06b6d4' } : null,
+    analysis.zones?.supplyZone ? { label: 'Int. Resist.', color: '#f97316' } : null,
+    analysis.zones?.demandZone ? { label: 'Int. Support', color: '#06b6d4' } : null,
     analysis.liquidity?.type && analysis.liquidity.type !== 'none'
       ? { label: 'Sweep', color: analysis.liquidity.type === 'buy-side' ? '#f59e0b' : '#06b6d4' }
       : null,
@@ -464,8 +464,8 @@ const buildLTFOverlay = (context: DrawContext, analysis: MarkupAnalysis & { stop
 
   const fragments = [
     badgesSvg,
-    drawZone(context, analysis.zones?.supplyZone, '#f97316', 'Internal supply'),
-    drawZone(context, analysis.zones?.demandZone, '#06b6d4', 'Internal demand'),
+    drawZone(context, analysis.zones?.supplyZone, '#f97316', 'Internal resistance'),
+    drawZone(context, analysis.zones?.demandZone, '#06b6d4', 'Internal support'),
     drawZone(context, analysis.entryPlan?.entryZone ?? analysis.entryZone, '#3b82f6', 'Entry zone'),
     drawPriceLevel(context, analysis.stopLoss, '#ef4444', 'Stop Loss'),
     ...safeExits.map((exit) => drawPriceLevel(context, exit.price, exit.color, exit.label)),
