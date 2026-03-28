@@ -292,7 +292,16 @@ export const createUser = (values: Partial<UserRecord> & Pick<UserRecord, 'email
 export const updateUser = (id: string, values: Partial<UserRecord>) =>
   updateSingle<UserRecord>('updateUser', USER_TABLE, values, (query) => query.eq('id', id));
 
-export const listUsersPage = async (search: string | undefined, page: number, limit: number) => {
+export const listUsersPage = async (
+  search: string | undefined,
+  page: number,
+  limit: number,
+  filters?: {
+    subscription?: SubscriptionTier;
+    createdFrom?: string;
+    createdTo?: string;
+  }
+) => {
   const skip = (page - 1) * limit;
   const todayStamp = new Date().toISOString().slice(0, 10);
   const monthStartIso = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1, 0, 0, 0, 0)).toISOString();
@@ -305,6 +314,18 @@ export const listUsersPage = async (search: string | undefined, page: number, li
   if (search?.trim()) {
     const term = normalizeSearch(search);
     query = query.or(`email.ilike.%${term}%,name.ilike.%${term}%`);
+  }
+
+  if (filters?.subscription) {
+    query = query.eq('subscription', filters.subscription);
+  }
+
+  if (filters?.createdFrom) {
+    query = query.gte('createdAt', filters.createdFrom);
+  }
+
+  if (filters?.createdTo) {
+    query = query.lte('createdAt', filters.createdTo);
   }
 
   const { data, count, error } = await query;

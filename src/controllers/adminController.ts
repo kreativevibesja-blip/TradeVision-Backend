@@ -136,8 +136,21 @@ export const getUsers = async (req: Request, res: Response) => {
     const search = req.query.search as string;
     const page = parseInt(req.query.page as string) || 1;
     const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
+    const subscription = req.query.subscription === 'FREE' || req.query.subscription === 'PRO'
+      ? (req.query.subscription as 'FREE' | 'PRO')
+      : undefined;
+    const createdFrom = typeof req.query.createdFrom === 'string' && req.query.createdFrom.trim().length > 0
+      ? req.query.createdFrom
+      : undefined;
+    const createdTo = typeof req.query.createdTo === 'string' && req.query.createdTo.trim().length > 0
+      ? req.query.createdTo
+      : undefined;
 
-    const { users, total } = await listUsersPage(search, page, limit);
+    const { users, total } = await listUsersPage(search, page, limit, {
+      subscription,
+      createdFrom,
+      createdTo,
+    });
 
     return res.json({ users, total, page, pages: Math.ceil(total / limit) });
   } catch (error) {
