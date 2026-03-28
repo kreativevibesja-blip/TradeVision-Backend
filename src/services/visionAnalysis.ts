@@ -40,6 +40,23 @@ export interface SMCEntryPlan {
   reason: string;
 }
 
+export interface SMCCounterTrendPlan {
+  action: 'enter' | 'wait' | 'avoid';
+  bias: 'buy' | 'sell' | 'none';
+  entryType: 'instant' | 'confirmation' | 'none';
+  entryZone: SMCZone | null;
+  confirmation: 'CHoCH' | 'BOS' | 'rejection' | 'none';
+  reason: string;
+  warning: string;
+  invalidationLevel: number | null;
+  invalidationReason: string;
+  stopLoss: number | null;
+  takeProfit1: number | null;
+  takeProfit2: number | null;
+  takeProfit3: number | null;
+  confidence: number;
+}
+
 export interface SMCRiskManagement {
   invalidationLevel: number | null;
   invalidationReason: string;
@@ -68,6 +85,7 @@ export interface VisionAnalysisResult {
   zones: SMCZones;
   pricePosition: SMCPricePosition;
   entryPlan: SMCEntryPlan;
+  counterTrendPlan?: SMCCounterTrendPlan | null;
   riskManagement: SMCRiskManagement;
   quality: SMCQuality;
   finalVerdict: SMCFinalVerdict;
@@ -245,6 +263,40 @@ const normalizeConfirmation = (value: unknown): SMCEntryPlan['confirmation'] => 
   }
 
   return 'none';
+};
+
+const normalizeCounterTrendPlan = (value: unknown): SMCCounterTrendPlan | null => {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const action = normalizeFinalAction(record.action);
+  const bias = normalizeBias(record.bias);
+  const entryType = normalizeEntryType(record.entry_type);
+  const entryZone = normalizeZone(record.entry_zone);
+  const confirmation = normalizeConfirmation(record.confirmation);
+
+  if (bias === 'none' && action !== 'enter' && entryType === 'none' && !entryZone) {
+    return null;
+  }
+
+  return {
+    action,
+    bias,
+    entryType,
+    entryZone,
+    confirmation,
+    reason: normalizeText(record.reason, 'No clean counter-trend setup is justified against the primary trend right now.'),
+    warning: normalizeText(record.warning, 'Counter-trend trades are aggressive, lower probability, and should be managed faster than the main trend setup.'),
+    invalidationLevel: normalizeNumeric(record.invalidation_level),
+    invalidationReason: normalizeText(record.invalidation_reason, 'The counter-trend idea fails if price breaks the rejection structure supporting it.'),
+    stopLoss: normalizeNumeric(record.stop_loss),
+    takeProfit1: normalizeNumeric(record.take_profit_1),
+    takeProfit2: normalizeNumeric(record.take_profit_2),
+    takeProfit3: normalizeNumeric(record.take_profit_3),
+    confidence: normalizeConfidence(record.confidence),
+  };
 };
 
 const normalizeSetupRating = (value: unknown): SMCQuality['setupRating'] => {
@@ -722,6 +774,22 @@ export async function analyzeVisionStructure(
     "confirmation": "CHoCH | BOS | rejection | none",
     "reason": "Brief reason for this entry"
   },
+  "counter_trend_plan": {
+    "action": "enter | wait | avoid",
+    "bias": "buy | sell | none",
+    "entry_type": "instant | confirmation | none",
+    "entry_zone": { "min": number | null, "max": number | null },
+    "confirmation": "CHoCH | BOS | rejection | none",
+    "reason": "Brief reason for the aggressive counter-trend idea",
+    "warning": "Explicit warning that this setup is aggressive and lower probability",
+    "invalidation_level": number | null,
+    "invalidation_reason": "What breaks the counter-trend idea",
+    "stop_loss": number | null,
+    "take_profit_1": number | null,
+    "take_profit_2": number | null,
+    "take_profit_3": number | null,
+    "confidence": 1-100
+  },
   "risk_management": {
     "invalidation_level": number,
     "invalidation_reason": "What breaks the setup"
@@ -769,6 +837,10 @@ Provide a useful overview of the chart's market structure and key levels.
 Keep reasoning concise in 2-3 short sentences.
 Do not include stop loss or take profit levels.
 
+You may also include an optional counter_trend_plan object only when a clean aggressive support/resistance rejection setup exists against the main trend.
+If used, it must include: action, bias, entry_type, entry_zone, confirmation, reason, warning, invalidation_level, invalidation_reason, stop_loss, take_profit_1, take_profit_2, take_profit_3, confidence.
+The warning must explicitly say the setup is aggressive, lower probability, and should be managed quickly.
+
 Return STRICT JSON ONLY.
 Do not use markdown.
 Do not add commentary outside the JSON.`;
@@ -806,6 +878,13 @@ Use multi-strategy confluence including:
 - Liquidity (equal highs/lows, stop hunts)
 - Momentum / displacement
 - Price behavior inside zones
+
+COUNTER-TREND RULES
+- The main trend-following plan remains the priority.
+- You may include ONE secondary counter_trend_plan only if price is reacting at a clear support/resistance area against the main trend.
+- Counter-trend ideas must rely on rejection and/or engulfing-style reaction and should preferably wait for confirmation rather than blindly enter.
+- Counter-trend exits must be conservative and based on the nearest realistic reaction levels, not on full trend reversal assumptions.
+- If no clean counter-trend setup exists, omit it or set bias to none and action to avoid.
 
 ================================
 STEP 1 - DETERMINE CONTEXT FIRST
@@ -939,6 +1018,22 @@ OUTPUT FORMAT (STRICT JSON ONLY)
     "confirmation": "CHoCH | BOS | rejection | none",
     "reason": "Explain the POI, the confirmations, and why the trade is valid"
   },
+  "counter_trend_plan": {
+    "action": "enter | wait | avoid",
+    "bias": "buy | sell | none",
+    "entry_type": "instant | confirmation | none",
+    "entry_zone": { "min": number | null, "max": number | null },
+    "confirmation": "CHoCH | BOS | rejection | none",
+    "reason": "Explain the support/resistance rejection logic behind the aggressive counter-trend idea",
+    "warning": "Explicit warning that this counter-trend setup is aggressive and lower probability",
+    "invalidation_level": number | null,
+    "invalidation_reason": "Explain what breaks the counter-trend idea",
+    "stop_loss": number | null,
+    "take_profit_1": number | null,
+    "take_profit_2": number | null,
+    "take_profit_3": number | null,
+    "confidence": 1-100
+  },
   "risk_management": {
     "invalidation_level": number | null,
     "invalidation_reason": "Explain what breaks the setup"
@@ -983,6 +1078,7 @@ STRICT RULES
 - take_profit_1 should only be set when at least 3R is realistically available to a logical target
 - If price is in the wrong half of the dealing range for the intended direction, bias should usually be none and action should usually be wait or avoid
 - setup_rating should only be A+ when the setup resembles a clean textbook entry model with structure, location, liquidity, and execution all aligned
+- counter_trend_plan, when present, must be clearly warned as aggressive and should target nearer exits than the main trend setup
 
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 
@@ -997,6 +1093,7 @@ Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
     const zones = parsed.zones as Record<string, unknown> | undefined;
     const pricePosition = parsed.price_position as Record<string, unknown> | undefined;
     const entryPlan = parsed.entry_plan as Record<string, unknown> | undefined;
+    const counterTrendPlan = normalizeCounterTrendPlan(parsed.counter_trend_plan);
     const riskManagement = parsed.risk_management as Record<string, unknown> | undefined;
     const quality = parsed.quality as Record<string, unknown> | undefined;
     const finalVerdict = parsed.final_verdict as Record<string, unknown> | undefined;
@@ -1039,6 +1136,7 @@ Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
           'No disciplined entry plan is justified until structure and location improve.'
         ),
       },
+      counterTrendPlan,
       riskManagement: {
         invalidationLevel: normalizeNumeric(riskManagement?.invalidation_level),
         invalidationReason: normalizeText(
@@ -1153,6 +1251,8 @@ Select ONE primary strategy based on HTF condition:
 
 Do NOT mix strategies.
 
+If you mention a counter_trend_plan on HTF, it must default to avoid/none because HTF alone does not execute aggressive counter-trend entries.
+
 ========================================
 OUTPUT FORMAT (STRICT JSON ONLY)
 ========================================
@@ -1192,6 +1292,22 @@ OUTPUT FORMAT (STRICT JSON ONLY)
     "entry_zone": null,
     "confirmation": "none",
     "reason": "HTF defines bias and POIs only"
+  },
+  "counter_trend_plan": {
+    "action": "avoid",
+    "bias": "none",
+    "entry_type": "none",
+    "entry_zone": null,
+    "confirmation": "none",
+    "reason": "HTF does not execute counter-trend trades on its own",
+    "warning": "Counter-trend execution should be judged on the lower timeframe only",
+    "invalidation_level": null,
+    "invalidation_reason": "none",
+    "stop_loss": null,
+    "take_profit_1": null,
+    "take_profit_2": null,
+    "take_profit_3": null,
+    "confidence": 0
   },
   "risk_management": {
     "invalidation_level": number | null,
@@ -1236,6 +1352,7 @@ Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
     const zones = parsed.zones as Record<string, unknown> | undefined;
     const pricePosition = parsed.price_position as Record<string, unknown> | undefined;
     const entryPlan = parsed.entry_plan as Record<string, unknown> | undefined;
+    const counterTrendPlan = normalizeCounterTrendPlan(parsed.counter_trend_plan);
     const riskManagement = parsed.risk_management as Record<string, unknown> | undefined;
     const quality = parsed.quality as Record<string, unknown> | undefined;
     const finalVerdict = parsed.final_verdict as Record<string, unknown> | undefined;
@@ -1269,6 +1386,7 @@ Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
         confirmation: 'none',
         reason: normalizeText(entryPlan?.reason, 'HTF provides bias only — entry is determined by the lower timeframe.'),
       },
+      counterTrendPlan,
       riskManagement: {
         invalidationLevel: normalizeNumeric(riskManagement?.invalidation_level),
         invalidationReason: normalizeText(riskManagement?.invalidation_reason, 'HTF structural invalidation level.'),
@@ -1341,6 +1459,12 @@ Use multi-strategy confluence including:
 - Liquidity (equal highs/lows, stop hunts)
 - Momentum / displacement
 - Price behavior inside zones
+
+COUNTER-TREND RULES
+- The main HTF-aligned setup remains the priority.
+- You may include ONE counter_trend_plan only when price is reacting sharply from a clear support/resistance area and a lower-timeframe rejection or engulfing-style reversal is plausible.
+- Counter-trend ideas must have conservative exits and a clear warning that they are aggressive and lower probability.
+- If no clean counter-trend setup exists, omit it or set bias to none and action to avoid.
 
 ================================
 STEP 1 - DETERMINE CONTEXT
@@ -1450,6 +1574,22 @@ OUTPUT FORMAT (STRICT JSON ONLY)
     "confirmation": "CHoCH | BOS | rejection | none",
     "reason": "Explain the POI, the confirmations, and why the entry is valid"
   },
+  "counter_trend_plan": {
+    "action": "enter | wait | avoid",
+    "bias": "buy | sell | none",
+    "entry_type": "instant | confirmation | none",
+    "entry_zone": { "min": number | null, "max": number | null },
+    "confirmation": "CHoCH | BOS | rejection | none",
+    "reason": "Explain the support/resistance rejection logic behind the aggressive counter-trend idea",
+    "warning": "Explicit warning that this counter-trend setup is aggressive and lower probability",
+    "invalidation_level": number | null,
+    "invalidation_reason": "The exact structural level that invalidates the counter-trend idea",
+    "stop_loss": number | null,
+    "take_profit_1": number | null,
+    "take_profit_2": number | null,
+    "take_profit_3": number | null,
+    "confidence": 1-100
+  },
   "risk_management": {
     "invalidation_level": number | null,
     "invalidation_reason": "The exact structural level that invalidates this entry"
@@ -1487,6 +1627,7 @@ STRICT RULES:
 - Be concise and structured
 - stop_loss must align with structural invalidation and take_profit_1 should only be set when at least 3R is realistic
 - The entry_plan.reason must mention POI and confirmations
+- counter_trend_plan, when present, must be explicitly warned as aggressive and should use nearer exits than the main trend trade
 
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 
@@ -1497,6 +1638,7 @@ Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
     const zones = parsed.zones as Record<string, unknown> | undefined;
     const pricePosition = parsed.price_position as Record<string, unknown> | undefined;
     const entryPlan = parsed.entry_plan as Record<string, unknown> | undefined;
+    const counterTrendPlan = normalizeCounterTrendPlan(parsed.counter_trend_plan);
     const riskManagement = parsed.risk_management as Record<string, unknown> | undefined;
     const quality = parsed.quality as Record<string, unknown> | undefined;
     const finalVerdict = parsed.final_verdict as Record<string, unknown> | undefined;
@@ -1530,6 +1672,7 @@ Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
         confirmation: normalizeConfirmation(entryPlan?.confirmation),
         reason: normalizeText(entryPlan?.reason, 'No disciplined entry is justified until internal structure confirms.'),
       },
+      counterTrendPlan,
       riskManagement: {
         invalidationLevel: normalizeNumeric(riskManagement?.invalidation_level),
         invalidationReason: normalizeText(riskManagement?.invalidation_reason, 'The setup is invalidated if price breaks the structural level.'),

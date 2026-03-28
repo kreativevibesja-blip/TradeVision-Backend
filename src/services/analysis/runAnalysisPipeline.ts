@@ -99,6 +99,7 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
         zones: htfVision.zones,
         pricePosition: htfVision.pricePosition,
         entryPlan: ltfVision.entryPlan,
+        counterTrendPlan: ltfVision.counterTrendPlan ?? null,
         riskManagement: ltfVision.riskManagement,
         quality: {
           setupRating: htfVision.quality.setupRating,

@@ -80,6 +80,40 @@ const normalizeConfirmation = (value: unknown): VisionAnalysisResult['entryPlan'
   return 'none';
 };
 
+const normalizeCounterTrendPlan = (value: unknown): VisionAnalysisResult['counterTrendPlan'] => {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const action = normalizeFinalAction(record.action);
+  const bias = normalizeBias(record.bias);
+  const entryType = normalizeEntryType(record.entry_type);
+  const entryZone = normalizeZone(record.entry_zone);
+  const confirmation = normalizeConfirmation(record.confirmation);
+
+  if (bias === 'none' && action !== 'enter' && entryType === 'none' && !entryZone) {
+    return null;
+  }
+
+  return {
+    action,
+    bias,
+    entryType,
+    entryZone,
+    confirmation,
+    reason: normalizeText(record.reason, 'No clean counter-trend setup is justified against the primary trend right now.'),
+    warning: normalizeText(record.warning, 'Counter-trend trades are aggressive, lower probability, and should be managed faster than the main trend setup.'),
+    invalidationLevel: normalizeNumeric(record.invalidation_level),
+    invalidationReason: normalizeText(record.invalidation_reason, 'The counter-trend idea fails if price breaks the rejection structure supporting it.'),
+    stopLoss: normalizeNumeric(record.stop_loss),
+    takeProfit1: normalizeNumeric(record.take_profit_1),
+    takeProfit2: normalizeNumeric(record.take_profit_2),
+    takeProfit3: normalizeNumeric(record.take_profit_3),
+    confidence: normalizeConfidence(record.confidence),
+  };
+};
+
 const normalizeSetupRating = (value: unknown): VisionAnalysisResult['quality']['setupRating'] => {
   const trimmed = typeof value === 'string' ? value.trim().toUpperCase() : '';
   if (trimmed === 'A+' || trimmed === 'B') {
@@ -324,6 +358,14 @@ Use multi-strategy confluence including:
 - Momentum / displacement
 - Price behavior inside zones
 
+COUNTER-TREND RULES
+- The main trend-following plan remains the priority.
+- You may include ONE secondary counter_trend_plan only if price is reacting at a clear support/resistance area against the main trend.
+- Counter-trend ideas must require rejection and/or a strong engulfing-style reaction, and should preferably wait for confirmation rather than blindly enter.
+- Counter-trend exits must be conservative and based on the nearest realistic reaction levels, not on full trend reversal assumptions.
+- If you include a counter-trend idea, the warning must explicitly say it is aggressive, lower probability, and should be managed quickly.
+- If no clean counter-trend setup exists, omit it or set bias to none and action to avoid.
+
 ================================
 STEP 1 - DETERMINE CONTEXT FIRST
 ================================
@@ -441,6 +483,22 @@ OUTPUT FORMAT (STRICT JSON ONLY)
     "confirmation": "CHoCH | BOS | rejection | none",
     "reason": "Explain the POI, the confirmations, and why the trade is valid"
   },
+  "counter_trend_plan": {
+    "action": "enter | wait | avoid",
+    "bias": "buy | sell | none",
+    "entry_type": "instant | confirmation | none",
+    "entry_zone": { "min": number | null, "max": number | null },
+    "confirmation": "CHoCH | BOS | rejection | none",
+    "reason": "Explain the support/resistance rejection logic behind the aggressive counter-trend idea",
+    "warning": "Explicit warning that this counter-trend setup is aggressive and lower probability",
+    "invalidation_level": number | null,
+    "invalidation_reason": "Explain what breaks the counter-trend idea",
+    "stop_loss": number | null,
+    "take_profit_1": number | null,
+    "take_profit_2": number | null,
+    "take_profit_3": number | null,
+    "confidence": 1-100
+  },
   "risk_management": {
     "invalidation_level": number | null,
     "invalidation_reason": "Explain what breaks the setup"
@@ -487,6 +545,7 @@ STRICT RULES:
 - take_profit_1 should only be set when at least 3R is realistically available to a logical target
 - If price is in the wrong half of the dealing range for the intended direction, bias should usually be none and action should usually be wait or avoid
 - setup_rating should only be A+ when the setup resembles a clean textbook entry model with structure, location, liquidity, and execution all aligned
+- counter_trend_plan, when present, must be clearly warned as aggressive and should target nearer exits than the main trend setup
 
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 };
@@ -515,6 +574,7 @@ export const analyzeLiveChartCandles = async (
       const zones = parsed.zones as Record<string, unknown> | undefined;
       const pricePosition = parsed.price_position as Record<string, unknown> | undefined;
       const entryPlan = parsed.entry_plan as Record<string, unknown> | undefined;
+      const counterTrendPlan = normalizeCounterTrendPlan(parsed.counter_trend_plan);
       const riskManagement = parsed.risk_management as Record<string, unknown> | undefined;
       const quality = parsed.quality as Record<string, unknown> | undefined;
       const finalVerdict = parsed.final_verdict as Record<string, unknown> | undefined;
@@ -548,6 +608,7 @@ export const analyzeLiveChartCandles = async (
           confirmation: normalizeConfirmation(entryPlan?.confirmation),
           reason: normalizeText(entryPlan?.reason, 'No disciplined entry is justified until the market returns to a stronger point of interest.'),
         },
+        counterTrendPlan,
         riskManagement: {
           invalidationLevel: normalizeNumeric(riskManagement?.invalidation_level),
           invalidationReason: normalizeText(riskManagement?.invalidation_reason, 'The setup fails if price breaks the structure that supports the active bias.'),
