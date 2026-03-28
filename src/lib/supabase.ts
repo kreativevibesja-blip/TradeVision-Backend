@@ -26,6 +26,8 @@ const REFERRAL_TABLE = 'Referral';
 const COMMISSION_TABLE = 'Commission';
 const PAYOUT_TABLE = 'Payout';
 const QUEUE_TABLE = 'AnalysisQueue';
+const VISITOR_PRESENCE_TABLE = 'VisitorPresence';
+const VISITOR_DAILY_TABLE = 'VisitorDaily';
 
 export type SubscriptionTier = 'FREE' | 'PRO';
 export type UserRole = 'USER' | 'ADMIN';
@@ -200,6 +202,32 @@ export interface TicketRecord {
   closedAt: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface VisitorPresenceRecord {
+  id: string;
+  sessionId: string;
+  userId: string | null;
+  currentPath: string | null;
+  userAgent: string | null;
+  firstSeenAt: string;
+  lastSeenAt: string;
+}
+
+export interface VisitorDailyRecord {
+  id: string;
+  sessionId: string;
+  visitorDate: string;
+  userId: string | null;
+  firstSeenAt: string;
+  lastSeenAt: string;
+}
+
+export interface LivePlatformMetrics {
+  currentVisitors: number;
+  totalVisitorsToday: number;
+  activeAnalyses: number;
+  totalAnalysesToday: number;
 }
 
 const logDbError = (context: string, error: unknown) => {
@@ -1356,4 +1384,92 @@ export const countRecentQueueJobs = async (userId: string, minutes: number): Pro
 
   if (error) return 0;
   return count ?? 0;
+};
+
+export const upsertVisitorPresence = async (values: {
+  sessionId: string;
+  userId?: string | null;
+  currentPath?: string | null;
+  userAgent?: string | null;
+  lastSeenAt?: string;
+}) => {
+  const now = values.lastSeenAt ?? new Date().toISOString();
+  const { data, error } = await supabase
+    .from(VISITOR_PRESENCE_TABLE)
+    .upsert({
+      sessionId: values.sessionId,
+      userId: values.userId ?? null,
+      currentPath: values.currentPath ?? null,
+      userAgent: values.userAgent ?? null,
+      lastSeenAt: now,
+    }, {
+      onConflict: 'sessionId',
+    })
+    .select('*')
+    .maybeSingle();
+
+  if (error) {
+    logDbError('upsertVisitorPresence', error);
+  }
+
+  return (data as VisitorPresenceRecord | null) ?? null;
+};
+
+export const upsertVisitorDailyRecord = async (values: {
+  sessionId: string;
+  visitorDate: string;
+  userId?: string | null;
+  lastSeenAt?: string;
+}) => {
+  const now = values.lastSeenAt ?? new Date().toISOString();
+  const { data, error } = await supabase
+    .from(VISITOR_DAILY_TABLE)
+    .upsert({
+      sessionId: values.sessionId,
+      visitorDate: values.visitorDate,
+      userId: values.userId ?? null,
+      lastSeenAt: now,
+    }, {
+      onConflict: 'sessionId,visitorDate',
+    })
+    .select('*')
+    .maybeSingle();
+
+  if (error) {
+    logDbError('upsertVisitorDailyRecord', error);
+  }
+
+  return (data as VisitorDailyRecord | null) ?? null;
+};
+
+export const getLivePlatformMetrics = async (todayDate: string, todayStartIso: string, activeSinceIso: string): Promise<LivePlatformMetrics> => {
+  const [currentVisitorsCount, totalVisitorsTodayCount, activeAnalysesCount, totalAnalysesTodayCount] = await Promise.all([
+    countRows(
+      'getLivePlatformMetrics currentVisitors',
+      VISITOR_PRESENCE_TABLE,
+      (query) => query.gte('lastSeenAt', activeSinceIso)
+    ),
+    countRows(
+      'getLivePlatformMetrics totalVisitorsToday',
+      VISITOR_DAILY_TABLE,
+      (query) => query.eq('visitorDate', todayDate)
+    ),
+    countRows(
+      'getLivePlatformMetrics activeAnalyses',
+      ANALYSIS_TABLE,
+      (query) => query.in('status', ['QUEUED', 'PROCESSING'])
+    ),
+    countRows(
+      'getLivePlatformMetrics totalAnalysesToday',
+      ANALYSIS_TABLE,
+      (query) => query.gte('createdAt', todayStartIso)
+    ),
+  ]);
+
+  return {
+    currentVisitors: currentVisitorsCount,
+    totalVisitorsToday: totalVisitorsTodayCount,
+    activeAnalyses: activeAnalysesCount,
+    totalAnalysesToday: totalAnalysesTodayCount,
+  };
 };

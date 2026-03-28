@@ -9,6 +9,7 @@ import {
   getAnalysisById,
   getAnalyticsBuckets,
   getCompletedRevenue,
+  getLivePlatformMetrics,
   getPaymentById,
   listAllAnalysesPage,
   listActiveAnnouncements,
@@ -59,6 +60,20 @@ const serializeAnnouncementContent = (payload: AnnouncementContentPayload) =>
     body: payload.body,
     expiresAt: payload.expiresAt,
   });
+
+const JAMAICA_UTC_OFFSET_HOURS = 5;
+
+const getJamaicaTodayDate = () => {
+  const now = new Date(Date.now() - JAMAICA_UTC_OFFSET_HOURS * 60 * 60 * 1000);
+  return now.toISOString().slice(0, 10);
+};
+
+const getJamaicaDayStartIso = (dateValue = getJamaicaTodayDate()) => {
+  const [year, month, day] = dateValue.split('-').map(Number);
+  return new Date(Date.UTC(year, month - 1, day, JAMAICA_UTC_OFFSET_HOURS, 0, 0, 0)).toISOString();
+};
+
+const getActiveVisitorSinceIso = () => new Date(Date.now() - 5 * 60 * 1000).toISOString();
 
 const mapAnnouncementRecord = (announcement: AnnouncementRecord) => {
   const parsedContent = parseAnnouncementContent(announcement.content);
@@ -112,11 +127,13 @@ const getExpiryFromRequest = (durationValue: unknown, durationUnit: unknown) => 
 
 export const getDashboardStats = async (_req: Request, res: Response) => {
   try {
-    const [totalUsers, activeSubscribers, totalAnalyses, payments] = await Promise.all([
+    const jamaicaToday = getJamaicaTodayDate();
+    const [totalUsers, activeSubscribers, totalAnalyses, payments, liveMetrics] = await Promise.all([
       countUsers(),
       countUsers('PRO'),
       countAnalyses(),
       getCompletedRevenue(),
+      getLivePlatformMetrics(jamaicaToday, getJamaicaDayStartIso(jamaicaToday), getActiveVisitorSinceIso()),
     ]);
 
     return res.json({
@@ -124,6 +141,7 @@ export const getDashboardStats = async (_req: Request, res: Response) => {
       activeSubscribers,
       totalAnalyses,
       totalRevenue: payments || 0,
+      liveMetrics,
     });
   } catch (error) {
     console.error('Admin dashboard error:', error);
@@ -322,12 +340,17 @@ export const getAnalytics = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Invalid date range' });
     }
 
-    const { userGrowth, analysesPerDay, revenueData } = await getAnalyticsBuckets(fromDate.toISOString(), toDate.toISOString());
+    const jamaicaToday = getJamaicaTodayDate();
+    const [{ userGrowth, analysesPerDay, revenueData }, liveMetrics] = await Promise.all([
+      getAnalyticsBuckets(fromDate.toISOString(), toDate.toISOString()),
+      getLivePlatformMetrics(jamaicaToday, getJamaicaDayStartIso(jamaicaToday), getActiveVisitorSinceIso()),
+    ]);
 
     return res.json({
       userGrowth,
       analysesPerDay,
       revenueData,
+      liveMetrics,
       range: {
         from: fromDate.toISOString(),
         to: toDate.toISOString(),
