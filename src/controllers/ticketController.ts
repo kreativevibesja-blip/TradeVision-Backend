@@ -91,6 +91,65 @@ export const createTicket = async (req: AuthRequest, res: Response) => {
   }
 };
 
+export const createAdminTicket = async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = normalizeText(req.body.userId);
+    const subject = normalizeText(req.body.subject);
+    const message = normalizeText(req.body.message);
+    const adminNotes = normalizeText(req.body.adminNotes);
+    const category = normalizeText(req.body.category).toUpperCase() as TicketCategory;
+    const priority = normalizeText(req.body.priority).toUpperCase() as TicketPriority;
+
+    if (!userId) {
+      return res.status(400).json({ error: 'A customer account must be selected' });
+    }
+
+    if (!subject || subject.length < 5) {
+      return res.status(400).json({ error: 'Subject must be at least 5 characters' });
+    }
+
+    if (!message || message.length < 20) {
+      return res.status(400).json({ error: 'Issue summary must be at least 20 characters' });
+    }
+
+    if (!TICKET_CATEGORIES.includes(category)) {
+      return res.status(400).json({ error: 'Invalid ticket category' });
+    }
+
+    if (!TICKET_PRIORITIES.includes(priority)) {
+      return res.status(400).json({ error: 'Invalid ticket priority' });
+    }
+
+    const user = await getUserById(userId);
+    if (!user) {
+      return res.status(404).json({ error: 'Selected user was not found' });
+    }
+
+    const ticket = await createTicketRecord({
+      ticketNumber: createTicketNumber(),
+      userId: user.id,
+      userEmail: user.email,
+      userName: user.name,
+      whatsappNumber: sanitizeWhatsAppNumber(req.body.whatsappNumber),
+      subject,
+      category,
+      priority,
+      message,
+    });
+
+    const hydratedTicket = adminNotes
+      ? await updateTicketRecord(ticket.id, {
+          adminNotes,
+        })
+      : ticket;
+
+    return res.status(201).json({ ticket: mapTicket(hydratedTicket) });
+  } catch (error) {
+    console.error('Create admin ticket error:', error);
+    return res.status(500).json({ error: 'Failed to create admin ticket' });
+  }
+};
+
 export const getMyTickets = async (req: AuthRequest, res: Response) => {
   try {
     const page = parseInt(req.query.page as string) || 1;

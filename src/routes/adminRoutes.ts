@@ -22,7 +22,7 @@ import {
   updateAnnouncement,
   deleteAnnouncement,
 } from '../controllers/adminController';
-import { getAdminTickets, getOpenTicketCount, updateAdminTicket, replyToTicket } from '../controllers/ticketController';
+import { getAdminTickets, getOpenTicketCount, updateAdminTicket, replyToTicket, createAdminTicket } from '../controllers/ticketController';
 import { getCoupons, createCoupon, toggleCoupon, deleteCoupon } from '../controllers/couponController';
 import {
   getAdminReferralDashboard,
@@ -72,6 +72,7 @@ router.patch('/announcements/:id', updateAnnouncement);
 router.delete('/announcements/:id', deleteAnnouncement);
 router.get('/tickets', getAdminTickets);
 router.get('/tickets/count', getOpenTicketCount);
+router.post('/tickets', createAdminTicket);
 router.patch('/tickets/:id', updateAdminTicket);
 router.post('/tickets/:id/reply', replyToTicket);
 router.get('/coupons', getCoupons);
