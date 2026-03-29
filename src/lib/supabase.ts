@@ -115,6 +115,7 @@ interface ListPaymentsFilters {
   plan?: SubscriptionTier;
   status?: PaymentStatus;
   paymentMethod?: PaymentMethod;
+  paymentMethods?: PaymentMethod[];
   createdAfter?: string;
 }
 
@@ -846,6 +847,10 @@ export const listAllPaymentsPage = async (page: number, limit: number, filters: 
 
   if (filters.paymentMethod) {
     query = query.eq('paymentMethod', filters.paymentMethod);
+  }
+
+  if (filters.paymentMethods?.length) {
+    query = query.in('paymentMethod', filters.paymentMethods);
   }
 
   if (filters.createdAfter) {

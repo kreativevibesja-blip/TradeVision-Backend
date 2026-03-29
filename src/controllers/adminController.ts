@@ -238,14 +238,21 @@ export const getPayments = async (req: Request, res: Response) => {
   try {
     const page = parseInt(req.query.page as string) || 1;
     const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
+    const scope = req.query.scope === 'COMPLETED_CHECKOUTS' || req.query.scope === 'BANK_TRANSFERS'
+      ? req.query.scope
+      : undefined;
     const plan = req.query.plan === 'FREE' || req.query.plan === 'PRO' || req.query.plan === 'TOP_TIER' ? req.query.plan : undefined;
-    const status = req.query.status === 'PENDING' || req.query.status === 'COMPLETED' || req.query.status === 'FAILED' || req.query.status === 'REFUNDED'
+    const requestedStatus = req.query.status === 'PENDING' || req.query.status === 'COMPLETED' || req.query.status === 'FAILED' || req.query.status === 'REFUNDED'
       ? req.query.status
       : undefined;
-    const paymentMethod = req.query.paymentMethod === 'PAYPAL' || req.query.paymentMethod === 'CARD' || req.query.paymentMethod === 'BANK_TRANSFER' || req.query.paymentMethod === 'COUPON'
+    const requestedPaymentMethod = req.query.paymentMethod === 'PAYPAL' || req.query.paymentMethod === 'CARD' || req.query.paymentMethod === 'BANK_TRANSFER' || req.query.paymentMethod === 'COUPON'
       ? req.query.paymentMethod as PaymentMethod
       : undefined;
     const dateRange = typeof req.query.dateRange === 'string' ? req.query.dateRange : 'all';
+
+    const status = scope === 'COMPLETED_CHECKOUTS' ? 'COMPLETED' : requestedStatus;
+    const paymentMethod = scope === 'BANK_TRANSFERS' ? 'BANK_TRANSFER' : requestedPaymentMethod;
+    const paymentMethods = scope === 'COMPLETED_CHECKOUTS' ? ['PAYPAL', 'CARD'] as PaymentMethod[] : undefined;
 
     const createdAfter = (() => {
       if (dateRange === 'all') {
@@ -266,6 +273,7 @@ export const getPayments = async (req: Request, res: Response) => {
       plan,
       status,
       paymentMethod,
+      paymentMethods,
       createdAfter,
     });
 
