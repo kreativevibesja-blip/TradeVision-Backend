@@ -102,13 +102,19 @@ const bootstrapBillingState = async (userId: string, subscription: SubscriptionT
 export async function setBillingStateFromAdmin(userId: string, subscription: SubscriptionTier) {
   const currentState = await getStoredBillingState(userId);
   const now = new Date().toISOString();
+  const hasCurrentActivePaidPlan = Boolean(
+    currentState &&
+      currentState.currentPlan !== 'FREE' &&
+      currentState.expiresAt &&
+      new Date(currentState.expiresAt).getTime() > Date.now()
+  );
 
   const nextState: BillingState = subscription !== 'FREE'
     ? {
         currentPlan: subscription,
         status: 'active',
         expiresAt:
-          currentState?.currentPlan !== 'FREE' && currentState.expiresAt && new Date(currentState.expiresAt).getTime() > Date.now()
+          hasCurrentActivePaidPlan
             ? currentState.expiresAt
             : addDays(now, BILLING_PERIOD_DAYS),
         lastPaymentAt: currentState?.lastPaymentAt ?? now,

@@ -463,7 +463,7 @@ export const listUsersPage = async (
               period: 'month',
             }
           : {
-              current: getUsageDayStamp(user.lastUsageReset) === todayStamp ? user.dailyUsage || 0 : 0,
+              current: getUsageDayStamp(user.lastUsageReset || new Date(0).toISOString()) === todayStamp ? user.dailyUsage || 0 : 0,
               limit: config.limits.freeDaily,
               period: 'day',
             },

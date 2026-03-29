@@ -297,7 +297,7 @@ export const updatePaymentStatus = async (req: Request, res: Response) => {
     });
 
     if (existingPayment.status !== 'COMPLETED' && status === 'COMPLETED') {
-      await setBillingStateFromPayment(payment.userId, now);
+      await setBillingStateFromPayment(payment.userId, now, payment.plan === 'TOP_TIER' ? 'TOP_TIER' : 'PRO');
       await processReferralPayment(payment.userId, payment.amount ?? 0).catch((error) => {
         console.error('Failed to process referral payment from admin approval:', error);
       });
