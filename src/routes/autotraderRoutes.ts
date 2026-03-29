@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { authenticate } from '../middleware/auth';
+import { authenticate, requireTopTier } from '../middleware/auth';
 import {
   getConnection,
   connectMt5,
@@ -18,23 +18,25 @@ import {
 
 const router = Router();
 
+router.use(authenticate, requireTopTier);
+
 // MT5 Connection
-router.get('/connection', authenticate, getConnection);
-router.post('/connection', authenticate, connectMt5);
-router.post('/disconnect', authenticate, disconnectMt5);
-router.post('/heartbeat', authenticate, heartbeat);
+router.get('/connection', getConnection);
+router.post('/connection', connectMt5);
+router.post('/disconnect', disconnectMt5);
+router.post('/heartbeat', heartbeat);
 
 // Trade Signals
-router.post('/signals', authenticate, createSignal);
-router.get('/signals', authenticate, getSignals);
-router.get('/signals/pending', authenticate, getPendingSignals);
-router.post('/signals/:id/approve', authenticate, approveSignal);
-router.post('/signals/:id/confirm', authenticate, confirmExecution);
-router.post('/signals/:id/cancel', authenticate, cancelSignal);
+router.post('/signals', createSignal);
+router.get('/signals', getSignals);
+router.get('/signals/pending', getPendingSignals);
+router.post('/signals/:id/approve', approveSignal);
+router.post('/signals/:id/confirm', confirmExecution);
+router.post('/signals/:id/cancel', cancelSignal);
 
 // Risk Settings
-router.get('/settings', authenticate, getSettings);
-router.patch('/settings', authenticate, updateSettings);
-router.post('/kill-switch', authenticate, toggleKillSwitchHandler);
+router.get('/settings', getSettings);
+router.patch('/settings', updateSettings);
+router.post('/kill-switch', toggleKillSwitchHandler);
 
 export default router;

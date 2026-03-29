@@ -4,6 +4,7 @@ import { createOrder, captureOrder, generateClientToken } from '../services/payp
 import {
   type BankTransferBank,
   type PaymentMethod,
+  type SubscriptionTier,
   createPaymentRecord,
   getPricingPlanByTierWithFallback,
   listPaymentsForUserId,
@@ -18,10 +19,10 @@ const isBankTransferBank = (value: unknown): value is BankTransferBank => value 
 
 const createManualPaymentReference = () => `BANK-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
 
-const resolveProPaymentAmount = async (userId: string, couponCode?: string) => {
-  const pricing = await getPricingPlanByTierWithFallback('PRO');
-  let amount = pricing ? pricing.price : 19.95;
-  const planName = pricing ? pricing.name : 'Pro';
+const resolvePlanPaymentAmount = async (userId: string, plan: Extract<SubscriptionTier, 'PRO' | 'TOP_TIER'>, couponCode?: string) => {
+  const pricing = await getPricingPlanByTierWithFallback(plan);
+  let amount = pricing ? pricing.price : plan === 'TOP_TIER' ? 39.95 : 19.95;
+  const planName = pricing ? pricing.name : plan === 'TOP_TIER' ? 'Top Tier 👑' : 'Pro';
   let appliedCouponId: string | null = null;
 
   const referralDiscount = await getReferralDiscountForUser(userId);
@@ -48,13 +49,14 @@ const resolveProPaymentAmount = async (userId: string, couponCode?: string) => {
 export const createPayment = async (req: AuthRequest, res: Response) => {
   try {
     const { plan, couponCode, method } = req.body;
-    if (!plan || !['PRO'].includes(plan)) {
+    if (!plan || !['PRO', 'TOP_TIER'].includes(plan)) {
       return res.status(400).json({ error: 'Invalid plan' });
     }
 
     const paymentMethod: Extract<PaymentMethod, 'PAYPAL' | 'CARD'> = isCheckoutMethod(method) ? method : 'PAYPAL';
 
-    const { amount, appliedCouponId, planName } = await resolveProPaymentAmount(req.user!.id, couponCode);
+    const selectedPlan = plan as Extract<SubscriptionTier, 'PRO' | 'TOP_TIER'>;
+    const { amount, appliedCouponId, planName } = await resolvePlanPaymentAmount(req.user!.id, selectedPlan, couponCode);
 
     if (amount <= 0) {
       // Free via full discount — activate immediately without PayPal
@@ -64,7 +66,7 @@ export const createPayment = async (req: AuthRequest, res: Response) => {
         amount: 0,
         status: 'COMPLETED',
         paymentMethod: 'COUPON',
-        plan: 'PRO',
+        plan: selectedPlan,
         verifiedAt: new Date().toISOString(),
       });
 
@@ -72,7 +74,7 @@ export const createPayment = async (req: AuthRequest, res: Response) => {
         await incrementCouponUsage(appliedCouponId, req.user!.id);
       }
 
-      await setBillingStateFromPayment(req.user!.id, new Date().toISOString());
+      await setBillingStateFromPayment(req.user!.id, new Date().toISOString(), selectedPlan);
       return res.json({ orderId: null, approveUrl: null, freeActivation: true });
     }
 
@@ -84,7 +86,7 @@ export const createPayment = async (req: AuthRequest, res: Response) => {
       amount,
       status: 'PENDING',
       paymentMethod,
-      plan: 'PRO',
+      plan: selectedPlan,
     });
 
     // Stash coupon for post-capture usage tracking
@@ -105,7 +107,7 @@ export const createBankTransferRequest = async (req: AuthRequest, res: Response)
   try {
     const { plan, couponCode, bank } = req.body;
 
-    if (plan !== 'PRO') {
+    if (plan !== 'PRO' && plan !== 'TOP_TIER') {
       return res.status(400).json({ error: 'Invalid plan' });
     }
 
@@ -113,7 +115,8 @@ export const createBankTransferRequest = async (req: AuthRequest, res: Response)
       return res.status(400).json({ error: 'Invalid bank selection' });
     }
 
-    const { amount } = await resolveProPaymentAmount(req.user!.id, couponCode);
+    const selectedPlan = plan as Extract<SubscriptionTier, 'PRO' | 'TOP_TIER'>;
+    const { amount } = await resolvePlanPaymentAmount(req.user!.id, selectedPlan, couponCode);
     const referenceId = createManualPaymentReference();
     const payment = await createPaymentRecord({
       userId: req.user!.id,
@@ -122,7 +125,7 @@ export const createBankTransferRequest = async (req: AuthRequest, res: Response)
       status: 'PENDING',
       paymentMethod: 'BANK_TRANSFER',
       bankTransferBank: bank,
-      plan: 'PRO',
+      plan: selectedPlan,
     });
 
     return res.json({
@@ -177,7 +180,7 @@ export const handlePaymentSuccess = async (req: AuthRequest, res: Response) => {
         pendingCouponMap.delete(orderId);
       }
 
-      await setBillingStateFromPayment(req.user!.id, payment.verifiedAt || new Date().toISOString());
+      await setBillingStateFromPayment(req.user!.id, payment.verifiedAt || new Date().toISOString(), payment.plan as Extract<SubscriptionTier, 'PRO' | 'TOP_TIER'>);
 
       // Process referral commission on successful payment
       await processReferralPayment(req.user!.id, payment.amount ?? 0).catch((err) =>
@@ -207,7 +210,7 @@ export const getPaymentHistory = async (req: AuthRequest, res: Response) => {
 
 export const getBillingSummary = async (req: AuthRequest, res: Response) => {
   try {
-    const summary = await getBillingSummaryForUser(req.user!.id, req.user!.subscription as 'FREE' | 'PRO');
+    const summary = await getBillingSummaryForUser(req.user!.id, req.user!.subscription as SubscriptionTier);
     return res.json({ billing: summary });
   } catch (error) {
     console.error('Billing summary error:', error);

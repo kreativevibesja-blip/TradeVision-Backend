@@ -158,3 +158,10 @@ export const requireAdmin = (req: AuthRequest, res: Response, next: NextFunction
   }
   next();
 };
+
+export const requireTopTier = (req: AuthRequest, res: Response, next: NextFunction) => {
+  if (req.user?.subscription !== 'TOP_TIER') {
+    return res.status(403).json({ error: 'Top Tier plan required' });
+  }
+  next();
+};

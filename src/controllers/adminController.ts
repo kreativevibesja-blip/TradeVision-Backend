@@ -128,9 +128,10 @@ const getExpiryFromRequest = (durationValue: unknown, durationUnit: unknown) => 
 export const getDashboardStats = async (_req: Request, res: Response) => {
   try {
     const jamaicaToday = getJamaicaTodayDate();
-    const [totalUsers, activeSubscribers, totalAnalyses, payments, liveMetrics] = await Promise.all([
+    const [totalUsers, proSubscribers, topTierSubscribers, totalAnalyses, payments, liveMetrics] = await Promise.all([
       countUsers(),
       countUsers('PRO'),
+      countUsers('TOP_TIER'),
       countAnalyses(),
       getCompletedRevenue(),
       getLivePlatformMetrics(jamaicaToday, getJamaicaDayStartIso(jamaicaToday), getActiveVisitorSinceIso()),
@@ -138,7 +139,7 @@ export const getDashboardStats = async (_req: Request, res: Response) => {
 
     return res.json({
       totalUsers,
-      activeSubscribers,
+      activeSubscribers: proSubscribers + topTierSubscribers,
       totalAnalyses,
       totalRevenue: payments || 0,
       liveMetrics,
@@ -154,8 +155,8 @@ export const getUsers = async (req: Request, res: Response) => {
     const search = req.query.search as string;
     const page = parseInt(req.query.page as string) || 1;
     const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
-    const subscription = req.query.subscription === 'FREE' || req.query.subscription === 'PRO'
-      ? (req.query.subscription as 'FREE' | 'PRO')
+    const subscription = req.query.subscription === 'FREE' || req.query.subscription === 'PRO' || req.query.subscription === 'TOP_TIER'
+      ? req.query.subscription
       : undefined;
     const createdFrom = typeof req.query.createdFrom === 'string' && req.query.createdFrom.trim().length > 0
       ? req.query.createdFrom
@@ -188,7 +189,7 @@ export const updateUser = async (req: Request, res: Response) => {
       ...(role && { role }),
     });
 
-    if (subscription === 'FREE' || subscription === 'PRO') {
+    if (subscription === 'FREE' || subscription === 'PRO' || subscription === 'TOP_TIER') {
       await setBillingStateFromAdmin(id, subscription);
       user = {
         ...user,
@@ -237,7 +238,7 @@ export const getPayments = async (req: Request, res: Response) => {
   try {
     const page = parseInt(req.query.page as string) || 1;
     const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
-    const plan = req.query.plan === 'FREE' || req.query.plan === 'PRO' ? req.query.plan : undefined;
+    const plan = req.query.plan === 'FREE' || req.query.plan === 'PRO' || req.query.plan === 'TOP_TIER' ? req.query.plan : undefined;
     const status = req.query.status === 'PENDING' || req.query.status === 'COMPLETED' || req.query.status === 'FAILED' || req.query.status === 'REFUNDED'
       ? req.query.status
       : undefined;

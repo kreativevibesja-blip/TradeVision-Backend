@@ -177,8 +177,8 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
     }
 
     if (liveChartSource) {
-      if (user.subscription !== 'PRO') {
-        return res.status(403).json({ error: 'Live chart analysis is a Pro feature' });
+      if (user.subscription === 'FREE') {
+        return res.status(403).json({ error: 'Live chart analysis is available on paid plans' });
       }
 
       if (!derivLiveSource && (!resolveLiveChartSymbol(pair) || !isSupportedLiveChartTimeframe(timeframe))) {
@@ -276,8 +276,8 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
     // Dual-chart is PRO only
     const timeframe2 = chart2File ? (req.body.timeframe2 || timeframe) : null;
 
-    if (chart2File && user.subscription !== 'PRO') {
-      return res.status(403).json({ error: 'Dual-chart analysis is a Pro feature' });
+    if (chart2File && user.subscription === 'FREE') {
+      return res.status(403).json({ error: 'Dual-chart analysis is available on paid plans' });
     }
 
     // Read image data up-front (needed for both instant and queued paths)
@@ -305,7 +305,7 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
       : null;
 
     // ── PRO PATH: process instantly (no queue) ──────────────────────
-    if (user.subscription === 'PRO') {
+    if (user.subscription !== 'FREE') {
       const monthlyUsage = await countAnalysesForUserSince(req.user!.id, getMonthStartIso());
       if (monthlyUsage >= config.limits.proMonthly) {
         return res.status(429).json({
@@ -412,8 +412,8 @@ export const getLiveChartMarketData = async (req: AuthRequest, res: Response) =>
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    if (req.user.subscription !== 'PRO') {
-      return res.status(403).json({ error: 'Live chart market data is a Pro feature' });
+    if (req.user.subscription === 'FREE') {
+      return res.status(403).json({ error: 'Live chart market data is available on paid plans' });
     }
 
     const symbol = typeof req.query.symbol === 'string' ? req.query.symbol.trim() : '';

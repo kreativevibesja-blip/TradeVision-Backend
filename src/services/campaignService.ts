@@ -58,7 +58,7 @@ async function fetchRecipients(
       query = query.eq('subscription', 'FREE');
       break;
     case 'pro':
-      query = query.eq('subscription', 'PRO');
+      query = query.in('subscription', ['PRO', 'TOP_TIER']);
       break;
     case 'single':
       if (!singleEmail) return [];

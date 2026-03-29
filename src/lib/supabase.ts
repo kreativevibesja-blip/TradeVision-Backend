@@ -32,7 +32,7 @@ const MT5_CONNECTION_TABLE = 'Mt5Connection';
 const TRADE_SIGNAL_TABLE = 'TradeSignal';
 const RISK_SETTINGS_TABLE = 'RiskSettings';
 
-export type SubscriptionTier = 'FREE' | 'PRO';
+export type SubscriptionTier = 'FREE' | 'PRO' | 'TOP_TIER';
 export type UserRole = 'USER' | 'ADMIN';
 export type PaymentStatus = 'PENDING' | 'COMPLETED' | 'FAILED' | 'REFUNDED';
 export type PaymentMethod = 'PAYPAL' | 'CARD' | 'BANK_TRANSFER' | 'COUPON';
@@ -46,6 +46,9 @@ export type SignalDirection = 'buy' | 'sell';
 export type SignalConfidence = 'A+' | 'A' | 'B' | 'avoid';
 export type SignalStatus = 'pending' | 'ready' | 'executed' | 'cancelled' | 'expired';
 export type AutoMode = 'manual' | 'semi' | 'full';
+
+export const hasPaidSubscription = (subscription: SubscriptionTier | string) => subscription === 'PRO' || subscription === 'TOP_TIER';
+export const hasAutoTraderSubscription = (subscription: SubscriptionTier | string) => subscription === 'TOP_TIER';
 
 export interface UserRecord {
   id: string;
@@ -140,7 +143,15 @@ const DEFAULT_PRICING_PLANS: Array<Pick<PricingPlanRecord, 'name' | 'tier' | 'pr
     name: 'TradeVision AI Pro',
     tier: 'PRO',
     price: 19.95,
-    features: ['Unlimited daily analyses', 'Advanced Smart Money Concepts', 'Priority AI processing'],
+    features: ['300 analyses per month', 'Advanced Smart Money Concepts', 'Priority AI processing'],
+    dailyLimit: 999999,
+    isActive: true,
+  },
+  {
+    name: 'Top Tier 👑',
+    tier: 'TOP_TIER',
+    price: 39.95,
+    features: ['300 analyses per month', 'Advanced Smart Money Concepts', 'Priority AI processing', 'AutoTrader for MT5'],
     dailyLimit: 999999,
     isActive: true,
   },
@@ -445,7 +456,7 @@ export const listUsersPage = async (
     users: users.map((user) => ({
       ...user,
       usage:
-        user.subscription === 'PRO'
+        hasPaidSubscription(user.subscription)
           ? {
               current: monthlyAnalysisCountMap[user.id!] || 0,
               limit: config.limits.proMonthly,

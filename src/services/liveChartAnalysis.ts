@@ -231,8 +231,10 @@ const parseBooleanSetting = (value: unknown, fallback: boolean) => {
   return fallback;
 };
 
+const isPaidSubscription = (subscription: SubscriptionTier) => subscription !== 'FREE';
+
 const getProviderSettingKey = (provider: VisionProvider, subscription: SubscriptionTier) =>
-  `ai_model_${provider}_${subscription.toLowerCase()}_enabled`;
+  `ai_model_${provider}_${isPaidSubscription(subscription) ? 'pro' : 'free'}_enabled`;
 
 const getProviderCandidates = async (subscription: SubscriptionTier): Promise<ProviderCandidate[]> => {
   const [geminiSetting, openAiSetting] = await Promise.all([

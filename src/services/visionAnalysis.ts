@@ -467,11 +467,13 @@ const normalizeGeminiModelName = (modelName: string) => {
 
 const normalizeOpenAiModelName = (modelName: string) => modelName.trim();
 
+const isPaidSubscription = (subscription: SubscriptionTier) => subscription !== 'FREE';
+
 const getGeminiModelForSubscription = (subscription: SubscriptionTier) =>
-  normalizeGeminiModelName(subscription === 'PRO' ? config.gemini.proModel : config.gemini.freeModel);
+  normalizeGeminiModelName(isPaidSubscription(subscription) ? config.gemini.proModel : config.gemini.freeModel);
 
 const getOpenAiModelForSubscription = (subscription: SubscriptionTier) =>
-  normalizeOpenAiModelName(subscription === 'PRO' ? config.openai.proModel : config.openai.freeModel);
+  normalizeOpenAiModelName(isPaidSubscription(subscription) ? config.openai.proModel : config.openai.freeModel);
 
 const parseBooleanSetting = (value: unknown, fallback: boolean) => {
   if (typeof value === 'boolean') {
@@ -498,7 +500,7 @@ interface VisionProviderCandidate {
 }
 
 const getProviderSettingKey = (provider: VisionProvider, subscription: SubscriptionTier) =>
-  `ai_model_${provider}_${subscription.toLowerCase()}_enabled`;
+  `ai_model_${provider}_${isPaidSubscription(subscription) ? 'pro' : 'free'}_enabled`;
 
 const getVisionProviderCandidates = async (subscription: SubscriptionTier): Promise<VisionProviderCandidate[]> => {
   const [geminiSetting, openAiSetting] = await Promise.all([
@@ -1082,7 +1084,7 @@ STRICT RULES
 
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 
-  const prompt = subscription === 'PRO'
+  const prompt = isPaidSubscription(subscription)
     ? proPrompt
     : `${freePromptHeader}\n\n========================================\nOUTPUT FORMAT (STRICT JSON ONLY)\n========================================\n${freeJsonSchema}\n${freeRules}\n${freeGoal}`;
 

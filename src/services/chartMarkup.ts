@@ -500,7 +500,7 @@ const parseBooleanSetting = (value: unknown, fallback: boolean) => {
 };
 
 export async function isChartMarkupEnabledForPlan(subscription: SubscriptionTier) {
-  const key = subscription === 'PRO' ? CHART_MARKUP_PRO_ENABLED_KEY : CHART_MARKUP_FREE_ENABLED_KEY;
+  const key = subscription !== 'FREE' ? CHART_MARKUP_PRO_ENABLED_KEY : CHART_MARKUP_FREE_ENABLED_KEY;
   const setting = await getSystemSetting(key);
   return parseBooleanSetting(setting?.value, true);
 }
