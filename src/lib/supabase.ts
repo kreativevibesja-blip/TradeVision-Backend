@@ -28,6 +28,9 @@ const PAYOUT_TABLE = 'Payout';
 const QUEUE_TABLE = 'AnalysisQueue';
 const VISITOR_PRESENCE_TABLE = 'VisitorPresence';
 const VISITOR_DAILY_TABLE = 'VisitorDaily';
+const MT5_CONNECTION_TABLE = 'Mt5Connection';
+const TRADE_SIGNAL_TABLE = 'TradeSignal';
+const RISK_SETTINGS_TABLE = 'RiskSettings';
 
 export type SubscriptionTier = 'FREE' | 'PRO';
 export type UserRole = 'USER' | 'ADMIN';
@@ -38,6 +41,11 @@ export type AnalysisStatus = 'QUEUED' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
 export type TicketStatus = 'OPEN' | 'IN_PROGRESS' | 'WAITING_ON_USER' | 'RESOLVED' | 'CLOSED';
 export type TicketPriority = 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT';
 export type TicketCategory = 'ACCOUNT' | 'BILLING' | 'ANALYSIS' | 'BUG' | 'FEATURE' | 'GENERAL';
+
+export type SignalDirection = 'buy' | 'sell';
+export type SignalConfidence = 'A+' | 'A' | 'B' | 'avoid';
+export type SignalStatus = 'pending' | 'ready' | 'executed' | 'cancelled' | 'expired';
+export type AutoMode = 'manual' | 'semi' | 'full';
 
 export interface UserRecord {
   id: string;
@@ -221,6 +229,49 @@ export interface VisitorDailyRecord {
   userId: string | null;
   firstSeenAt: string;
   lastSeenAt: string;
+}
+
+export interface Mt5ConnectionRecord {
+  id: string;
+  userId: string;
+  accountId: string;
+  broker: string;
+  serverName: string;
+  isActive: boolean;
+  lastSeenAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TradeSignalRecord {
+  id: string;
+  userId: string;
+  symbol: string;
+  direction: SignalDirection;
+  entryPrice: number;
+  stopLoss: number;
+  takeProfit: number;
+  confidence: SignalConfidence;
+  status: SignalStatus;
+  analysisId: string | null;
+  lotSize: number | null;
+  executedAt: string | null;
+  cancelledAt: string | null;
+  ticket: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RiskSettingsRecord {
+  id: string;
+  userId: string;
+  riskPerTrade: number;
+  maxDailyLoss: number;
+  maxTradesPerDay: number;
+  autoMode: AutoMode;
+  killSwitch: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface LivePlatformMetrics {
@@ -1472,4 +1523,130 @@ export const getLivePlatformMetrics = async (todayDate: string, todayStartIso: s
     activeAnalyses: activeAnalysesCount,
     totalAnalysesToday: totalAnalysesTodayCount,
   };
+};
+
+// ── AutoTrader: MT5 connections ──
+
+export const getMt5ConnectionForUser = (userId: string) =>
+  maybeSingle<Mt5ConnectionRecord>('getMt5ConnectionForUser', supabase.from(MT5_CONNECTION_TABLE).select('*').eq('userId', userId).eq('isActive', true).maybeSingle());
+
+export const upsertMt5Connection = async (userId: string, values: Pick<Mt5ConnectionRecord, 'accountId' | 'broker' | 'serverName'>) => {
+  const existing = await maybeSingle<Mt5ConnectionRecord>(
+    'upsertMt5Connection:check',
+    supabase.from(MT5_CONNECTION_TABLE).select('*').eq('userId', userId).eq('accountId', values.accountId).maybeSingle(),
+  );
+  if (existing) {
+    return updateSingle<Mt5ConnectionRecord>('upsertMt5Connection:update', MT5_CONNECTION_TABLE, {
+      broker: values.broker,
+      serverName: values.serverName,
+      isActive: true,
+      lastSeenAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }, (q) => q.eq('id', existing.id));
+  }
+  return insertSingle<Mt5ConnectionRecord>('upsertMt5Connection:insert', MT5_CONNECTION_TABLE, {
+    userId,
+    ...values,
+    isActive: true,
+    lastSeenAt: new Date().toISOString(),
+  });
+};
+
+export const disconnectMt5Connection = (userId: string) =>
+  updateSingle<Mt5ConnectionRecord>('disconnectMt5Connection', MT5_CONNECTION_TABLE, {
+    isActive: false,
+    updatedAt: new Date().toISOString(),
+  }, (q) => q.eq('userId', userId).eq('isActive', true));
+
+export const mt5Heartbeat = async (userId: string) => {
+  const conn = await getMt5ConnectionForUser(userId);
+  if (!conn) return null;
+  return updateSingle<Mt5ConnectionRecord>('mt5Heartbeat', MT5_CONNECTION_TABLE, {
+    lastSeenAt: new Date().toISOString(),
+  }, (q) => q.eq('id', conn.id));
+};
+
+// ── AutoTrader: Trade signals ──
+
+export const createTradeSignal = (values: Omit<TradeSignalRecord, 'id' | 'createdAt' | 'updatedAt' | 'executedAt' | 'cancelledAt' | 'ticket'>) =>
+  insertSingle<TradeSignalRecord>('createTradeSignal', TRADE_SIGNAL_TABLE, values);
+
+export const getTradeSignalById = (id: string, userId: string) =>
+  maybeSingle<TradeSignalRecord>('getTradeSignalById', supabase.from(TRADE_SIGNAL_TABLE).select('*').eq('id', id).eq('userId', userId).maybeSingle());
+
+export const listTradeSignalsForUser = async (userId: string, status?: SignalStatus, limit = 50) => {
+  let query = supabase.from(TRADE_SIGNAL_TABLE).select('*').eq('userId', userId).order('createdAt', { ascending: false }).limit(limit);
+  if (status) query = query.eq('status', status);
+  return many<TradeSignalRecord>('listTradeSignalsForUser', query);
+};
+
+export const listPendingSignalsForUser = (userId: string) =>
+  many<TradeSignalRecord>('listPendingSignalsForUser', supabase.from(TRADE_SIGNAL_TABLE).select('*').eq('userId', userId).in('status', ['pending', 'ready']).order('createdAt', { ascending: false }));
+
+export const updateTradeSignal = (id: string, userId: string, values: Partial<TradeSignalRecord>) =>
+  updateSingle<TradeSignalRecord>('updateTradeSignal', TRADE_SIGNAL_TABLE, {
+    ...values,
+    updatedAt: new Date().toISOString(),
+  }, (q) => q.eq('id', id).eq('userId', userId));
+
+export const confirmSignalExecution = (id: string, userId: string, ticket: string, lotSize?: number) =>
+  updateSingle<TradeSignalRecord>('confirmSignalExecution', TRADE_SIGNAL_TABLE, {
+    status: 'executed' as SignalStatus,
+    ticket,
+    lotSize: lotSize ?? null,
+    executedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  }, (q) => q.eq('id', id).eq('userId', userId));
+
+export const cancelTradeSignal = (id: string, userId: string) =>
+  updateSingle<TradeSignalRecord>('cancelTradeSignal', TRADE_SIGNAL_TABLE, {
+    status: 'cancelled' as SignalStatus,
+    cancelledAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  }, (q) => q.eq('id', id).eq('userId', userId));
+
+export const countTodayExecutedSignals = (userId: string, todayStartIso: string) =>
+  countRows('countTodayExecutedSignals', TRADE_SIGNAL_TABLE, (q) =>
+    q.eq('userId', userId).eq('status', 'executed').gte('executedAt', todayStartIso));
+
+// ── AutoTrader: Risk settings ──
+
+export const getRiskSettings = (userId: string) =>
+  maybeSingle<RiskSettingsRecord>('getRiskSettings', supabase.from(RISK_SETTINGS_TABLE).select('*').eq('userId', userId).maybeSingle());
+
+export const upsertRiskSettings = async (userId: string, values: Partial<Pick<RiskSettingsRecord, 'riskPerTrade' | 'maxDailyLoss' | 'maxTradesPerDay' | 'autoMode' | 'killSwitch'>>) => {
+  const existing = await getRiskSettings(userId);
+  if (existing) {
+    return updateSingle<RiskSettingsRecord>('upsertRiskSettings:update', RISK_SETTINGS_TABLE, {
+      ...values,
+      updatedAt: new Date().toISOString(),
+    }, (q) => q.eq('id', existing.id));
+  }
+  return insertSingle<RiskSettingsRecord>('upsertRiskSettings:insert', RISK_SETTINGS_TABLE, {
+    userId,
+    riskPerTrade: 1.0,
+    maxDailyLoss: 5.0,
+    maxTradesPerDay: 3,
+    autoMode: 'manual',
+    killSwitch: false,
+    ...values,
+  });
+};
+
+export const toggleKillSwitch = async (userId: string, enabled: boolean) => {
+  const existing = await getRiskSettings(userId);
+  if (existing) {
+    return updateSingle<RiskSettingsRecord>('toggleKillSwitch', RISK_SETTINGS_TABLE, {
+      killSwitch: enabled,
+      updatedAt: new Date().toISOString(),
+    }, (q) => q.eq('id', existing.id));
+  }
+  return insertSingle<RiskSettingsRecord>('toggleKillSwitch:insert', RISK_SETTINGS_TABLE, {
+    userId,
+    riskPerTrade: 1.0,
+    maxDailyLoss: 5.0,
+    maxTradesPerDay: 3,
+    autoMode: 'manual',
+    killSwitch: enabled,
+  });
 };
