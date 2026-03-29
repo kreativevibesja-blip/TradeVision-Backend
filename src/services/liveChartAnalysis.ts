@@ -376,6 +376,7 @@ STEP 1 - DETERMINE CONTEXT FIRST
 - Mark the most relevant external highs/lows or protected swing points from the OHLC data
 - Determine directional bias: bullish, bearish, or ranging
 - If market is ranging, consolidating, or unclear, return a no-trade outcome
+- If candles are messy, overlapping, or structurally inconsistent, classify the market as choppy and return a no-trade outcome
 - Identify key supply and demand zones from actual OHLC values
 - Identify liquidity pools and recent sweeps from the candle data
 - State whether current price is approaching a premium short area or a discount long area, or neither
@@ -394,6 +395,7 @@ STEP 3 - DEFINE LOCATION
 ================================
 
 - Detect supply zones, demand zones, and fair value gaps
+- Detect the cleanest pullback zone using previous structure, a moving-average value area if available, or supply/demand overlap
 - Ignore heavily mitigated or multi-tapped zones
 - Use the active dealing range to classify price as premium, discount, or equilibrium
 - Prefer trades from OTE-like retracement areas inside premium/discount, not from random mid-range price
@@ -425,6 +427,7 @@ STEP 6 - CONFIRMATION LOGIC
 ================================
 - Only consider a trade if ALL are true:
   - Zone is fresh or lightly mitigated
+  - Price has pulled back into a valid entry zone rather than extending away from it
   - Price enters the zone and shows strong rejection OR clear displacement
   - Market structure aligns with direction
   - Momentum confirms direction
@@ -432,6 +435,7 @@ STEP 6 - CONFIRMATION LOGIC
 - Require a clear momentum shift, CHoCH, BOS, or displacement confirmed by candle close
 - Entry must come from a valid POI supported by the candle data
 - A valid trade must include at least 2 confirmations
+- Valid confirmations include engulfing candle, strong rejection wick, micro structure break, momentum shift, CHoCH, BOS, or liquidity sweep
 - If the setup is weak, return wait or avoid instead of forcing a trade
 - Stop loss must sit at the structural invalidation level that proves the idea wrong
 - Plan targets at prior highs/lows, equal highs/lows, and obvious liquidity pools before approving the trade
@@ -441,6 +445,8 @@ STEP 6 - CONFIRMATION LOGIC
 - Prefer setups where price returns into an OTE/premium-discount area and then confirms with a close-based CHoCH or BOS
 - Ideal A+ setups usually combine at least 3 of these: liquidity sweep/IDM, order block or FVG retest, close-confirmed CHoCH/BOS, correct premium-discount location, and clean target path
 - Entry should preferably come from a return into the order block/FVG rather than chasing the displacement candle
+- Entry must be after the confirmation candle closes, never from a random level
+- If price is already at the extreme high of a bullish leg or extreme low of a bearish leg, prefer wait-for-pullback instead of chasing
 
 ========================================
 OUTPUT FORMAT (STRICT JSON ONLY)

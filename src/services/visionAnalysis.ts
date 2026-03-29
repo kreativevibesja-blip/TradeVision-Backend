@@ -548,10 +548,13 @@ ADVANCED SMC CONCEPTS YOU MUST APPLY WHEN CLEARLY VISIBLE
 - Start with higher-timeframe or broader visible structure before thinking about entries.
 - If the broader chart shows lower highs and lower lows, default to bearish context unless price clearly invalidates that structure.
 - If the broader chart shows higher highs and higher lows, default to bullish context unless price clearly invalidates that structure.
+- If structure is sideways, overlapping, or messy with no clean sequence, classify it as ranging or choppy rather than forcing trend bias.
 - Identify external highs and lows, protected highs and lows, and the liquidity resting around them.
 - Respect protected highs/lows: the trade idea remains valid until that protected swing is actually broken.
 - Treat BOS and CHoCH as valid only when price closes through structure, not when a wick briefly pokes through.
 - A strong model setup often looks like: structure break, liquidity sweep or inducement, return into a clean POI such as an order block or FVG, then continuation in the dominant direction.
+- For continuation ideas, prefer pullbacks into previous structure, moving-average value areas when visible, supply/demand zones, order blocks, or FVGs instead of chasing impulse candles.
+- If price is already stretched at the extreme high of a bullish move or the extreme low of a bearish move, prefer wait-for-pullback rather than forcing an entry.
 - Treat an order block retest after displacement or BOS as stronger than a random touch of a zone.
 - If liquidity or IDM is swept and price sharply reclaims or rejects from the POI, that increases setup quality.
 - Treat equal highs and equal lows as liquidity pools when relevant.
@@ -559,6 +562,7 @@ ADVANCED SMC CONCEPTS YOU MUST APPLY WHEN CLEARLY VISIBLE
 - Separate external structure from internal structure.
 - Use the active dealing range to judge premium, discount, and equilibrium, with the 50% area as the core divider and OTE as the preferred retracement location.
 - In bearish conditions, shorts should come from premium/OTE, not discount; in bullish conditions, longs should come from discount/OTE, not premium.
+- In ranging conditions, reversals should come from support or resistance edges, not from the middle of the range.
 - Prioritize the best structure-aligned zone among order blocks, breaker blocks, mitigation blocks, and fair value gaps.
 - Give extra weight when higher-timeframe and lower-timeframe FVGs overlap or sit inside the same POI.
 - Treat fair value gaps as areas of interest, not blind entry signals, and require confluence with structure and location.
@@ -898,6 +902,7 @@ Using ONLY the uploaded chart (${timeframe}):
 - Mark the most relevant external highs/lows or protected swing points visible on the chart
 - Determine directional bias: ONE ONLY, bullish or bearish, when structure supports it
 - If market is ranging, consolidating, or unclear, you MUST return a no-trade outcome
+- If candles are messy, overlapping, or structurally inconsistent, classify the market as choppy and return a no-trade outcome
 - Identify key areas: support/resistance zones, premium/discount zones, and major liquidity pools
 - State whether the current price is approaching a premium short area or a discount long area, or neither
 
@@ -915,6 +920,7 @@ STEP 3 - DEFINE LOCATION
 ================================
 
 - Detect supply zones, demand zones, and fair value gaps
+- Detect the cleanest pullback zone using previous structure, visible moving-average value area if shown on chart, or supply/demand / FVG overlap
 - Classify zone quality internally as fresh, lightly mitigated, or heavily mitigated
 - Ignore zones that are heavily mitigated or tapped multiple times
 - Use the active dealing range to classify price as premium, discount, or equilibrium
@@ -952,6 +958,7 @@ STEP 6 - CONFIRMATION LOGIC
 
 - Only consider a trade if ALL are true:
   - Zone is fresh or lightly mitigated
+  - Price has pulled back into a valid entry zone rather than extending away from it
   - Price enters the zone and shows strong rejection OR clear displacement
   - Market structure aligns with direction
   - Momentum confirms direction
@@ -959,7 +966,7 @@ STEP 6 - CONFIRMATION LOGIC
 - Require a clear momentum shift, displacement, or BOS/CHoCH confirmed by candle close
 - Entry must come from a valid POI
 - A valid trade must include at least 2 confirmations
-- Confirmations can include liquidity sweep, CHoCH, BOS, FVG, rejection, or clear pattern confirmation
+- Confirmations can include engulfing candle, strong rejection wick, liquidity sweep, momentum shift, CHoCH, BOS, FVG, or clear pattern confirmation
 - Prefer setups where price returns into an OTE/premium-discount area and then confirms with a close-based CHoCH or BOS
 - Ideal A+ setups usually combine at least 3 of these: liquidity sweep/IDM, order block or FVG retest, close-confirmed CHoCH/BOS, correct premium-discount location, and clean target path
 
@@ -968,6 +975,7 @@ STEP 7 - EXECUTION RULES
 ================================
 
 - Prefer LIMIT entries over market entries
+- Entry must be after the confirmation candle closes and never from a random level
 - Stop loss must sit at the structural invalidation level that proves the idea wrong
 - Plan targets at prior highs/lows, equal highs/lows, and obvious liquidity pools before approving the trade
 - Minimum risk-to-reward = 1:3 for take_profit_1
@@ -1079,6 +1087,7 @@ STRICT RULES
 - stop_loss must align with structural invalidation, not a random distance
 - take_profit_1 should only be set when at least 3R is realistically available to a logical target
 - If price is in the wrong half of the dealing range for the intended direction, bias should usually be none and action should usually be wait or avoid
+- If price is already at the extreme high of a bullish leg or extreme low of a bearish leg, bias should usually be none and action should usually be wait for pullback or avoid
 - setup_rating should only be A+ when the setup resembles a clean textbook entry model with structure, location, liquidity, and execution all aligned
 - counter_trend_plan, when present, must be clearly warned as aggressive and should target nearer exits than the main trend setup
 
@@ -1478,6 +1487,7 @@ Using ONLY Image 2 (${timeframe}):
 - Price MUST be at or near an HTF key zone (POI)
 - Identify recent structure and whether momentum aligns with HTF bias
 - If market is ranging, consolidating, or unclear, return no-trade
+- If LTF candles are messy, overlapping, or structurally inconsistent, classify them as choppy and return no-trade
 - Wait for lower-timeframe confirmation at the POI rather than assuming the first touch is tradable
 - Check whether price is also in the correct half of the dealing range for the intended direction before approving the setup
 
@@ -1486,6 +1496,7 @@ STEP 2 - IDENTIFY ZONES, BUT DO NOT TRUST THEM YET
 ================================
 
 - Detect supply zones, demand zones, and fair value gaps
+- Detect the cleanest pullback zone using previous structure, visible moving-average value area if shown on chart, or supply/demand / FVG overlap
 - Ignore heavily mitigated or multi-tapped zones
 - Prefer internal FVG/order-block/imbalance confluence that sits inside or near the HTF POI
 - Give extra weight when an LTF FVG overlaps an HTF or 1h-style FVG in the same entry area
@@ -1508,12 +1519,14 @@ STEP 4 - CONFIRMATION SYSTEM
 
 - Only consider a trade if ALL are true:
   - Zone is fresh or lightly mitigated
+  - Price has pulled back into the POI instead of extending away from it
   - Price enters the zone and shows strong rejection OR clear displacement
   - Market structure aligns with HTF direction
   - Momentum confirms direction
 - A simple engulfing candle is NOT enough
 - Require a clear momentum shift, CHoCH, BOS, or displacement confirmed by candle close
 - A valid trade MUST include at least 2 confirmations
+- Valid confirmations include engulfing candle, strong rejection wick, micro structure break, momentum shift, liquidity sweep, CHoCH, or BOS
 - If confirmations are weak, return no valid trade setup
 - Prefer a clean close-confirmed LTF CHoCH as the entry trigger after price returns to the POI
 - A+ setups on LTF should usually show a textbook sequence: liquidity taken, POI retest, close-confirmed CHoCH/BOS, then clean expansion away from the zone
@@ -1524,6 +1537,7 @@ STEP 5 - TRADE EXECUTION RULES
 
 - Prefer LIMIT entries over market entries
 - Entry must be at POI
+- Entry must be after the confirmation candle closes, never from a random level
 - Stop loss must be placed at the structural invalidation swing that proves the setup wrong
 - Targets must be mapped to prior highs/lows, equal highs/lows, or other obvious liquidity pools before approving entry
 - Minimum risk-to-reward = 1:3
@@ -1628,6 +1642,7 @@ STRICT RULES:
 - setup_rating must be A+ for strong confluence, B for valid but weaker confirmation, otherwise avoid
 - Be concise and structured
 - stop_loss must align with structural invalidation and take_profit_1 should only be set when at least 3R is realistic
+- If price is already at the extreme high of a bullish push or extreme low of a bearish push, return wait/avoid and prefer a pullback first
 - The entry_plan.reason must mention POI and confirmations
 - counter_trend_plan, when present, must be explicitly warned as aggressive and should use nearer exits than the main trend trade
 
