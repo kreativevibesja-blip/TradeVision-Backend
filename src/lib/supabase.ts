@@ -248,6 +248,11 @@ export interface Mt5ConnectionRecord {
   accountId: string;
   broker: string;
   serverName: string;
+  accountPassword: string | null;
+  accountName: string | null;
+  balance: number | null;
+  equity: number | null;
+  currency: string | null;
   isActive: boolean;
   lastSeenAt: string | null;
   createdAt: string;
@@ -1543,23 +1548,38 @@ export const getLivePlatformMetrics = async (todayDate: string, todayStartIso: s
 export const getMt5ConnectionForUser = (userId: string) =>
   maybeSingle<Mt5ConnectionRecord>('getMt5ConnectionForUser', supabase.from(MT5_CONNECTION_TABLE).select('*').eq('userId', userId).eq('isActive', true).maybeSingle());
 
-export const upsertMt5Connection = async (userId: string, values: Pick<Mt5ConnectionRecord, 'accountId' | 'broker' | 'serverName'>) => {
+export const upsertMt5Connection = async (
+  userId: string,
+  values: Pick<Mt5ConnectionRecord, 'accountId' | 'broker' | 'serverName'> & Partial<Pick<Mt5ConnectionRecord, 'accountPassword' | 'accountName' | 'balance' | 'equity' | 'currency'>>,
+) => {
   const existing = await maybeSingle<Mt5ConnectionRecord>(
     'upsertMt5Connection:check',
     supabase.from(MT5_CONNECTION_TABLE).select('*').eq('userId', userId).eq('accountId', values.accountId).maybeSingle(),
   );
+
+  const nextValues = {
+    broker: values.broker,
+    serverName: values.serverName,
+    accountPassword: values.accountPassword ?? null,
+    accountName: values.accountName ?? null,
+    balance: values.balance ?? null,
+    equity: values.equity ?? null,
+    currency: values.currency ?? null,
+  };
+
   if (existing) {
     return updateSingle<Mt5ConnectionRecord>('upsertMt5Connection:update', MT5_CONNECTION_TABLE, {
-      broker: values.broker,
-      serverName: values.serverName,
+      ...nextValues,
       isActive: true,
       lastSeenAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     }, (q) => q.eq('id', existing.id));
   }
+
   return insertSingle<Mt5ConnectionRecord>('upsertMt5Connection:insert', MT5_CONNECTION_TABLE, {
     userId,
-    ...values,
+    accountId: values.accountId,
+    ...nextValues,
     isActive: true,
     lastSeenAt: new Date().toISOString(),
   });
@@ -1571,11 +1591,20 @@ export const disconnectMt5Connection = (userId: string) =>
     updatedAt: new Date().toISOString(),
   }, (q) => q.eq('userId', userId).eq('isActive', true));
 
-export const mt5Heartbeat = async (userId: string) => {
+export const mt5Heartbeat = async (userId: string, values?: Partial<Pick<Mt5ConnectionRecord, 'accountId' | 'broker' | 'serverName' | 'accountName' | 'balance' | 'equity' | 'currency'>>) => {
   const conn = await getMt5ConnectionForUser(userId);
   if (!conn) return null;
+
   return updateSingle<Mt5ConnectionRecord>('mt5Heartbeat', MT5_CONNECTION_TABLE, {
+    accountId: values?.accountId != null ? String(values.accountId) : conn.accountId,
+    broker: values?.broker != null ? String(values.broker) : conn.broker,
+    serverName: values?.serverName != null ? String(values.serverName) : conn.serverName,
+    accountName: values?.accountName != null ? String(values.accountName) : conn.accountName,
+    balance: values?.balance != null ? Number(values.balance) : conn.balance,
+    equity: values?.equity != null ? Number(values.equity) : conn.equity,
+    currency: values?.currency != null ? String(values.currency) : conn.currency,
     lastSeenAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
   }, (q) => q.eq('id', conn.id));
 };
 
