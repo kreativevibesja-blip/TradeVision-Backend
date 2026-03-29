@@ -392,6 +392,8 @@ export const listUsersPage = async (
     createdTo?: string;
   }
 ) => {
+  type ListedUserRow = Pick<UserRecord, 'id' | 'email' | 'name' | 'role' | 'subscription' | 'banned' | 'dailyUsage' | 'lastUsageReset' | 'createdAt'>;
+
   const skip = (page - 1) * limit;
   const todayStamp = new Date().toISOString().slice(0, 10);
   const monthStartIso = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1, 0, 0, 0, 0)).toISOString();
@@ -423,7 +425,7 @@ export const listUsersPage = async (
     logDbError('listUsersPage', error);
   }
 
-  const users = (data as Partial<UserRecord>[] | null) ?? [];
+  const users = (data as ListedUserRow[] | null) ?? [];
   const userIds = users.map((user) => user.id!).filter(Boolean);
 
   const [analysisRows, paymentRows] = await Promise.all([
