@@ -14,6 +14,7 @@ import {
   toggleKillSwitch,
   SignalDirection,
   SignalConfidence,
+  SignalMarketState,
   SignalStatus,
 } from '../lib/supabase';
 
@@ -37,14 +38,18 @@ export const createSignal = async (req: AuthRequest, res: Response) => {
       }
     }
 
-    const { symbol, direction, entryPrice, stopLoss, takeProfit, confidence, analysisId, lotSize } = req.body ?? {};
+    const { symbol, direction, entryPrice, stopLoss, takeProfit, confidence, analysisId, lotSize, label, marketState, strategy, score, confirmations, explanation } = req.body ?? {};
     if (!symbol || !direction || entryPrice == null || stopLoss == null || takeProfit == null) {
       return res.status(400).json({ error: 'symbol, direction, entryPrice, stopLoss, takeProfit are required' });
     }
 
     const validDirections: SignalDirection[] = ['buy', 'sell'];
+    const validMarketStates: SignalMarketState[] = ['trending', 'ranging', 'choppy', 'reversal'];
     if (!validDirections.includes(direction)) {
       return res.status(400).json({ error: 'direction must be buy or sell' });
+    }
+    if (marketState != null && !validMarketStates.includes(marketState)) {
+      return res.status(400).json({ error: 'marketState must be trending, ranging, choppy, or reversal' });
     }
 
     const signal = await createTradeSignal({
@@ -57,6 +62,14 @@ export const createSignal = async (req: AuthRequest, res: Response) => {
       confidence: (confidence as SignalConfidence) || 'B',
       status: 'pending',
       analysisId: analysisId ? String(analysisId) : null,
+      label: label ? String(label) : null,
+      marketState: marketState ?? null,
+      strategy: strategy ? String(strategy) : null,
+      score: Number.isFinite(Number(score)) ? Number(score) : null,
+      confirmations: Array.isArray(confirmations)
+        ? confirmations.map((item) => String(item)).filter(Boolean)
+        : [],
+      explanation: explanation ? String(explanation) : null,
       lotSize: lotSize != null ? Number(lotSize) : null,
     });
     return res.json({ signal });

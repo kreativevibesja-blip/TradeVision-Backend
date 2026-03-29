@@ -44,6 +44,7 @@ export type TicketCategory = 'ACCOUNT' | 'BILLING' | 'ANALYSIS' | 'BUG' | 'FEATU
 export type SignalDirection = 'buy' | 'sell';
 export type SignalConfidence = 'A+' | 'A' | 'B' | 'avoid';
 export type SignalStatus = 'pending' | 'ready' | 'executed' | 'cancelled' | 'expired';
+export type SignalMarketState = 'trending' | 'ranging' | 'choppy' | 'reversal';
 export type AutoMode = 'manual' | 'semi' | 'full';
 
 export const hasPaidSubscription = (subscription: SubscriptionTier | string) => subscription === 'PRO' || subscription === 'TOP_TIER';
@@ -252,6 +253,12 @@ export interface TradeSignalRecord {
   confidence: SignalConfidence;
   status: SignalStatus;
   analysisId: string | null;
+  label: string | null;
+  marketState: SignalMarketState | null;
+  strategy: string | null;
+  score: number | null;
+  confirmations: string[];
+  explanation: string | null;
   lotSize: number | null;
   executedAt: string | null;
   cancelledAt: string | null;
