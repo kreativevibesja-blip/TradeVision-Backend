@@ -1,10 +1,6 @@
 import { Response } from 'express';
 import { AuthRequest } from '../middleware/auth';
 import {
-  getMt5ConnectionForUser,
-  upsertMt5Connection,
-  disconnectMt5Connection,
-  mt5Heartbeat,
   createTradeSignal,
   getTradeSignalById,
   listTradeSignalsForUser,
@@ -19,80 +15,7 @@ import {
   SignalDirection,
   SignalConfidence,
   SignalStatus,
-  Mt5ConnectionRecord,
 } from '../lib/supabase';
-
-const sanitizeConnection = (connection: Mt5ConnectionRecord | null) => {
-  if (!connection) {
-    return null;
-  }
-
-  const { accountPassword, ...safeConnection } = connection;
-  return {
-    ...safeConnection,
-    hasPassword: Boolean(accountPassword),
-  };
-};
-
-// ── MT5 Connection ──
-
-export const getConnection = async (req: AuthRequest, res: Response) => {
-  try {
-    const conn = await getMt5ConnectionForUser(req.user!.id);
-    return res.json({ connection: sanitizeConnection(conn) });
-  } catch (error) {
-    console.error('getConnection error:', error);
-    return res.status(500).json({ error: 'Failed to fetch MT5 connection' });
-  }
-};
-
-export const connectMt5 = async (req: AuthRequest, res: Response) => {
-  try {
-    const { accountId, broker, serverName, accountPassword } = req.body ?? {};
-    if (!accountId) {
-      return res.status(400).json({ error: 'accountId is required' });
-    }
-    const conn = await upsertMt5Connection(req.user!.id, {
-      accountId: String(accountId),
-      broker: String(broker ?? ''),
-      serverName: String(serverName ?? ''),
-      accountPassword: accountPassword ? String(accountPassword) : null,
-    });
-    return res.json({ connection: sanitizeConnection(conn) });
-  } catch (error) {
-    console.error('connectMt5 error:', error);
-    return res.status(500).json({ error: 'Failed to connect MT5' });
-  }
-};
-
-export const disconnectMt5 = async (req: AuthRequest, res: Response) => {
-  try {
-    await disconnectMt5Connection(req.user!.id);
-    return res.json({ success: true });
-  } catch (error) {
-    console.error('disconnectMt5 error:', error);
-    return res.status(500).json({ error: 'Failed to disconnect MT5' });
-  }
-};
-
-export const heartbeat = async (req: AuthRequest, res: Response) => {
-  try {
-    const { accountId, broker, serverName, accountName, balance, equity, currency } = req.body ?? {};
-    const connection = await mt5Heartbeat(req.user!.id, {
-      accountId: accountId != null ? String(accountId) : undefined,
-      broker: broker != null ? String(broker) : undefined,
-      serverName: serverName != null ? String(serverName) : undefined,
-      accountName: accountName != null ? String(accountName) : undefined,
-      balance: balance != null ? Number(balance) : undefined,
-      equity: equity != null ? Number(equity) : undefined,
-      currency: currency != null ? String(currency) : undefined,
-    });
-    return res.json({ success: true, connection: sanitizeConnection(connection) });
-  } catch (error) {
-    console.error('heartbeat error:', error);
-    return res.status(500).json({ error: 'Heartbeat failed' });
-  }
-};
 
 // ── Trade Signals ──
 

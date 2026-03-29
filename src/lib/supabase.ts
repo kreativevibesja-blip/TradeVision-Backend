@@ -28,7 +28,6 @@ const PAYOUT_TABLE = 'Payout';
 const QUEUE_TABLE = 'AnalysisQueue';
 const VISITOR_PRESENCE_TABLE = 'VisitorPresence';
 const VISITOR_DAILY_TABLE = 'VisitorDaily';
-const MT5_CONNECTION_TABLE = 'Mt5Connection';
 const TRADE_SIGNAL_TABLE = 'TradeSignal';
 const RISK_SETTINGS_TABLE = 'RiskSettings';
 
@@ -151,7 +150,7 @@ const DEFAULT_PRICING_PLANS: Array<Pick<PricingPlanRecord, 'name' | 'tier' | 'pr
     name: 'Top Tier 👑',
     tier: 'TOP_TIER',
     price: 39.95,
-    features: ['300 analyses per month', 'Advanced Smart Money Concepts', 'Priority AI processing', 'AutoTrader for MT5'],
+    features: ['300 analyses per month', 'Advanced Smart Money Concepts', 'Priority AI processing', 'One-Tap Trade execution'],
     dailyLimit: 999999,
     isActive: true,
   },
@@ -240,23 +239,6 @@ export interface VisitorDailyRecord {
   userId: string | null;
   firstSeenAt: string;
   lastSeenAt: string;
-}
-
-export interface Mt5ConnectionRecord {
-  id: string;
-  userId: string;
-  accountId: string;
-  broker: string;
-  serverName: string;
-  accountPassword: string | null;
-  accountName: string | null;
-  balance: number | null;
-  equity: number | null;
-  currency: string | null;
-  isActive: boolean;
-  lastSeenAt: string | null;
-  createdAt: string;
-  updatedAt: string;
 }
 
 export interface TradeSignalRecord {
@@ -1541,71 +1523,6 @@ export const getLivePlatformMetrics = async (todayDate: string, todayStartIso: s
     activeAnalyses: activeAnalysesCount,
     totalAnalysesToday: totalAnalysesTodayCount,
   };
-};
-
-// ── AutoTrader: MT5 connections ──
-
-export const getMt5ConnectionForUser = (userId: string) =>
-  maybeSingle<Mt5ConnectionRecord>('getMt5ConnectionForUser', supabase.from(MT5_CONNECTION_TABLE).select('*').eq('userId', userId).eq('isActive', true).maybeSingle());
-
-export const upsertMt5Connection = async (
-  userId: string,
-  values: Pick<Mt5ConnectionRecord, 'accountId' | 'broker' | 'serverName'> & Partial<Pick<Mt5ConnectionRecord, 'accountPassword' | 'accountName' | 'balance' | 'equity' | 'currency'>>,
-) => {
-  const existing = await maybeSingle<Mt5ConnectionRecord>(
-    'upsertMt5Connection:check',
-    supabase.from(MT5_CONNECTION_TABLE).select('*').eq('userId', userId).eq('accountId', values.accountId).maybeSingle(),
-  );
-
-  const nextValues = {
-    broker: values.broker,
-    serverName: values.serverName,
-    accountPassword: values.accountPassword ?? null,
-    accountName: values.accountName ?? null,
-    balance: values.balance ?? null,
-    equity: values.equity ?? null,
-    currency: values.currency ?? null,
-  };
-
-  if (existing) {
-    return updateSingle<Mt5ConnectionRecord>('upsertMt5Connection:update', MT5_CONNECTION_TABLE, {
-      ...nextValues,
-      isActive: true,
-      lastSeenAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    }, (q) => q.eq('id', existing.id));
-  }
-
-  return insertSingle<Mt5ConnectionRecord>('upsertMt5Connection:insert', MT5_CONNECTION_TABLE, {
-    userId,
-    accountId: values.accountId,
-    ...nextValues,
-    isActive: true,
-    lastSeenAt: new Date().toISOString(),
-  });
-};
-
-export const disconnectMt5Connection = (userId: string) =>
-  updateSingle<Mt5ConnectionRecord>('disconnectMt5Connection', MT5_CONNECTION_TABLE, {
-    isActive: false,
-    updatedAt: new Date().toISOString(),
-  }, (q) => q.eq('userId', userId).eq('isActive', true));
-
-export const mt5Heartbeat = async (userId: string, values?: Partial<Pick<Mt5ConnectionRecord, 'accountId' | 'broker' | 'serverName' | 'accountName' | 'balance' | 'equity' | 'currency'>>) => {
-  const conn = await getMt5ConnectionForUser(userId);
-  if (!conn) return null;
-
-  return updateSingle<Mt5ConnectionRecord>('mt5Heartbeat', MT5_CONNECTION_TABLE, {
-    accountId: values?.accountId != null ? String(values.accountId) : conn.accountId,
-    broker: values?.broker != null ? String(values.broker) : conn.broker,
-    serverName: values?.serverName != null ? String(values.serverName) : conn.serverName,
-    accountName: values?.accountName != null ? String(values.accountName) : conn.accountName,
-    balance: values?.balance != null ? Number(values.balance) : conn.balance,
-    equity: values?.equity != null ? Number(values.equity) : conn.equity,
-    currency: values?.currency != null ? String(values.currency) : conn.currency,
-    lastSeenAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  }, (q) => q.eq('id', conn.id));
 };
 
 // ── AutoTrader: Trade signals ──

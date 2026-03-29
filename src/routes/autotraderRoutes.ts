@@ -1,10 +1,6 @@
 import { Router } from 'express';
 import { authenticate, requireTopTier } from '../middleware/auth';
 import {
-  getConnection,
-  connectMt5,
-  disconnectMt5,
-  heartbeat,
   createSignal,
   getSignals,
   getPendingSignals,
@@ -19,12 +15,6 @@ import {
 const router = Router();
 
 router.use(authenticate, requireTopTier);
-
-// MT5 Connection
-router.get('/connection', getConnection);
-router.post('/connection', connectMt5);
-router.post('/disconnect', disconnectMt5);
-router.post('/heartbeat', heartbeat);
 
 // Trade Signals
 router.post('/signals', createSignal);
