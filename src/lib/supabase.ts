@@ -260,6 +260,20 @@ export interface TradeSignalRecord {
   score: number | null;
   confirmations: string[];
   explanation: string | null;
+  secondaryTrade: {
+    direction: SignalDirection;
+    entryPrice: number;
+    stopLoss: number;
+    takeProfit: number;
+    confidence: SignalConfidence;
+    label?: string | null;
+    marketState?: SignalMarketState | null;
+    strategy?: string | null;
+    score?: number | null;
+    confirmations?: string[];
+    explanation?: string | null;
+    warning?: string | null;
+  } | null;
   lotSize: number | null;
   executedAt: string | null;
   cancelledAt: string | null;

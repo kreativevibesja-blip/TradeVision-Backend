@@ -18,6 +18,52 @@ import {
   SignalStatus,
 } from '../lib/supabase';
 
+const sanitizeSecondaryTrade = (value: unknown) => {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const draft = value as Record<string, unknown>;
+  const direction = draft.direction;
+  const confidence = draft.confidence;
+  const marketState = draft.marketState;
+  const validDirections: SignalDirection[] = ['buy', 'sell'];
+  const validConfidences: SignalConfidence[] = ['A+', 'A', 'B', 'avoid'];
+  const validMarketStates: SignalMarketState[] = ['trending', 'ranging', 'choppy', 'reversal'];
+
+  if (!validDirections.includes(direction as SignalDirection)) {
+    return null;
+  }
+
+  const entryPrice = Number(draft.entryPrice);
+  const stopLoss = Number(draft.stopLoss);
+  const takeProfit = Number(draft.takeProfit);
+  if (!Number.isFinite(entryPrice) || !Number.isFinite(stopLoss) || !Number.isFinite(takeProfit)) {
+    return null;
+  }
+
+  if ((direction === 'buy' && takeProfit <= entryPrice) || (direction === 'sell' && takeProfit >= entryPrice)) {
+    return null;
+  }
+
+  return {
+    direction: direction as SignalDirection,
+    entryPrice,
+    stopLoss,
+    takeProfit,
+    confidence: validConfidences.includes(confidence as SignalConfidence) ? confidence as SignalConfidence : 'B',
+    label: typeof draft.label === 'string' ? draft.label : null,
+    marketState: validMarketStates.includes(marketState as SignalMarketState) ? marketState as SignalMarketState : null,
+    strategy: typeof draft.strategy === 'string' ? draft.strategy : null,
+    score: Number.isFinite(Number(draft.score)) ? Number(draft.score) : null,
+    confirmations: Array.isArray(draft.confirmations)
+      ? draft.confirmations.map((item) => String(item)).filter(Boolean)
+      : [],
+    explanation: typeof draft.explanation === 'string' ? draft.explanation : null,
+    warning: typeof draft.warning === 'string' ? draft.warning : null,
+  };
+};
+
 // ── Trade Signals ──
 
 export const createSignal = async (req: AuthRequest, res: Response) => {
@@ -38,7 +84,7 @@ export const createSignal = async (req: AuthRequest, res: Response) => {
       }
     }
 
-    const { symbol, direction, entryPrice, stopLoss, takeProfit, confidence, analysisId, lotSize, label, marketState, strategy, score, confirmations, explanation } = req.body ?? {};
+    const { symbol, direction, entryPrice, stopLoss, takeProfit, confidence, analysisId, lotSize, label, marketState, strategy, score, confirmations, explanation, secondaryTrade } = req.body ?? {};
     if (!symbol || !direction || entryPrice == null || stopLoss == null || takeProfit == null) {
       return res.status(400).json({ error: 'symbol, direction, entryPrice, stopLoss, takeProfit are required' });
     }
@@ -70,6 +116,7 @@ export const createSignal = async (req: AuthRequest, res: Response) => {
         ? confirmations.map((item) => String(item)).filter(Boolean)
         : [],
       explanation: explanation ? String(explanation) : null,
+      secondaryTrade: sanitizeSecondaryTrade(secondaryTrade),
       lotSize: lotSize != null ? Number(lotSize) : null,
     });
     return res.json({ signal });
