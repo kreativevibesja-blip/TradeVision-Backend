@@ -495,7 +495,7 @@ export const reserveUserDailyUsage = async (id: string, limit: number) => {
   }
 
   const todayStamp = new Date().toISOString().slice(0, 10);
-  const usageDayStamp = getUsageDayStamp(user.lastUsageReset);
+  const usageDayStamp = getUsageDayStamp(user.lastUsageReset || new Date(0).toISOString());
   const nextUsage = usageDayStamp === todayStamp ? user.dailyUsage || 0 : 0;
 
   if (nextUsage >= limit) {

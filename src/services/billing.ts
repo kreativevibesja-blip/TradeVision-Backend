@@ -108,15 +108,13 @@ export async function setBillingStateFromAdmin(userId: string, subscription: Sub
       currentState.expiresAt &&
       new Date(currentState.expiresAt).getTime() > Date.now()
   );
+  const activeExpiresAt = hasCurrentActivePaidPlan && currentState ? currentState.expiresAt : null;
 
   const nextState: BillingState = subscription !== 'FREE'
     ? {
         currentPlan: subscription,
         status: 'active',
-        expiresAt:
-          hasCurrentActivePaidPlan
-            ? currentState.expiresAt
-            : addDays(now, BILLING_PERIOD_DAYS),
+        expiresAt: activeExpiresAt ?? addDays(now, BILLING_PERIOD_DAYS),
         lastPaymentAt: currentState?.lastPaymentAt ?? now,
         canceledAt: null,
         source: 'admin',
