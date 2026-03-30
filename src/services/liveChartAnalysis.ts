@@ -114,6 +114,40 @@ const normalizeCounterTrendPlan = (value: unknown): VisionAnalysisResult['counte
   };
 };
 
+const normalizeLeftSidePlan = (value: unknown): VisionAnalysisResult['leftSidePlan'] => {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const action = normalizeFinalAction(record.action);
+  const bias = normalizeBias(record.bias);
+  const entryType = normalizeEntryType(record.entry_type);
+  const entryZone = normalizeZone(record.entry_zone);
+  const confirmation = normalizeConfirmation(record.confirmation);
+
+  if (bias === 'none' && action !== 'enter' && entryType === 'none' && !entryZone) {
+    return null;
+  }
+
+  return {
+    action,
+    bias,
+    entryType,
+    entryZone,
+    confirmation,
+    reason: normalizeText(record.reason, 'No separate left-side opportunity is clearly visible from the earlier live structure.'),
+    warning: normalizeText(record.warning, 'This is a potential future setup from the left side of the chart, not the current active trigger. Wait for price to revisit the older zone and confirm.'),
+    invalidationLevel: normalizeNumeric(record.invalidation_level),
+    invalidationReason: normalizeText(record.invalidation_reason, 'The left-side opportunity fails if price violates the structure that makes that older zone valid.'),
+    stopLoss: normalizeNumeric(record.stop_loss),
+    takeProfit1: normalizeNumeric(record.take_profit_1),
+    takeProfit2: normalizeNumeric(record.take_profit_2),
+    takeProfit3: normalizeNumeric(record.take_profit_3),
+    confidence: normalizeConfidence(record.confidence),
+  };
+};
+
 const normalizeSetupRating = (value: unknown): VisionAnalysisResult['quality']['setupRating'] => {
   const trimmed = typeof value === 'string' ? value.trim().toUpperCase() : '';
   if (trimmed === 'A+' || trimmed === 'B') {
@@ -368,6 +402,14 @@ COUNTER-TREND RULES
 - If you include a counter-trend idea, the warning must explicitly say it is aggressive, lower probability, and should be managed quickly.
 - If no clean counter-trend setup exists, omit it or set bias to none and action to avoid.
 
+LEFT-SIDE OPPORTUNITY RULES
+- Look left through the provided OHLC structure before finalizing the answer.
+- You may include ONE optional left_side_plan when older candles show a clear historical POI away from current price.
+- The left_side_plan can be buy or sell and does not need to match the current nearby setup.
+- Only include it if price would need to travel back into that older zone before it becomes tradable.
+- The warning must clearly say it is a potential future setup, not the current active trigger.
+- If no clear left-side opportunity exists in the candle history, omit it or set bias to none and action to avoid.
+
 ================================
 STEP 1 - DETERMINE CONTEXT FIRST
 ================================
@@ -505,6 +547,22 @@ OUTPUT FORMAT (STRICT JSON ONLY)
     "take_profit_1": number | null,
     "take_profit_2": number | null,
     "take_profit_3": number | null,
+  "left_side_plan": {
+    "action": "enter | wait | avoid",
+    "bias": "buy | sell | none",
+    "entry_type": "instant | confirmation | none",
+    "entry_zone": { "min": number | null, "max": number | null },
+    "confirmation": "CHoCH | BOS | rejection | none",
+    "reason": "Explain the older left-side zone and why it could become tradable if price returns there later",
+    "warning": "Explicit warning that this is a potential future setup from the left side of the chart, not the current active trigger",
+    "invalidation_level": number | null,
+    "invalidation_reason": "Explain what invalidates the left-side opportunity",
+    "stop_loss": number | null,
+    "take_profit_1": number | null,
+    "take_profit_2": number | null,
+    "take_profit_3": number | null,
+    "confidence": 1-100
+  },
     "confidence": 1-100
   },
   "risk_management": {
@@ -554,6 +612,7 @@ STRICT RULES:
 - If price is in the wrong half of the dealing range for the intended direction, bias should usually be none and action should usually be wait or avoid
 - setup_rating should only be A+ when the setup resembles a clean textbook entry model with structure, location, liquidity, and execution all aligned
 - counter_trend_plan, when present, must be clearly warned as aggressive and should target nearer exits than the main trend setup
+- left_side_plan, when present, must be clearly warned as a future left-side opportunity that only becomes active if price revisits that older zone and then confirms
 
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 };
@@ -583,6 +642,7 @@ export const analyzeLiveChartCandles = async (
       const pricePosition = parsed.price_position as Record<string, unknown> | undefined;
       const entryPlan = parsed.entry_plan as Record<string, unknown> | undefined;
       const counterTrendPlan = normalizeCounterTrendPlan(parsed.counter_trend_plan);
+      const leftSidePlan = normalizeLeftSidePlan(parsed.left_side_plan);
       const riskManagement = parsed.risk_management as Record<string, unknown> | undefined;
       const quality = parsed.quality as Record<string, unknown> | undefined;
       const finalVerdict = parsed.final_verdict as Record<string, unknown> | undefined;
@@ -617,6 +677,7 @@ export const analyzeLiveChartCandles = async (
           reason: normalizeText(entryPlan?.reason, 'No disciplined entry is justified until the market returns to a stronger point of interest.'),
         },
         counterTrendPlan,
+        leftSidePlan,
         riskManagement: {
           invalidationLevel: normalizeNumeric(riskManagement?.invalidation_level),
           invalidationReason: normalizeText(riskManagement?.invalidation_reason, 'The setup fails if price breaks the structure that supports the active bias.'),

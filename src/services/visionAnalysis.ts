@@ -57,6 +57,8 @@ export interface SMCCounterTrendPlan {
   confidence: number;
 }
 
+export interface SMCLeftSidePlan extends SMCCounterTrendPlan {}
+
 export interface SMCRiskManagement {
   invalidationLevel: number | null;
   invalidationReason: string;
@@ -86,6 +88,7 @@ export interface VisionAnalysisResult {
   pricePosition: SMCPricePosition;
   entryPlan: SMCEntryPlan;
   counterTrendPlan?: SMCCounterTrendPlan | null;
+  leftSidePlan?: SMCLeftSidePlan | null;
   riskManagement: SMCRiskManagement;
   quality: SMCQuality;
   finalVerdict: SMCFinalVerdict;
@@ -265,7 +268,14 @@ const normalizeConfirmation = (value: unknown): SMCEntryPlan['confirmation'] => 
   return 'none';
 };
 
-const normalizeCounterTrendPlan = (value: unknown): SMCCounterTrendPlan | null => {
+const normalizeTradeIdeaPlan = (
+  value: unknown,
+  defaults: {
+    reason: string;
+    warning: string;
+    invalidationReason: string;
+  },
+): SMCCounterTrendPlan | null => {
   if (!value || typeof value !== 'object') {
     return null;
   }
@@ -287,10 +297,10 @@ const normalizeCounterTrendPlan = (value: unknown): SMCCounterTrendPlan | null =
     entryType,
     entryZone,
     confirmation,
-    reason: normalizeText(record.reason, 'No clean counter-trend setup is justified against the primary trend right now.'),
-    warning: normalizeText(record.warning, 'Counter-trend trades are aggressive, lower probability, and should be managed faster than the main trend setup.'),
+    reason: normalizeText(record.reason, defaults.reason),
+    warning: normalizeText(record.warning, defaults.warning),
     invalidationLevel: normalizeNumeric(record.invalidation_level),
-    invalidationReason: normalizeText(record.invalidation_reason, 'The counter-trend idea fails if price breaks the rejection structure supporting it.'),
+    invalidationReason: normalizeText(record.invalidation_reason, defaults.invalidationReason),
     stopLoss: normalizeNumeric(record.stop_loss),
     takeProfit1: normalizeNumeric(record.take_profit_1),
     takeProfit2: normalizeNumeric(record.take_profit_2),
@@ -298,6 +308,20 @@ const normalizeCounterTrendPlan = (value: unknown): SMCCounterTrendPlan | null =
     confidence: normalizeConfidence(record.confidence),
   };
 };
+
+const normalizeCounterTrendPlan = (value: unknown): SMCCounterTrendPlan | null =>
+  normalizeTradeIdeaPlan(value, {
+    reason: 'No clean counter-trend setup is justified against the primary trend right now.',
+    warning: 'Counter-trend trades are aggressive, lower probability, and should be managed faster than the main trend setup.',
+    invalidationReason: 'The counter-trend idea fails if price breaks the rejection structure supporting it.',
+  });
+
+const normalizeLeftSidePlan = (value: unknown): SMCLeftSidePlan | null =>
+  normalizeTradeIdeaPlan(value, {
+    reason: 'No separate left-side opportunity is clearly visible from the earlier chart structure.',
+    warning: 'This is a potential future setup from the left side of the chart, not the current active trigger. Wait for price to revisit the zone and confirm.',
+    invalidationReason: 'The left-side opportunity fails if price violates the structure that makes that historical zone valid.',
+  });
 
 const normalizeSetupRating = (value: unknown): SMCQuality['setupRating'] => {
   if (typeof value !== 'string') {
@@ -794,6 +818,22 @@ export async function analyzeVisionStructure(
     "take_profit_1": number | null,
     "take_profit_2": number | null,
     "take_profit_3": number | null,
+  "left_side_plan": {
+    "action": "enter | wait | avoid",
+    "bias": "buy | sell | none",
+    "entry_type": "instant | confirmation | none",
+    "entry_zone": { "min": number | null, "max": number | null },
+    "confirmation": "CHoCH | BOS | rejection | none",
+    "reason": "string",
+    "warning": "string",
+    "invalidation_level": number | null,
+    "invalidation_reason": "string",
+    "stop_loss": number | null,
+    "take_profit_1": number | null,
+    "take_profit_2": number | null,
+    "take_profit_3": number | null,
+    "confidence": 0-100
+  },
     "confidence": 1-100
   },
   "risk_management": {
@@ -846,6 +886,8 @@ Do not include stop loss or take profit levels.
 You may also include an optional counter_trend_plan object only when a clean aggressive support/resistance rejection setup exists against the main trend.
 If used, it must include: action, bias, entry_type, entry_zone, confirmation, reason, warning, invalidation_level, invalidation_reason, stop_loss, take_profit_1, take_profit_2, take_profit_3, confidence.
 The warning must explicitly say the setup is aggressive, lower probability, and should be managed quickly.
+You may also include an optional left_side_plan object only when the left side of the visible chart shows a clear historical POI that is away from current price and could become tradable if price revisits it later.
+The left_side_plan is a potential future setup, not the current active trigger, and its warning must say that price still needs to travel back into that older zone and confirm before entry.
 
 Return STRICT JSON ONLY.
 Do not use markdown.
@@ -891,6 +933,14 @@ COUNTER-TREND RULES
 - Counter-trend ideas must rely on rejection and/or engulfing-style reaction and should preferably wait for confirmation rather than blindly enter.
 - Counter-trend exits must be conservative and based on the nearest realistic reaction levels, not on full trend reversal assumptions.
 - If no clean counter-trend setup exists, omit it or set bias to none and action to avoid.
+
+LEFT-SIDE OPPORTUNITY RULES
+- Look left on the visible chart before finalizing the answer.
+- You may include ONE optional left_side_plan when the left side shows a clear historical POI that is away from the current price.
+- The left_side_plan can be buy or sell and does not need to match the current nearby setup.
+- Only include it if price would need to travel back into that older left-side zone before it becomes tradable.
+- The warning must clearly say it is a potential future setup, not the current active trigger.
+- If no clean left-side opportunity is visible, omit it or set bias to none and action to avoid.
 
 ================================
 STEP 1 - DETERMINE CONTEXT FIRST
@@ -1044,6 +1094,22 @@ OUTPUT FORMAT (STRICT JSON ONLY)
     "take_profit_3": number | null,
     "confidence": 1-100
   },
+  "left_side_plan": {
+    "action": "enter | wait | avoid",
+    "bias": "buy | sell | none",
+    "entry_type": "instant | confirmation | none",
+    "entry_zone": { "min": number | null, "max": number | null },
+    "confirmation": "CHoCH | BOS | rejection | none",
+    "reason": "Explain the older left-side zone and why it could become tradable if price returns there later",
+    "warning": "Explicit warning that this is a potential future setup from the left side of the chart, not the current active trigger",
+    "invalidation_level": number | null,
+    "invalidation_reason": "Explain what invalidates the left-side opportunity",
+    "stop_loss": number | null,
+    "take_profit_1": number | null,
+    "take_profit_2": number | null,
+    "take_profit_3": number | null,
+    "confidence": 1-100
+  },
   "risk_management": {
     "invalidation_level": number | null,
     "invalidation_reason": "Explain what breaks the setup"
@@ -1090,6 +1156,7 @@ STRICT RULES
 - If price is already at the extreme high of a bullish leg or extreme low of a bearish leg, bias should usually be none and action should usually be wait for pullback or avoid
 - setup_rating should only be A+ when the setup resembles a clean textbook entry model with structure, location, liquidity, and execution all aligned
 - counter_trend_plan, when present, must be clearly warned as aggressive and should target nearer exits than the main trend setup
+- left_side_plan, when present, must be clearly warned as a future left-side opportunity that only becomes active if price revisits that older zone and then confirms
 
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 
@@ -1105,6 +1172,7 @@ Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
     const pricePosition = parsed.price_position as Record<string, unknown> | undefined;
     const entryPlan = parsed.entry_plan as Record<string, unknown> | undefined;
     const counterTrendPlan = normalizeCounterTrendPlan(parsed.counter_trend_plan);
+    const leftSidePlan = normalizeLeftSidePlan(parsed.left_side_plan);
     const riskManagement = parsed.risk_management as Record<string, unknown> | undefined;
     const quality = parsed.quality as Record<string, unknown> | undefined;
     const finalVerdict = parsed.final_verdict as Record<string, unknown> | undefined;
@@ -1148,6 +1216,7 @@ Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
         ),
       },
       counterTrendPlan,
+      leftSidePlan,
       riskManagement: {
         invalidationLevel: normalizeNumeric(riskManagement?.invalidation_level),
         invalidationReason: normalizeText(
@@ -1364,6 +1433,7 @@ Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
     const pricePosition = parsed.price_position as Record<string, unknown> | undefined;
     const entryPlan = parsed.entry_plan as Record<string, unknown> | undefined;
     const counterTrendPlan = normalizeCounterTrendPlan(parsed.counter_trend_plan);
+    const leftSidePlan = normalizeLeftSidePlan(parsed.left_side_plan);
     const riskManagement = parsed.risk_management as Record<string, unknown> | undefined;
     const quality = parsed.quality as Record<string, unknown> | undefined;
     const finalVerdict = parsed.final_verdict as Record<string, unknown> | undefined;
@@ -1398,6 +1468,7 @@ Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
         reason: normalizeText(entryPlan?.reason, 'HTF provides bias only — entry is determined by the lower timeframe.'),
       },
       counterTrendPlan,
+      leftSidePlan,
       riskManagement: {
         invalidationLevel: normalizeNumeric(riskManagement?.invalidation_level),
         invalidationReason: normalizeText(riskManagement?.invalidation_reason, 'HTF structural invalidation level.'),
@@ -1476,6 +1547,14 @@ COUNTER-TREND RULES
 - You may include ONE counter_trend_plan only when price is reacting sharply from a clear support/resistance area and a lower-timeframe rejection or engulfing-style reversal is plausible.
 - Counter-trend ideas must have conservative exits and a clear warning that they are aggressive and lower probability.
 - If no clean counter-trend setup exists, omit it or set bias to none and action to avoid.
+
+LEFT-SIDE OPPORTUNITY RULES
+- Look left on the visible LTF chart before finalizing the answer.
+- You may include ONE optional left_side_plan when an older left-side POI is clearly visible away from current price.
+- The left_side_plan can be buy or sell and does not need to match the current nearby setup.
+- Only include it if price would need to travel back into that older left-side zone before it becomes tradable.
+- It must be described as a potential future setup, not an active immediate trigger.
+- If no clear left-side opportunity is visible, omit it or set bias to none and action to avoid.
 
 ================================
 STEP 1 - DETERMINE CONTEXT
@@ -1606,6 +1685,22 @@ OUTPUT FORMAT (STRICT JSON ONLY)
     "take_profit_3": number | null,
     "confidence": 1-100
   },
+  "left_side_plan": {
+    "action": "enter | wait | avoid",
+    "bias": "buy | sell | none",
+    "entry_type": "instant | confirmation | none",
+    "entry_zone": { "min": number | null, "max": number | null },
+    "confirmation": "CHoCH | BOS | rejection | none",
+    "reason": "Explain the older left-side zone and why it could become tradable if price returns there later",
+    "warning": "Explicit warning that this is a potential future setup from the left side of the chart, not the current active trigger",
+    "invalidation_level": number | null,
+    "invalidation_reason": "The exact structural level that invalidates the left-side opportunity",
+    "stop_loss": number | null,
+    "take_profit_1": number | null,
+    "take_profit_2": number | null,
+    "take_profit_3": number | null,
+    "confidence": 1-100
+  },
   "risk_management": {
     "invalidation_level": number | null,
     "invalidation_reason": "The exact structural level that invalidates this entry"
@@ -1645,6 +1740,7 @@ STRICT RULES:
 - If price is already at the extreme high of a bullish push or extreme low of a bearish push, return wait/avoid and prefer a pullback first
 - The entry_plan.reason must mention POI and confirmations
 - counter_trend_plan, when present, must be explicitly warned as aggressive and should use nearer exits than the main trend trade
+- left_side_plan, when present, must be explicitly warned as a future left-side opportunity that only becomes active if price revisits that older zone and then confirms
 
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 
@@ -1656,6 +1752,7 @@ Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
     const pricePosition = parsed.price_position as Record<string, unknown> | undefined;
     const entryPlan = parsed.entry_plan as Record<string, unknown> | undefined;
     const counterTrendPlan = normalizeCounterTrendPlan(parsed.counter_trend_plan);
+    const leftSidePlan = normalizeLeftSidePlan(parsed.left_side_plan);
     const riskManagement = parsed.risk_management as Record<string, unknown> | undefined;
     const quality = parsed.quality as Record<string, unknown> | undefined;
     const finalVerdict = parsed.final_verdict as Record<string, unknown> | undefined;
@@ -1690,6 +1787,7 @@ Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
         reason: normalizeText(entryPlan?.reason, 'No disciplined entry is justified until internal structure confirms.'),
       },
       counterTrendPlan,
+      leftSidePlan,
       riskManagement: {
         invalidationLevel: normalizeNumeric(riskManagement?.invalidation_level),
         invalidationReason: normalizeText(riskManagement?.invalidation_reason, 'The setup is invalidated if price breaks the structural level.'),

@@ -100,6 +100,7 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
         pricePosition: htfVision.pricePosition,
         entryPlan: ltfVision.entryPlan,
         counterTrendPlan: ltfVision.counterTrendPlan ?? null,
+        leftSidePlan: ltfVision.leftSidePlan ?? null,
         riskManagement: ltfVision.riskManagement,
         quality: {
           setupRating: htfVision.quality.setupRating,

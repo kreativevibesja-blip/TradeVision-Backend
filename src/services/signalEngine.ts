@@ -26,6 +26,7 @@ export interface TradeSignalResult {
   currentPricePosition: VisionAnalysisResult['pricePosition']['location'];
   entryPlan: VisionAnalysisResult['entryPlan'];
   counterTrendPlan?: VisionAnalysisResult['counterTrendPlan'];
+  leftSidePlan?: VisionAnalysisResult['leftSidePlan'];
   entryLogic: {
     type: 'reversal' | 'continuation' | 'none';
     entryZone: VisionAnalysisResult['entryPlan']['entryZone'];
@@ -202,6 +203,7 @@ export function generateFinalSignal(aiData: VisionAnalysisResult, currentPrice: 
     currentPricePosition: aiData.pricePosition.location,
     entryPlan: aiData.entryPlan,
     counterTrendPlan: aiData.counterTrendPlan ?? null,
+    leftSidePlan: aiData.leftSidePlan ?? null,
     entryLogic: {
       type: mapEntryType(aiData.entryPlan.entryType, aiData.entryPlan.bias),
       entryZone: aiData.entryPlan.entryZone,
