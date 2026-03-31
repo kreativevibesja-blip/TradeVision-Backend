@@ -1,8 +1,6 @@
 import { supabase } from '../lib/supabase';
 import { fetchMarketDataForLiveChart, resolveLiveChartSymbol } from './marketData';
-import { analyzeLiveChartCandles } from './liveChartAnalysis';
-import { generateFinalSignal } from './signalEngine';
-import type { VisionAnalysisResult } from './visionAnalysis';
+import { analyzeMarket, type Candle } from './scannerEngine';
 
 // ── Types ──
 
@@ -96,75 +94,6 @@ function getCurrentSessionTypes(): SessionType[] {
   if (isSessionActive('london')) active.push('london');
   if (isSessionActive('newyork')) active.push('newyork');
   return active;
-}
-
-// ── Scoring ──
-
-interface ScoreBreakdown {
-  trendAlignment: boolean;
-  pullbackZone: boolean;
-  hasConfirmation: boolean;
-  structureLevel: boolean;
-  total: number;
-}
-
-function scoreSetup(vision: VisionAnalysisResult): ScoreBreakdown {
-  let total = 0;
-
-  // +2 trend alignment
-  const trendAlignment =
-    (vision.trend === 'bullish' && (vision.structure.bos === 'bullish' || vision.structure.state === 'higher highs')) ||
-    (vision.trend === 'bearish' && (vision.structure.bos === 'bearish' || vision.structure.state === 'lower lows'));
-  if (trendAlignment) total += 2;
-
-  // +2 pullback zone
-  const pullbackZone = Boolean(
-    vision.entryPlan.bias !== 'none' &&
-    vision.entryPlan.entryZone &&
-    (vision.zones.supply || vision.zones.demand)
-  );
-  if (pullbackZone) total += 2;
-
-  // +2 confirmation
-  const confirmationText = [
-    vision.entryPlan.confirmation,
-    ...(vision.confirmations ?? []),
-  ].join(' ').toLowerCase();
-  const hasConfirmation =
-    /engulf/i.test(confirmationText) ||
-    /rejection|wick|pin bar/i.test(confirmationText) ||
-    /liquidity sweep/i.test(confirmationText) ||
-    /bos|choch/i.test(confirmationText);
-  if (hasConfirmation) total += 2;
-
-  // +1 structure level
-  const structureLevel = vision.structure.bos !== 'none' || vision.structure.choch !== 'none';
-  if (structureLevel) total += 1;
-
-  return { trendAlignment, pullbackZone, hasConfirmation, structureLevel, total };
-}
-
-function buildConfirmationLabels(vision: VisionAnalysisResult): string[] {
-  const labels: string[] = [];
-
-  if (vision.structure.bos !== 'none') labels.push(`BOS (${vision.structure.bos})`);
-  if (vision.structure.choch !== 'none') labels.push(`CHoCH (${vision.structure.choch})`);
-
-  const text = [
-    vision.entryPlan.confirmation,
-    ...(vision.confirmations ?? []),
-  ].join(' ');
-
-  if (/engulf/i.test(text)) labels.push('Engulfing candle');
-  if (/rejection|wick|pin bar/i.test(text)) labels.push('Rejection wick');
-  if (/liquidity sweep/i.test(text)) labels.push('Liquidity sweep');
-
-  if (vision.liquidity.type !== 'none') {
-    const sweepLabel = `Liquidity ${vision.liquidity.type}`;
-    if (!labels.includes(sweepLabel)) labels.push(sweepLabel);
-  }
-
-  return labels;
 }
 
 // ── Deduplication ──
@@ -361,48 +290,29 @@ async function scanSymbol(symbol: string): Promise<ScanCycleResult | null> {
 
   try {
     const marketData = await fetchMarketDataForLiveChart(symbol, SCANNER_TIMEFRAME);
-    const candlesForAnalysis = marketData.candles.map((c) => ({
-      timestamp: c.timestamp,
+
+    // Convert MarketCandle[] → Candle[] for the pure-logic engine
+    const candles: Candle[] = marketData.candles.map((c) => ({
       open: c.open,
       high: c.high,
       low: c.low,
       close: c.close,
+      time: new Date(c.timestamp).getTime(),
     }));
 
-    const vision = await analyzeLiveChartCandles(resolved.label, SCANNER_TIMEFRAME, candlesForAnalysis);
-    const signal = generateFinalSignal(vision, marketData.currentPrice);
-
-    const scoring = scoreSetup(vision);
-    if (scoring.total < 5) return null;
-
-    const direction = vision.entryPlan.bias;
-    if (direction === 'none') return null;
-
-    const entryMid = vision.entryPlan.entryZone
-      ? ((vision.entryPlan.entryZone.min ?? 0) + (vision.entryPlan.entryZone.max ?? 0)) / 2
-      : marketData.currentPrice;
-
-    const stopLoss = signal.stopLoss ?? (direction === 'buy' ? entryMid * 0.997 : entryMid * 1.003);
-    const takeProfit = signal.takeProfit1 ?? (direction === 'buy' ? entryMid * 1.006 : entryMid * 0.994);
-
-    if ((direction === 'buy' && takeProfit <= entryMid) || (direction === 'sell' && takeProfit >= entryMid)) {
-      return null;
-    }
-
-    const confirmations = buildConfirmationLabels(vision);
-    const strategy = signal.primaryStrategy
-      ?? (vision.trend === 'bullish' ? 'Bullish Pullback Continuation' : 'Bearish Pullback Continuation');
+    const setup = analyzeMarket(symbol, candles);
+    if (!setup) return null;
 
     return {
-      symbol,
-      direction,
-      entry: entryMid,
-      stopLoss,
-      takeProfit,
-      confidenceScore: signal.confidence,
-      strategy,
-      confirmations,
-      score: scoring.total,
+      symbol: setup.symbol,
+      direction: setup.direction,
+      entry: setup.entry,
+      stopLoss: setup.stopLoss,
+      takeProfit: setup.takeProfit,
+      confidenceScore: setup.confidenceScore,
+      strategy: setup.strategy,
+      confirmations: setup.confirmationLabels,
+      score: setup.score,
     };
   } catch (err) {
     console.error(`[Scanner] Failed to scan ${symbol}:`, err);
@@ -472,7 +382,7 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
     const alert = await insertAlert({
       userId,
       scanResultId: scanResult.id,
-      message: `High-quality setup detected on ${result.symbol} (${directionLabel}) — Score ${result.score}/7, ${result.strategy}`,
+      message: `High-quality setup detected on ${result.symbol} (${directionLabel}) — Score ${result.score}/9, ${result.strategy}`,
       type: 'trade',
     });
 
