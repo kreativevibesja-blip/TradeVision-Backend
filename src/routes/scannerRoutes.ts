@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { authenticate } from '../middleware/auth';
+import { authenticate, requireTopTier } from '../middleware/auth';
 import {
   getScannerStatus,
   toggleScanner,
@@ -14,14 +14,16 @@ import {
 
 const router = Router();
 
-router.get('/status', authenticate, getScannerStatus);
-router.post('/toggle', authenticate, toggleScanner);
-router.post('/scan', authenticate, triggerScan);
-router.get('/results', authenticate, getResults);
-router.get('/alerts', authenticate, getAlerts);
-router.post('/alerts/read', authenticate, markRead);
-router.get('/summary', authenticate, getSummary);
-router.post('/check-proximity', authenticate, checkProximity);
-router.post('/expire', authenticate, expireSession);
+router.use(authenticate, requireTopTier);
+
+router.get('/status', getScannerStatus);
+router.post('/toggle', toggleScanner);
+router.post('/scan', triggerScan);
+router.get('/results', getResults);
+router.get('/alerts', getAlerts);
+router.post('/alerts/read', markRead);
+router.get('/summary', getSummary);
+router.post('/check-proximity', checkProximity);
+router.post('/expire', expireSession);
 
 export default router;
