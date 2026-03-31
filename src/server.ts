@@ -14,6 +14,7 @@ import queueRoutes from './routes/queueRoutes';
 import presenceRoutes from './routes/presenceRoutes';
 import autotraderRoutes from './routes/autotraderRoutes';
 import scannerRoutes from './routes/scannerRoutes';
+import notificationRoutes from './routes/notificationRoutes';
 import { startQueueWorker } from './workers/queueWorker';
 
 export const app = express();
@@ -74,6 +75,7 @@ app.use('/api', queueRoutes);
 app.use('/api', presenceRoutes);
 app.use('/api/autotrader', autotraderRoutes);
 app.use('/api/scanner', scannerRoutes);
+app.use('/api/notifications', notificationRoutes);
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });

@@ -1,6 +1,7 @@
 import { supabase } from '../lib/supabase';
 import { fetchMarketDataForLiveChart, resolveLiveChartSymbol } from './marketData';
 import { analyzeMarket, type Candle } from './scannerEngine';
+import { sendPushToUser } from './pushService';
 
 // ── Types ──
 
@@ -387,6 +388,14 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
     });
 
     savedAlerts.push(alert);
+
+    // Send browser push notification
+    sendPushToUser(userId, {
+      title: 'TradeVision Alert \ud83d\udea8',
+      body: `${result.symbol} ${directionLabel} setup detected (Score ${result.score}/9)`,
+      tag: `scan-${result.symbol}-${result.direction}`,
+      url: '/dashboard/scanner',
+    }).catch((err) => console.error('[Push] Failed to send:', err));
   }
 
   // Cleanup old dedup entries
