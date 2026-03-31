@@ -271,6 +271,30 @@ async function insertAlert(alert: { userId: string; scanResultId?: string; messa
   return data as ScannerAlert;
 }
 
+// ── Session trade limits ──
+
+const MAX_TRADES_PER_SESSION = 3;
+const MAX_TRADES_PER_DAY = 6;
+
+async function getTodayTradeCount(userId: string, sessionType?: SessionType): Promise<number> {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  let query = supabase
+    .from(SCAN_RESULT_TABLE)
+    .select('id', { count: 'exact', head: true })
+    .eq('userId', userId)
+    .gte('createdAt', today.toISOString());
+
+  if (sessionType) {
+    query = query.eq('sessionType', sessionType);
+  }
+
+  const { count, error } = await query;
+  if (error) throw new Error(error.message);
+  return count ?? 0;
+}
+
 // ── Core scanner logic ──
 
 interface ScanCycleResult {
@@ -338,22 +362,43 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
     return { results: [], alerts: [] };
   }
 
+  const sessionType = relevantSessions[0]; // Primary session
+
+  // ── Enforce daily & per-session trade limits ──
+  const [dailyCount, sessionCount] = await Promise.all([
+    getTodayTradeCount(userId),
+    getTodayTradeCount(userId, sessionType),
+  ]);
+
+  if (dailyCount >= MAX_TRADES_PER_DAY) {
+    console.log(`[Scanner] Daily limit reached for user ${userId} (${dailyCount}/${MAX_TRADES_PER_DAY})`);
+    return { results: [], alerts: [] };
+  }
+
+  if (sessionCount >= MAX_TRADES_PER_SESSION) {
+    console.log(`[Scanner] Session limit reached for user ${userId} ${sessionType} (${sessionCount}/${MAX_TRADES_PER_SESSION})`);
+    return { results: [], alerts: [] };
+  }
+
+  const remainingDaily = MAX_TRADES_PER_DAY - dailyCount;
+  const remainingSession = MAX_TRADES_PER_SESSION - sessionCount;
+  const slotsAvailable = Math.min(remainingDaily, remainingSession);
+
   // Scan all symbols in parallel
   const scanPromises = SCANNER_SYMBOLS.map((symbol) => scanSymbol(symbol));
   const rawResults = await Promise.all(scanPromises);
 
-  // Filter valid, sort by score, take top 3
+  // Filter valid, sort by score, cap to available slots
   const validResults = rawResults
     .filter((r): r is ScanCycleResult => r !== null)
     .sort((a, b) => b.score - a.score || b.confidenceScore - a.confidenceScore)
-    .slice(0, 3);
+    .slice(0, slotsAvailable);
 
   const savedResults: ScanResult[] = [];
   const savedAlerts: ScannerAlert[] = [];
 
   for (let i = 0; i < validResults.length; i++) {
     const result = validResults[i];
-    const sessionType = relevantSessions[0]; // Primary session
 
     // Deduplicate
     if (isDuplicate(userId, result.symbol, result.direction)) {
