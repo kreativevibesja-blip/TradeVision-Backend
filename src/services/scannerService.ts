@@ -6,8 +6,9 @@ import { sendPushToUser } from './pushService';
 // ── Types ──
 
 export type SessionType = 'london' | 'newyork';
-export type ScanResultStatus = 'active' | 'triggered' | 'invalidated' | 'expired';
+export type ScanResultStatus = 'active' | 'triggered' | 'closed' | 'invalidated' | 'expired';
 export type AlertType = 'info' | 'trade' | 'warning';
+export type ScanCloseReason = 'tp' | 'sl' | null;
 
 export interface ScannerSession {
   id: string;
@@ -32,6 +33,9 @@ export interface ScanResult {
   confirmations: string[];
   sessionType: SessionType;
   status: ScanResultStatus;
+  closeReason: ScanCloseReason;
+  triggeredAt: string | null;
+  closedAt: string | null;
   rank: number | null;
   createdAt: string;
 }
@@ -222,7 +226,7 @@ export async function markAlertsRead(userId: string, alertIds: string[]): Promis
 export async function getSessionSummary(
   userId: string,
   sessionType: SessionType,
-): Promise<{ total: number; triggered: number; invalidated: number; active: number }> {
+): Promise<{ total: number; triggered: number; closed: number; invalidated: number; active: number }> {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
@@ -239,9 +243,22 @@ export async function getSessionSummary(
   return {
     total: results.length,
     triggered: results.filter((r: any) => r.status === 'triggered').length,
+    closed: results.filter((r: any) => r.status === 'closed').length,
     invalidated: results.filter((r: any) => r.status === 'invalidated').length,
     active: results.filter((r: any) => r.status === 'active').length,
   };
+}
+
+async function updateScanResult(
+  id: string,
+  updates: Partial<Pick<ScanResult, 'status' | 'closeReason' | 'triggeredAt' | 'closedAt'>>,
+): Promise<void> {
+  const { error } = await supabase
+    .from(SCAN_RESULT_TABLE)
+    .update(updates)
+    .eq('id', id);
+
+  if (error) throw new Error(error.message);
 }
 
 async function insertScanResult(result: Omit<ScanResult, 'id' | 'createdAt'>): Promise<ScanResult> {
@@ -418,6 +435,9 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
       confirmations: result.confirmations,
       sessionType,
       status: 'active',
+      closeReason: null,
+      triggeredAt: null,
+      closedAt: null,
       rank: i + 1,
     });
 
@@ -456,9 +476,9 @@ export async function checkZoneProximityAlerts(userId: string): Promise<ScannerA
     .from(SCAN_RESULT_TABLE)
     .select('*')
     .eq('userId', userId)
-    .eq('status', 'active')
+    .in('status', ['active', 'triggered'])
     .order('createdAt', { ascending: false })
-    .limit(10);
+    .limit(20);
 
   if (!activeResults?.length) return [];
 
@@ -471,38 +491,106 @@ export async function checkZoneProximityAlerts(userId: string): Promise<ScannerA
     try {
       const marketData = await fetchMarketDataForLiveChart(result.symbol, 'M5');
       const currentPrice = marketData.currentPrice;
-      const entryDistance = Math.abs(currentPrice - result.entry);
-      const slDistance = Math.abs(result.entry - result.stopLoss);
-      const proximityRatio = entryDistance / slDistance;
+      const decimals = result.entry >= 100 ? 2 : 5;
 
-      // Alert if price is within 30% of entry distance relative to SL
-      if (proximityRatio <= 0.3) {
-        const alert = await insertAlert({
-          userId,
-          scanResultId: result.id,
-          message: `${result.symbol} approaching ${result.direction === 'buy' ? 'buy' : 'sell'} zone — price is near entry at ${currentPrice.toFixed(result.entry >= 100 ? 2 : 5)}`,
-          type: 'warning',
-        });
-        alerts.push(alert);
+      if (result.status === 'active') {
+        const entryDistance = Math.abs(currentPrice - result.entry);
+        const slDistance = Math.abs(result.entry - result.stopLoss) || 1;
+        const proximityRatio = entryDistance / slDistance;
+
+        const entryTriggered = result.direction === 'buy'
+          ? currentPrice <= result.entry && currentPrice > result.stopLoss
+          : currentPrice >= result.entry && currentPrice < result.stopLoss;
+
+        if (entryTriggered) {
+          await updateScanResult(result.id, {
+            status: 'triggered',
+            triggeredAt: new Date().toISOString(),
+          });
+
+          const alert = await insertAlert({
+            userId,
+            scanResultId: result.id,
+            message: `${result.symbol} ${result.direction.toUpperCase()} trade triggered at ${currentPrice.toFixed(decimals)}`,
+            type: 'trade',
+          });
+          alerts.push(alert);
+
+          sendPushToUser(userId, {
+            title: 'Trade Triggered',
+            body: `${result.symbol} ${result.direction.toUpperCase()} is now live at ${currentPrice.toFixed(decimals)}`,
+            tag: `trigger-${result.id}`,
+            url: '/dashboard/scanner',
+          }).catch((err) => console.error('[Push] Failed to send trigger notification:', err));
+
+          continue;
+        }
+
+        if (proximityRatio <= 0.3) {
+          const alert = await insertAlert({
+            userId,
+            scanResultId: result.id,
+            message: `${result.symbol} approaching ${result.direction === 'buy' ? 'buy' : 'sell'} zone — price is near entry at ${currentPrice.toFixed(decimals)}`,
+            type: 'warning',
+          });
+          alerts.push(alert);
+        }
+
+        const isInvalidated = result.direction === 'buy'
+          ? currentPrice < result.stopLoss
+          : currentPrice > result.stopLoss;
+
+        if (isInvalidated) {
+          await updateScanResult(result.id, { status: 'invalidated' });
+
+          const alert = await insertAlert({
+            userId,
+            scanResultId: result.id,
+            message: `${result.symbol} setup invalidated — price broke through stop loss level before entry`,
+            type: 'warning',
+          });
+          alerts.push(alert);
+
+          continue;
+        }
       }
 
-      // Invalidate if price blew through stop loss
-      const isInvalidated = result.direction === 'buy'
-        ? currentPrice < result.stopLoss
-        : currentPrice > result.stopLoss;
+      if (result.status === 'triggered') {
+        const hitTakeProfit = result.direction === 'buy'
+          ? currentPrice >= result.takeProfit
+          : currentPrice <= result.takeProfit;
 
-      if (isInvalidated) {
-        await supabase
-          .from(SCAN_RESULT_TABLE)
-          .update({ status: 'invalidated' })
-          .eq('id', result.id);
+        const hitStopLoss = result.direction === 'buy'
+          ? currentPrice <= result.stopLoss
+          : currentPrice >= result.stopLoss;
 
-        await insertAlert({
-          userId,
-          scanResultId: result.id,
-          message: `${result.symbol} setup invalidated — price broke through stop loss level`,
-          type: 'warning',
-        });
+        if (hitTakeProfit || hitStopLoss) {
+          const closeReason: ScanCloseReason = hitTakeProfit ? 'tp' : 'sl';
+          await updateScanResult(result.id, {
+            status: 'closed',
+            closeReason,
+            closedAt: new Date().toISOString(),
+          });
+
+          const alert = await insertAlert({
+            userId,
+            scanResultId: result.id,
+            message: hitTakeProfit
+              ? `${result.symbol} trade closed in profit — take profit hit at ${currentPrice.toFixed(decimals)}`
+              : `${result.symbol} trade closed at stop loss — SL hit at ${currentPrice.toFixed(decimals)}`,
+            type: hitTakeProfit ? 'trade' : 'warning',
+          });
+          alerts.push(alert);
+
+          sendPushToUser(userId, {
+            title: hitTakeProfit ? 'Take Profit Hit' : 'Stop Loss Hit',
+            body: hitTakeProfit
+              ? `${result.symbol} closed in profit.`
+              : `${result.symbol} closed at stop loss.`,
+            tag: `closed-${result.id}`,
+            url: '/dashboard/scanner',
+          }).catch((err) => console.error('[Push] Failed to send closure notification:', err));
+        }
       }
     } catch {
       // Skip symbols that fail to fetch
