@@ -84,9 +84,10 @@ export const getResults = async (req: AuthRequest, res: Response) => {
     const sessionType = typeof req.query.sessionType === 'string' && isValidSessionType(req.query.sessionType)
       ? req.query.sessionType
       : undefined;
+    const scope = req.query.scope === 'current' || req.query.scope === 'history' ? req.query.scope : 'all';
     const limit = Math.min(parseInt(req.query.limit as string) || 20, 50);
 
-    const results = await getScanResults(req.user.id, sessionType, limit);
+    const results = await getScanResults(req.user.id, sessionType, limit, scope);
     return res.json({ results });
   } catch (error: any) {
     console.error('[Scanner] Results error:', error);

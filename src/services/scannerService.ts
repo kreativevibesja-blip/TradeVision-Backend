@@ -79,6 +79,8 @@ const SCANNER_SYMBOLS = [
 
 const SCANNER_TIMEFRAME = 'M15';
 
+type ScanResultScope = 'all' | 'current' | 'history';
+
 // ── Helpers ──
 
 function getCurrentEstHour(): number {
@@ -121,6 +123,14 @@ function cleanupDedupCache() {
   for (const [key, timestamp] of recentScanKeys) {
     if (timestamp < cutoff) recentScanKeys.delete(key);
   }
+}
+
+function getStartOfNewYorkDay(): string {
+  const now = new Date();
+  const zonedNow = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const offsetMs = now.getTime() - zonedNow.getTime();
+  zonedNow.setHours(0, 0, 0, 0);
+  return new Date(zonedNow.getTime() + offsetMs).toISOString();
 }
 
 // ── Database operations ──
@@ -173,6 +183,7 @@ export async function getScanResults(
   userId: string,
   sessionType?: SessionType,
   limit = 20,
+  scope: ScanResultScope = 'all',
 ): Promise<ScanResult[]> {
   let query = supabase
     .from(SCAN_RESULT_TABLE)
@@ -180,6 +191,13 @@ export async function getScanResults(
     .eq('userId', userId)
     .order('createdAt', { ascending: false })
     .limit(limit);
+
+  if (scope !== 'all') {
+    const dayStart = getStartOfNewYorkDay();
+    query = scope === 'current'
+      ? query.gte('createdAt', dayStart)
+      : query.lt('createdAt', dayStart);
+  }
 
   if (sessionType) {
     query = query.eq('sessionType', sessionType);
@@ -294,14 +312,13 @@ const MAX_TRADES_PER_SESSION = 3;
 const MAX_TRADES_PER_DAY = 6;
 
 async function getTodayTradeCount(userId: string, sessionType?: SessionType): Promise<number> {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  const dayStart = getStartOfNewYorkDay();
 
   let query = supabase
     .from(SCAN_RESULT_TABLE)
     .select('id', { count: 'exact', head: true })
     .eq('userId', userId)
-    .gte('createdAt', today.toISOString());
+    .gte('createdAt', dayStart);
 
   if (sessionType) {
     query = query.eq('sessionType', sessionType);
