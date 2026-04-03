@@ -122,6 +122,75 @@ const normalizeZoneBounds = (zone: VisionAnalysisResult['zones']['supply'] | Vis
   };
 };
 
+const distanceToZone = (zone: { low: number; high: number } | null, currentPrice: number) => {
+  if (!zone) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  if (currentPrice < zone.low) {
+    return zone.low - currentPrice;
+  }
+
+  if (currentPrice > zone.high) {
+    return currentPrice - zone.high;
+  }
+
+  return 0;
+};
+
+const isLocationAligned = (aiData: VisionAnalysisResult) => {
+  if (aiData.entryPlan.bias === 'buy') {
+    return aiData.pricePosition.location !== 'premium';
+  }
+
+  if (aiData.entryPlan.bias === 'sell') {
+    return aiData.pricePosition.location !== 'discount';
+  }
+
+  return false;
+};
+
+const hasWinningTradeConfluence = (aiData: VisionAnalysisResult, currentPrice: number) => {
+  const bias = aiData.entryPlan.bias;
+  if (bias === 'none') {
+    return false;
+  }
+
+  const directionalZone = bias === 'buy'
+    ? normalizeZoneBounds(aiData.zones.demand)
+    : normalizeZoneBounds(aiData.zones.supply);
+  const opposingZone = bias === 'buy'
+    ? normalizeZoneBounds(aiData.zones.supply)
+    : normalizeZoneBounds(aiData.zones.demand);
+  const visibleRangeHeight = aiData.visiblePriceRange
+    ? Math.abs(aiData.visiblePriceRange.max - aiData.visiblePriceRange.min)
+    : 0;
+  const target = aiData.takeProfit1;
+  const proximityBuffer = Math.max((directionalZone ? Math.abs(directionalZone.high - directionalZone.low) : 0) * 0.75, visibleRangeHeight * 0.025, currentPrice * 0.0015);
+  const directionalZoneDistance = distanceToZone(directionalZone, currentPrice);
+  const targetBlocked = target != null && opposingZone
+    ? bias === 'buy'
+      ? opposingZone.low > currentPrice && opposingZone.low < target
+      : opposingZone.high < currentPrice && opposingZone.high > target
+    : false;
+  const structureAligned = (bias === 'buy' && aiData.trend === 'bullish') || (bias === 'sell' && aiData.trend === 'bearish');
+  const structureConfirmation = (bias === 'buy' && (aiData.structure.bos === 'bullish' || aiData.structure.choch === 'bullish'))
+    || (bias === 'sell' && (aiData.structure.bos === 'bearish' || aiData.structure.choch === 'bearish'));
+  const liquidityAligned = (bias === 'buy' && aiData.liquidity.type === 'sell-side') || (bias === 'sell' && aiData.liquidity.type === 'buy-side');
+  const confirmationCount = [
+    structureConfirmation,
+    liquidityAligned,
+    aiData.entryPlan.confirmation !== 'none',
+    (aiData.confirmations?.length ?? 0) > 0,
+  ].filter(Boolean).length;
+
+  return structureAligned
+    && isLocationAligned(aiData)
+    && directionalZoneDistance <= proximityBuffer
+    && confirmationCount >= 2
+    && !targetBlocked;
+};
+
 const getBreathingRoom = (
   zone: { low: number; high: number } | null,
   visiblePriceRange: VisionAnalysisResult['visiblePriceRange'],
@@ -178,10 +247,13 @@ export function generateFinalSignal(aiData: VisionAnalysisResult, currentPrice: 
 
   const shouldValidateEntry = signalType !== 'wait' && aiData.entryPlan.entryType !== 'none';
   const hasValidEntry = !shouldValidateEntry || validateEntry(entryZone, currentPrice);
+  const matchesWinningModel = !shouldValidateEntry || hasWinningTradeConfluence(aiData, currentPrice);
 
-  const finalSignalType = hasValidEntry ? signalType : 'wait';
-  const finalRecommendation = hasValidEntry ? interpreted.recommendation : 'wait';
-  const finalMessage = hasValidEntry ? interpreted.message : 'Price is not in a valid execution zone yet. Wait for price to reach a key area.';
+  const finalSignalType = hasValidEntry && matchesWinningModel ? signalType : 'wait';
+  const finalRecommendation = hasValidEntry && matchesWinningModel ? interpreted.recommendation : 'wait';
+  const finalMessage = hasValidEntry && matchesWinningModel
+    ? interpreted.message
+    : 'Wait for a fresh reaction from a clean POI with structure confirmation and clear target space before entering.';
 
   return {
     trend: aiData.trend,

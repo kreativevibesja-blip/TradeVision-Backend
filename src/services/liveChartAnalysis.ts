@@ -363,6 +363,18 @@ ADVANCED SMC CONCEPTS YOU MUST APPLY WHEN CLEARLY VISIBLE
 - Target 1 should usually be the nearest logical structure target; Target 2 should usually be the next deeper liquidity objective if continuation is likely.
 - Stops must sit at structural invalidation, not at arbitrary distances.`;
 
+const winningTradeGuidance = `
+HOUSE MODEL FROM CONFIRMED WINNING SETUPS
+- Prefer setups where price reacts from a clean POI, then shows immediate displacement in the intended direction.
+- A valid POI can be a fresh demand/supply zone, order block, imbalance, fair value gap, or structure-backed support/resistance area.
+- Do not approve entries that are already extended far away from the POI; prefer the reaction candle or the first clean continuation after the reaction.
+- Give extra weight to compression or wedge-style build-up that resolves with displacement, especially when it breaks in the direction of the broader structure.
+- The best setups usually show at least three of these together: POI reaction, liquidity sweep or inducement, engulfing/rejection candle, close-confirmed BOS or CHoCH, and a clean path to TP1.
+- If price is moving into the setup direction but has already traveled too far from the POI, downgrade it to wait and ask for a retest.
+- If the nearest opposing zone blocks TP1 too quickly, do not approve the trade.
+- Do not reward random momentum candles unless they begin from a meaningful area of interest.
+- Treat these as execution models: reaction at area, confirmation, displacement, then continuation into clean liquidity.`;
+
 const buildPrompt = (symbol: string, timeframe: string, candles: MarketCandle[]) => {
   const recentCandles = candles.slice(-120).map((candle) => ({
     t: candle.timestamp,
@@ -385,6 +397,8 @@ CRITICAL DATA RULES:
 - Do NOT guess unseen chart structure.
 
 ${advancedSmcGuidance}
+
+${winningTradeGuidance}
 
 Use multi-strategy confluence including:
 - Market structure (HH, HL, LH, LL)

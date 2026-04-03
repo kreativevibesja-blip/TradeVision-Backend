@@ -66,6 +66,11 @@ export interface FairValueGap {
   distanceToPrice: number;
 }
 
+interface PriceArea {
+  top: number;
+  bottom: number;
+}
+
 export interface PotentialTradeSetup {
   symbol: string;
   direction: 'buy' | 'sell';
@@ -326,6 +331,100 @@ function average(values: number[]): number {
   }
 
   return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function averageBody(candles: Candle[], lookback = 8): number {
+  const recent = candles.slice(-lookback);
+  return average(recent.map((candle) => Math.abs(candle.close - candle.open)));
+}
+
+function averageRange(candles: Candle[], lookback = 12): number {
+  const recent = candles.slice(-lookback);
+  return average(recent.map((candle) => candle.high - candle.low));
+}
+
+function toPriceArea(area: PriceZone | FairValueGap | null): PriceArea | null {
+  if (!area) {
+    return null;
+  }
+
+  return {
+    top: Math.max(area.top, area.bottom),
+    bottom: Math.min(area.top, area.bottom),
+  };
+}
+
+function candleTouchesArea(candle: Candle, area: PriceArea): boolean {
+  return candle.low <= area.top && candle.high >= area.bottom;
+}
+
+function isDirectionalReactionFromArea(
+  direction: 'buy' | 'sell',
+  area: PriceArea | null,
+  candles: Candle[],
+): boolean {
+  if (!area || candles.length < 4) {
+    return false;
+  }
+
+  const recent = candles.slice(-4);
+  const latest = recent[recent.length - 1];
+  const baselineRange = Math.max(averageRange(candles, 10), 0.0001);
+  const hadTouch = recent.slice(0, -1).some((candle) => candleTouchesArea(candle, area));
+
+  if (!hadTouch) {
+    return false;
+  }
+
+  if (direction === 'buy') {
+    return latest.close > area.top && latest.close - area.top >= baselineRange * 0.35;
+  }
+
+  return latest.close < area.bottom && area.bottom - latest.close >= baselineRange * 0.35;
+}
+
+function hasFreshDisplacement(direction: 'buy' | 'sell', candles: Candle[]): boolean {
+  if (candles.length < 4) {
+    return false;
+  }
+
+  const latest = candles[candles.length - 1];
+  const previous = candles[candles.length - 2];
+  const body = Math.abs(latest.close - latest.open);
+  const range = Math.max(latest.high - latest.low, 0.0001);
+  const baselineBody = Math.max(averageBody(candles, 10), 0.0001);
+
+  if (body < baselineBody * 1.15) {
+    return false;
+  }
+
+  if (direction === 'buy') {
+    return latest.close > latest.open
+      && latest.close >= latest.low + range * 0.7
+      && latest.close > previous.high;
+  }
+
+  return latest.close < latest.open
+    && latest.close <= latest.high - range * 0.7
+    && latest.close < previous.low;
+}
+
+function isExtendedFromArea(
+  direction: 'buy' | 'sell',
+  currentPrice: number,
+  area: PriceArea | null,
+  candles: Candle[],
+): boolean {
+  if (!area) {
+    return false;
+  }
+
+  const baselineRange = Math.max(averageRange(candles, 12), currentPrice * 0.0007);
+  const distance = direction === 'buy'
+    ? Math.max(0, currentPrice - area.top)
+    : Math.max(0, area.bottom - currentPrice);
+
+  return distance > baselineRange * 1.8;
 }
 
 function computeAtr(candles: Candle[], period: number): number {
@@ -691,6 +790,15 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   const trend = detectTrend(candles);
   if (trend === 'ranging') return null;
 
+  const direction: 'buy' | 'sell' = trend === 'bullish' ? 'buy' : 'sell';
+  const currentPrice = candles[candles.length - 1].close;
+  const lookLeftCandles = candles.slice(-Math.min(500, candles.length));
+  const zones = buildZones(lookLeftCandles, currentPrice);
+  const gaps = buildFairValueGaps(lookLeftCandles, currentPrice);
+  const directionalZone = findDirectionalZone(direction, zones, currentPrice);
+  const directionalFvg = findDirectionalFvg(direction, gaps);
+  const preferredArea = toPriceArea(directionalZone ?? directionalFvg);
+
   const sweep = detectLiquiditySweep(candles);
   const pullback = detectPullback(trend, candles);
 
@@ -705,18 +813,22 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
 
   if (score < 5) return null;
 
-  const direction: 'buy' | 'sell' = trend === 'bullish' ? 'buy' : 'sell';
   const recentMomentum = detectRecentMomentum(candles);
   const alignedSweep = isSweepAligned(direction, sweep);
   const alignedEngulfing = isEngulfingAligned(direction, engulfing);
   const alignedRejection = isRejectionAligned(direction, rejection);
   const alignedStructure = isStructureAligned(direction, structure);
   const alignedMomentum = (direction === 'buy' && recentMomentum === 'bullish') || (direction === 'sell' && recentMomentum === 'bearish');
+  const freshReaction = isDirectionalReactionFromArea(direction, preferredArea, candles);
+  const freshDisplacement = hasFreshDisplacement(direction, candles);
+  const stretchedFromArea = isExtendedFromArea(direction, currentPrice, preferredArea, candles);
 
   if (sweep && !alignedSweep) return null;
   if (engulfing && !alignedEngulfing) return null;
   if (rejection && !alignedRejection) return null;
   if (structure && !alignedStructure) return null;
+  if (!directionalZone && !directionalFvg) return null;
+  if (stretchedFromArea && !freshDisplacement) return null;
 
   const directionalConfirmationCount = [alignedSweep, alignedEngulfing, alignedRejection, alignedStructure, alignedMomentum]
     .filter(Boolean)
@@ -730,6 +842,10 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
 
   // If the local tape is still moving against the setup, do not force an entry from the higher-level trend.
   if (!alignedMomentum && !alignedStructure && !alignedEngulfing) return null;
+
+  // Favor the same setup family shown in the winning examples: reaction from a clean area, then displacement.
+  if (!freshReaction && !alignedSweep && !alignedRejection && !alignedEngulfing) return null;
+  if (!freshDisplacement && !alignedStructure && !alignedEngulfing) return null;
 
   const entry = last.close;
   const stopLoss = computeStopLoss(symbol, direction, candles);
@@ -784,6 +900,7 @@ export function analyzePotentialTrade(symbol: string, candles: Candle[]): Potent
   const gaps = buildFairValueGaps(lookLeftCandles, currentPrice);
   const directionalZone = findDirectionalZone(direction, zones, currentPrice);
   const directionalFvg = findDirectionalFvg(direction, gaps);
+  const preferredArea = toPriceArea(directionalZone ?? directionalFvg);
   const pullback = detectPullback(trend, candles);
   const sweep = detectLiquiditySweep(candles);
   const last = candles[candles.length - 1];
@@ -798,16 +915,22 @@ export function analyzePotentialTrade(symbol: string, candles: Candle[]): Potent
   const alignedStructure = isStructureAligned(direction, structure);
   const recentMomentum = detectRecentMomentum(candles);
   const alignedMomentum = (direction === 'buy' && recentMomentum === 'bullish') || (direction === 'sell' && recentMomentum === 'bearish');
+  const freshReaction = isDirectionalReactionFromArea(direction, preferredArea, candles);
+  const freshDisplacement = hasFreshDisplacement(direction, candles);
+  const stretchedFromArea = isExtendedFromArea(direction, currentPrice, preferredArea, candles);
 
   let probability = 20;
   if (pullback) probability += 15;
   if (directionalZone) probability += 20;
   if (directionalFvg) probability += 10;
+  if (freshReaction) probability += 12;
+  if (freshDisplacement) probability += 8;
   if (alignedSweep) probability += 10;
   if (alignedRejection) probability += 10;
   if (alignedEngulfing) probability += 10;
   if (alignedStructure) probability += 5;
   if (alignedMomentum) probability += 5;
+  if (stretchedFromArea) probability -= 15;
 
   if (!directionalZone && !directionalFvg && !pullback) {
     return null;
@@ -840,6 +963,24 @@ export function analyzePotentialTrade(symbol: string, candles: Candle[]): Potent
     contextLabels.push('Pullback structure intact');
   } else {
     requiredTriggers.push('Cleaner pullback into value area');
+  }
+
+  if (freshReaction) {
+    fulfilledConditions.push(direction === 'buy' ? 'Fresh demand reaction confirmed' : 'Fresh supply reaction confirmed');
+    contextLabels.push(direction === 'buy' ? 'Fresh bullish reaction' : 'Fresh bearish reaction');
+  } else {
+    requiredTriggers.push(direction === 'buy' ? 'Clean bullish reaction from the POI' : 'Clean bearish reaction from the POI');
+  }
+
+  if (freshDisplacement) {
+    fulfilledConditions.push(direction === 'buy' ? 'Bullish displacement is underway' : 'Bearish displacement is underway');
+    contextLabels.push(direction === 'buy' ? 'Displacement up' : 'Displacement down');
+  } else {
+    requiredTriggers.push(direction === 'buy' ? 'Stronger bullish displacement candle' : 'Stronger bearish displacement candle');
+  }
+
+  if (stretchedFromArea) {
+    requiredTriggers.push(direction === 'buy' ? 'Retest closer to demand/FVG before entry' : 'Retest closer to supply/FVG before entry');
   }
 
   if (alignedSweep) {

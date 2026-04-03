@@ -5,10 +5,15 @@ export function validateEntry(entryZone: SMCZone | null, currentPrice: number) {
     return false;
   }
 
-  const mid = (entryZone.min + entryZone.max) / 2;
-  const distance = Math.abs(mid - currentPrice);
+  const zoneLow = Math.min(entryZone.min, entryZone.max);
+  const zoneHigh = Math.max(entryZone.min, entryZone.max);
+  const zoneSize = Math.abs(zoneHigh - zoneLow);
+  const distanceToZone = currentPrice < zoneLow
+    ? zoneLow - currentPrice
+    : currentPrice > zoneHigh
+      ? currentPrice - zoneHigh
+      : 0;
+  const proximityBuffer = Math.max(zoneSize * 0.5, currentPrice * 0.0015);
 
-  const MIN_DISTANCE = currentPrice * 0.002;
-
-  return distance >= MIN_DISTANCE;
+  return distanceToZone <= proximityBuffer;
 }
