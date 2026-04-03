@@ -1,6 +1,6 @@
 import { runSessionScanner } from './engine';
 
-const SCANNER_INTERVAL_MS = 60_000;
+const SCANNER_INTERVAL_MS = 15_000;
 
 let scannerTimer: ReturnType<typeof setInterval> | null = null;
 let scannerTickInFlight = false;

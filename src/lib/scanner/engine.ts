@@ -1,7 +1,7 @@
 import { supabase } from '../../lib/supabase';
 import {
   runSessionScanner as runUserSessionScanner,
-  checkZoneProximityAlerts,
+  checkPotentialTradeAlerts,
   getCurrentSessionTypes,
 } from '../../services/scannerService';
 
@@ -72,10 +72,10 @@ export async function runSessionScanner(): Promise<void> {
   for (const user of users) {
     try {
       const { results, alerts } = await runUserSessionScanner(user.id);
-      const lifecycleAlerts = await checkZoneProximityAlerts(user.id);
+      const potentialAlerts = await checkPotentialTradeAlerts(user.id);
 
       console.log(
-        `[scanner-engine] user ${user.id} | new signals: ${results.length} | new alerts: ${alerts.length} | lifecycle alerts: ${lifecycleAlerts.length}`,
+        `[scanner-engine] user ${user.id} | new signals: ${results.length} | new alerts: ${alerts.length} | potential alerts: ${potentialAlerts.length}`,
       );
     } catch (error) {
       console.error(`[scanner-engine] user ${user.id} tick failed:`, error);

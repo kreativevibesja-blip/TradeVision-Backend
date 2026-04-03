@@ -146,6 +146,9 @@ function getRelevantScannerModes(enabledTypes: Set<SessionType>): SessionType[] 
 
 const recentScanKeys = new Map<string, number>();
 const DEDUP_WINDOW_MS = 5 * 60_000; // 5 minutes
+const recentPotentialAlertKeys = new Map<string, number>();
+const POTENTIAL_ALERT_THRESHOLD = 78;
+const POTENTIAL_ALERT_WINDOW_MS = 20 * 60_000;
 
 function isDuplicate(userId: string, symbol: string, direction: string): boolean {
   const key = `${userId}:${symbol}:${direction}`;
@@ -162,6 +165,22 @@ function cleanupDedupCache() {
   for (const [key, timestamp] of recentScanKeys) {
     if (timestamp < cutoff) recentScanKeys.delete(key);
   }
+
+  const potentialCutoff = Date.now() - POTENTIAL_ALERT_WINDOW_MS;
+  for (const [key, timestamp] of recentPotentialAlertKeys) {
+    if (timestamp < potentialCutoff) recentPotentialAlertKeys.delete(key);
+  }
+}
+
+function isDuplicatePotentialAlert(userId: string, potential: Pick<PotentialTrade, 'symbol' | 'direction' | 'sessionType'>): boolean {
+  const key = `${userId}:${potential.sessionType}:${potential.symbol}:${potential.direction}`;
+  const last = recentPotentialAlertKeys.get(key);
+  if (last && Date.now() - last < POTENTIAL_ALERT_WINDOW_MS) {
+    return true;
+  }
+
+  recentPotentialAlertKeys.set(key, Date.now());
+  return false;
 }
 
 async function hasRecentApproachAlert(scanResultId: string): Promise<boolean> {
@@ -362,6 +381,113 @@ async function insertAlert(alert: { userId: string; scanResultId?: string; messa
 
   if (error) throw new Error(error.message);
   return data as ScannerAlert;
+}
+
+async function processResultLifecycle(result: ScanResult, currentPrice: number): Promise<ScannerAlert[]> {
+  const alerts: ScannerAlert[] = [];
+  const decimals = result.entry >= 100 ? 2 : 5;
+
+  if (result.status === 'active') {
+    const entryDistance = Math.abs(currentPrice - result.entry);
+    const slDistance = Math.abs(result.entry - result.stopLoss) || 1;
+    const proximityRatio = entryDistance / slDistance;
+
+    const entryTriggered = result.direction === 'buy'
+      ? currentPrice <= result.entry && currentPrice > result.stopLoss
+      : currentPrice >= result.entry && currentPrice < result.stopLoss;
+
+    if (entryTriggered) {
+      await updateScanResult(result.id, {
+        status: 'triggered',
+        triggeredAt: new Date().toISOString(),
+      });
+
+      const alert = await insertAlert({
+        userId: result.userId,
+        scanResultId: result.id,
+        message: `${result.symbol} ${result.direction.toUpperCase()} trade triggered at ${currentPrice.toFixed(decimals)}`,
+        type: 'trade',
+      });
+      alerts.push(alert);
+
+      sendPushToUser(result.userId, {
+        title: 'Trade Triggered',
+        body: `${result.symbol} ${result.direction.toUpperCase()} is now live at ${currentPrice.toFixed(decimals)}`,
+        tag: `trigger-${result.id}`,
+        url: '/dashboard/scanner',
+      }).catch((err) => console.error('[Push] Failed to send trigger notification:', err));
+
+      return alerts;
+    }
+
+    if (proximityRatio <= 0.3 && !(await hasRecentApproachAlert(result.id))) {
+      const alert = await insertAlert({
+        userId: result.userId,
+        scanResultId: result.id,
+        message: `${result.symbol} approaching ${result.direction === 'buy' ? 'buy' : 'sell'} zone — price is near entry at ${currentPrice.toFixed(decimals)}`,
+        type: 'warning',
+      });
+      alerts.push(alert);
+    }
+
+    const isInvalidated = result.direction === 'buy'
+      ? currentPrice < result.stopLoss
+      : currentPrice > result.stopLoss;
+
+    if (isInvalidated) {
+      await updateScanResult(result.id, { status: 'invalidated' });
+
+      const alert = await insertAlert({
+        userId: result.userId,
+        scanResultId: result.id,
+        message: `${result.symbol} setup invalidated — price broke through stop loss level before entry`,
+        type: 'warning',
+      });
+      alerts.push(alert);
+    }
+
+    return alerts;
+  }
+
+  if (result.status === 'triggered') {
+    const hitTakeProfit = result.direction === 'buy'
+      ? currentPrice >= result.takeProfit
+      : currentPrice <= result.takeProfit;
+
+    const hitStopLoss = result.direction === 'buy'
+      ? currentPrice <= result.stopLoss
+      : currentPrice >= result.stopLoss;
+
+    if (hitTakeProfit || hitStopLoss) {
+      const closeReason: ScanCloseReason = hitTakeProfit ? 'tp' : 'sl';
+      await updateScanResult(result.id, {
+        status: 'closed',
+        closeReason,
+        closedAt: new Date().toISOString(),
+      });
+
+      const alert = await insertAlert({
+        userId: result.userId,
+        scanResultId: result.id,
+        message: hitTakeProfit
+          ? `${result.symbol} trade closed in profit — take profit hit at ${currentPrice.toFixed(decimals)}`
+          : `${result.symbol} trade closed at stop loss — SL hit at ${currentPrice.toFixed(decimals)}`,
+        type: hitTakeProfit ? 'trade' : 'warning',
+      });
+      alerts.push(alert);
+
+      sendPushToUser(result.userId, {
+        title: hitTakeProfit ? 'Take Profit Hit' : 'Stop Loss Hit',
+        body: hitTakeProfit
+          ? `${result.symbol} closed in profit.`
+          : `${result.symbol} closed at stop loss.`,
+        tag: `closed-${result.id}`,
+        url: '/dashboard/scanner',
+      }).catch((err) => console.error('[Push] Failed to send closure notification:', err));
+    }
+  }
+
+  return alerts;
 }
 
 // ── Session trade limits ──
@@ -587,113 +713,40 @@ export async function checkZoneProximityAlerts(userId: string): Promise<ScannerA
       }
 
       const currentPrice = latestCandles[latestCandles.length - 1].close;
-      const decimals = result.entry >= 100 ? 2 : 5;
-
-      if (result.status === 'active') {
-        const entryDistance = Math.abs(currentPrice - result.entry);
-        const slDistance = Math.abs(result.entry - result.stopLoss) || 1;
-        const proximityRatio = entryDistance / slDistance;
-
-        const entryTriggered = result.direction === 'buy'
-          ? currentPrice <= result.entry && currentPrice > result.stopLoss
-          : currentPrice >= result.entry && currentPrice < result.stopLoss;
-
-        if (entryTriggered) {
-          await updateScanResult(result.id, {
-            status: 'triggered',
-            triggeredAt: new Date().toISOString(),
-          });
-
-          const alert = await insertAlert({
-            userId,
-            scanResultId: result.id,
-            message: `${result.symbol} ${result.direction.toUpperCase()} trade triggered at ${currentPrice.toFixed(decimals)}`,
-            type: 'trade',
-          });
-          alerts.push(alert);
-
-          sendPushToUser(userId, {
-            title: 'Trade Triggered',
-            body: `${result.symbol} ${result.direction.toUpperCase()} is now live at ${currentPrice.toFixed(decimals)}`,
-            tag: `trigger-${result.id}`,
-            url: '/dashboard/scanner',
-          }).catch((err) => console.error('[Push] Failed to send trigger notification:', err));
-
-          continue;
-        }
-
-        if (proximityRatio <= 0.3 && !(await hasRecentApproachAlert(result.id))) {
-          const alert = await insertAlert({
-            userId,
-            scanResultId: result.id,
-            message: `${result.symbol} approaching ${result.direction === 'buy' ? 'buy' : 'sell'} zone — price is near entry at ${currentPrice.toFixed(decimals)}`,
-            type: 'warning',
-          });
-          alerts.push(alert);
-        }
-
-        const isInvalidated = result.direction === 'buy'
-          ? currentPrice < result.stopLoss
-          : currentPrice > result.stopLoss;
-
-        if (isInvalidated) {
-          await updateScanResult(result.id, { status: 'invalidated' });
-
-          const alert = await insertAlert({
-            userId,
-            scanResultId: result.id,
-            message: `${result.symbol} setup invalidated — price broke through stop loss level before entry`,
-            type: 'warning',
-          });
-          alerts.push(alert);
-
-          continue;
-        }
-      }
-
-      if (result.status === 'triggered') {
-        const hitTakeProfit = result.direction === 'buy'
-          ? currentPrice >= result.takeProfit
-          : currentPrice <= result.takeProfit;
-
-        const hitStopLoss = result.direction === 'buy'
-          ? currentPrice <= result.stopLoss
-          : currentPrice >= result.stopLoss;
-
-        if (hitTakeProfit || hitStopLoss) {
-          const closeReason: ScanCloseReason = hitTakeProfit ? 'tp' : 'sl';
-          await updateScanResult(result.id, {
-            status: 'closed',
-            closeReason,
-            closedAt: new Date().toISOString(),
-          });
-
-          const alert = await insertAlert({
-            userId,
-            scanResultId: result.id,
-            message: hitTakeProfit
-              ? `${result.symbol} trade closed in profit — take profit hit at ${currentPrice.toFixed(decimals)}`
-              : `${result.symbol} trade closed at stop loss — SL hit at ${currentPrice.toFixed(decimals)}`,
-            type: hitTakeProfit ? 'trade' : 'warning',
-          });
-          alerts.push(alert);
-
-          sendPushToUser(userId, {
-            title: hitTakeProfit ? 'Take Profit Hit' : 'Stop Loss Hit',
-            body: hitTakeProfit
-              ? `${result.symbol} closed in profit.`
-              : `${result.symbol} closed at stop loss.`,
-            tag: `closed-${result.id}`,
-            url: '/dashboard/scanner',
-          }).catch((err) => console.error('[Push] Failed to send closure notification:', err));
-        }
-      }
+      const lifecycleAlerts = await processResultLifecycle(result, currentPrice);
+      alerts.push(...lifecycleAlerts);
     } catch {
       // Skip symbols that fail to fetch
     }
   }
 
   return alerts;
+}
+
+export async function processLivePriceUpdate(symbol: string, currentPrice: number): Promise<number> {
+  const { data, error } = await supabase
+    .from(SCAN_RESULT_TABLE)
+    .select('*')
+    .eq('symbol', symbol)
+    .in('status', ['active', 'triggered'])
+    .order('createdAt', { ascending: false })
+    .limit(50);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  const results = (data ?? []) as ScanResult[];
+  let updates = 0;
+
+  for (const result of results) {
+    const alerts = await processResultLifecycle(result, currentPrice);
+    if (alerts.length > 0) {
+      updates += 1;
+    }
+  }
+
+  return updates;
 }
 
 export async function getPotentialTrades(userId: string, limit = 12): Promise<PotentialTrade[]> {
@@ -742,6 +795,41 @@ export async function getPotentialTrades(userId: string, limit = 12): Promise<Po
   return potentials
     .sort((a, b) => b.activationProbability - a.activationProbability)
     .slice(0, limit);
+}
+
+export async function checkPotentialTradeAlerts(userId: string): Promise<ScannerAlert[]> {
+  const potentials = await getPotentialTrades(userId, 6);
+  const alerts: ScannerAlert[] = [];
+
+  for (const potential of potentials) {
+    if (potential.activationProbability < POTENTIAL_ALERT_THRESHOLD) {
+      continue;
+    }
+
+    if (isDuplicatePotentialAlert(userId, potential)) {
+      continue;
+    }
+
+    const directionLabel = potential.direction.toUpperCase();
+    const modeLabel = potential.sessionType === 'volatility' ? 'Volatility 24/7' : `${potential.sessionType === 'london' ? 'London' : 'New York'} Session`;
+    const alert = await insertAlert({
+      userId,
+      message: `Potential ${modeLabel} setup building on ${potential.symbol} (${directionLabel}) — ${Math.round(potential.activationProbability)}% likely if confirmation triggers print.`,
+      type: 'info',
+    });
+
+    alerts.push(alert);
+
+    sendPushToUser(userId, {
+      title: 'Potential Trade Building',
+      body: `${potential.symbol} ${directionLabel} is at ${Math.round(potential.activationProbability)}% activation probability.`,
+      tag: `potential-${potential.sessionType}-${potential.symbol}-${potential.direction}`,
+      url: '/dashboard/scanner',
+    }).catch((err) => console.error('[Push] Failed to send potential trade notification:', err));
+  }
+
+  cleanupDedupCache();
+  return alerts;
 }
 
 // ── Session summary at end ──
