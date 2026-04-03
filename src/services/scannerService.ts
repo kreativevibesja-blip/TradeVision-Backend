@@ -70,14 +70,19 @@ const SESSION_WINDOWS: Record<SessionType, SessionWindow> = {
 
 // ── Scanner symbols and timeframe ──
 
-const SCANNER_SYMBOLS = listLiveChartSymbols()
-  .filter((symbol) =>
-    symbol.category === 'forex-major' ||
-    symbol.category === 'forex-minor' ||
-    symbol.category === 'commodities' ||
-    symbol.category === 'indices'
-  )
-  .map((symbol) => symbol.id);
+const SCANNER_SYMBOLS = [
+  'EURUSD',
+  'GBPUSD',
+  'USDJPY',
+  'USDCAD',
+  'GBPJPY',
+  'XAUUSD',
+  'US30',
+  'NAS100',
+  'SPX500',
+  'USOIL',
+  'BTCUSD',
+] as const;
 
 const SCANNER_TIMEFRAME = 'M15';
 
