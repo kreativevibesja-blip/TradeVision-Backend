@@ -16,7 +16,7 @@ import autotraderRoutes from './routes/autotraderRoutes';
 import scannerRoutes from './routes/scannerRoutes';
 import notificationRoutes from './routes/notificationRoutes';
 import { startQueueWorker } from './workers/queueWorker';
-import { startScanner } from './lib/scanner/runner';
+import { startSystem } from './server/start';
 
 export const app = express();
 
@@ -99,5 +99,5 @@ export const startServer = () =>
   app.listen(config.port, () => {
     console.log(`TradeVision AI API running on port ${config.port}`);
     startQueueWorker();
-    startScanner();
+    startSystem();
   });

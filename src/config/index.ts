@@ -71,6 +71,15 @@ export const config = {
     twelveDataBaseUrl: process.env.TWELVEDATA_BASE_URL || 'https://api.twelvedata.com',
     candleLimit: parseInt(process.env.MARKET_DATA_CANDLE_LIMIT || '5000', 10),
   },
+
+  deriv: {
+    wsUrl: process.env.DERIV_WS_URL || 'wss://ws.derivws.com/websockets/v3',
+    appId: process.env.DERIV_WS_APP_ID || '1089',
+    historyM1Count: parseInt(process.env.DERIV_HISTORY_M1_COUNT || '3000', 10),
+    candleEngineIntervalMs: parseInt(process.env.DERIV_CANDLE_ENGINE_INTERVAL_MS || '60000', 10),
+    reconnectDelayMs: parseInt(process.env.DERIV_RECONNECT_DELAY_MS || '5000', 10),
+    maxStoredTicksPerSymbol: parseInt(process.env.DERIV_MAX_STORED_TICKS_PER_SYMBOL || '5000', 10),
+  },
   
   paypal: {
     clientId: process.env.PAYPAL_CLIENT_ID || '',

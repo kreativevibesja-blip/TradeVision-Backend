@@ -1,5 +1,6 @@
 import { supabase } from '../lib/supabase';
-import { fetchMarketDataForLiveChart, listLiveChartSymbols, resolveLiveChartSymbol } from './marketData';
+import { getCachedCandles } from '../lib/db/saveCandles';
+import { DERIV_SCANNER_SYMBOL_IDS } from '../lib/deriv/symbols';
 import { analyzeMarket, type Candle } from './scannerEngine';
 import { sendPushToUser } from './pushService';
 
@@ -70,19 +71,7 @@ const SESSION_WINDOWS: Record<SessionType, SessionWindow> = {
 
 // ── Scanner symbols and timeframe ──
 
-const SCANNER_SYMBOLS = [
-  'EURUSD',
-  'GBPUSD',
-  'USDJPY',
-  'USDCAD',
-  'GBPJPY',
-  'XAUUSD',
-  'US30',
-  'NAS100',
-  'SPX500',
-  'USOIL',
-  'BTCUSD',
-] as const;
+const SCANNER_SYMBOLS = DERIV_SCANNER_SYMBOL_IDS;
 
 const SCANNER_TIMEFRAME = 'M15';
 
@@ -365,19 +354,18 @@ interface ScanCycleResult {
 }
 
 async function scanSymbol(symbol: string): Promise<ScanCycleResult | null> {
-  const resolved = resolveLiveChartSymbol(symbol);
-  if (!resolved) return null;
-
   try {
-    const marketData = await fetchMarketDataForLiveChart(symbol, SCANNER_TIMEFRAME);
+    const cachedCandles = await getCachedCandles(symbol, SCANNER_TIMEFRAME, 600);
+    if (cachedCandles.length < 50) {
+      return null;
+    }
 
-    // Convert MarketCandle[] → Candle[] for the pure-logic engine
-    const candles: Candle[] = marketData.candles.map((c) => ({
+    const candles: Candle[] = cachedCandles.map((c) => ({
       open: c.open,
       high: c.high,
       low: c.low,
       close: c.close,
-      time: new Date(c.timestamp).getTime(),
+      time: new Date(c.time).getTime(),
     }));
 
     const setup = analyzeMarket(symbol, candles);
@@ -523,12 +511,13 @@ export async function checkZoneProximityAlerts(userId: string): Promise<ScannerA
   const alerts: ScannerAlert[] = [];
 
   for (const result of activeResults as ScanResult[]) {
-    const resolved = resolveLiveChartSymbol(result.symbol);
-    if (!resolved) continue;
-
     try {
-      const marketData = await fetchMarketDataForLiveChart(result.symbol, 'M5');
-      const currentPrice = marketData.currentPrice;
+      const latestCandles = await getCachedCandles(result.symbol, 'M1', 1);
+      if (latestCandles.length === 0) {
+        continue;
+      }
+
+      const currentPrice = latestCandles[latestCandles.length - 1].close;
       const decimals = result.entry >= 100 ? 2 : 5;
 
       if (result.status === 'active') {
