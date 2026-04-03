@@ -125,6 +125,20 @@ function cleanupDedupCache() {
   }
 }
 
+async function hasRecentApproachAlert(scanResultId: string): Promise<boolean> {
+  const cutoff = new Date(Date.now() - 30 * 60_000).toISOString();
+  const { count, error } = await supabase
+    .from(SCANNER_ALERT_TABLE)
+    .select('id', { count: 'exact', head: true })
+    .eq('scanResultId', scanResultId)
+    .eq('type', 'warning')
+    .like('message', '%approaching%')
+    .gte('createdAt', cutoff);
+
+  if (error) throw new Error(error.message);
+  return (count ?? 0) > 0;
+}
+
 function getStartOfNewYorkDay(): string {
   const now = new Date();
   const zonedNow = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
@@ -543,7 +557,7 @@ export async function checkZoneProximityAlerts(userId: string): Promise<ScannerA
           continue;
         }
 
-        if (proximityRatio <= 0.3) {
+        if (proximityRatio <= 0.3 && !(await hasRecentApproachAlert(result.id))) {
           const alert = await insertAlert({
             userId,
             scanResultId: result.id,
