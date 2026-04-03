@@ -119,9 +119,34 @@ function getCurrentEstHour(): number {
   return hour;
 }
 
-function isSessionActive(sessionType: SessionType): boolean {
+function getCurrentEstWeekday(): number {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    weekday: 'short',
+  }).formatToParts(new Date());
+  const weekday = parts.find((part) => part.type === 'weekday')?.value ?? 'Sun';
+
+  const weekdayMap: Record<string, number> = {
+    Sun: 0,
+    Mon: 1,
+    Tue: 2,
+    Wed: 3,
+    Thu: 4,
+    Fri: 5,
+    Sat: 6,
+  };
+
+  return weekdayMap[weekday] ?? 0;
+}
+
+export function isSessionActive(sessionType: SessionType): boolean {
   if (sessionType === 'volatility') {
     return true;
+  }
+
+  const weekday = getCurrentEstWeekday();
+  if (weekday === 0 || weekday === 6) {
+    return false;
   }
 
   const hour = getCurrentEstHour();
@@ -129,7 +154,7 @@ function isSessionActive(sessionType: SessionType): boolean {
   return hour >= window.startHour && hour < window.endHour;
 }
 
-function getCurrentSessionTypes(): SessionType[] {
+export function getCurrentSessionTypes(): SessionType[] {
   const active: SessionType[] = [];
   if (isSessionActive('london')) active.push('london');
   if (isSessionActive('newyork')) active.push('newyork');
@@ -590,8 +615,12 @@ async function processResultLifecycle(
 
 // ── Session trade limits ──
 
-const MAX_TRADES_PER_SESSION = 3;
-const MAX_TRADES_PER_DAY = 6;
+const MAX_TRADES_PER_DAY = 10;
+const MAX_TRADES_PER_DAY_BY_SESSION: Record<SessionType, number> = {
+  london: 3,
+  newyork: 3,
+  volatility: 10,
+};
 
 async function getTodayTradeCount(userId: string, sessionType?: SessionType): Promise<number> {
   const dayStart = getStartOfNewYorkDay();
@@ -707,14 +736,15 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
   const savedAlerts: ScannerAlert[] = [];
 
   for (const sessionType of relevantSessions) {
+    const maxTradesForSession = MAX_TRADES_PER_DAY_BY_SESSION[sessionType];
     const sessionCount = await getTodayTradeCount(userId, sessionType);
-    if (sessionCount >= MAX_TRADES_PER_SESSION) {
-      console.log(`[Scanner] Session limit reached for user ${userId} ${sessionType} (${sessionCount}/${MAX_TRADES_PER_SESSION})`);
+    if (sessionCount >= maxTradesForSession) {
+      console.log(`[Scanner] Session limit reached for user ${userId} ${sessionType} (${sessionCount}/${maxTradesForSession})`);
       continue;
     }
 
     const remainingDaily = MAX_TRADES_PER_DAY - dailyCount;
-    const remainingSession = MAX_TRADES_PER_SESSION - sessionCount;
+    const remainingSession = maxTradesForSession - sessionCount;
     const slotsAvailable = Math.min(remainingDaily, remainingSession);
     if (slotsAvailable <= 0) {
       break;
