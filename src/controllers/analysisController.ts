@@ -18,6 +18,8 @@ import {
   countRecentQueueJobs,
 } from '../lib/supabase';
 import { runAnalysisPipeline } from '../services/analysis/runAnalysisPipeline';
+import { getCachedCandles } from '../lib/db/saveCandles';
+import { getDerivLiveChartSnapshot, isSupportedDerivGranularity } from '../services/derivMarketData';
 import { fetchMarketDataForLiveChart, isSupportedLiveChartTimeframe, resolveLiveChartSymbol } from '../services/marketData';
 import { runLiveChartAnalysisPipeline } from '../services/analysis/runLiveChartAnalysisPipeline';
 
@@ -423,10 +425,51 @@ export const getLiveChartMarketData = async (req: AuthRequest, res: Response) =>
       return res.status(400).json({ error: 'Unsupported symbol or timeframe for live chart market data' });
     }
 
-    const marketData = await fetchMarketDataForLiveChart(symbol, timeframe);
+    const cachedCandles = await getCachedCandles(symbol.trim().toUpperCase(), timeframe, 500);
+
+    const marketData = cachedCandles.length >= 50
+      ? {
+          symbol,
+          timeframe,
+          candles: cachedCandles.map((candle) => ({
+            timestamp: candle.time,
+            open: candle.open,
+            high: candle.high,
+            low: candle.low,
+            close: candle.close,
+          })),
+          currentPrice: cachedCandles[cachedCandles.length - 1]?.close ?? 0,
+        }
+      : await fetchMarketDataForLiveChart(symbol, timeframe);
+
     return res.json({ marketData });
   } catch (error: any) {
     return res.status(500).json({ error: error?.message || 'Unable to fetch live chart market data.' });
+  }
+};
+
+export const getDerivLiveChartMarketData = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    if (req.user.subscription === 'FREE') {
+      return res.status(403).json({ error: 'Live chart market data is available on paid plans' });
+    }
+
+    const symbol = typeof req.query.symbol === 'string' ? req.query.symbol.trim() : '';
+    const granularity = Number(req.query.granularity);
+    const limit = Math.min(Math.max(Number(req.query.limit) || 500, 2), 5000);
+
+    if (!symbol || !Number.isFinite(granularity) || !isSupportedDerivGranularity(granularity)) {
+      return res.status(400).json({ error: 'Unsupported symbol or granularity for Deriv live chart market data' });
+    }
+
+    const marketData = await getDerivLiveChartSnapshot(symbol, granularity, limit);
+    return res.json({ marketData });
+  } catch (error: any) {
+    return res.status(500).json({ error: error?.message || 'Unable to fetch Deriv live chart market data.' });
   }
 };
 

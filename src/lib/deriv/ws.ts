@@ -22,6 +22,13 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let started = false;
 let nextRequestId = 1;
 const pendingRequests = new Map<number, PendingResolver>();
+const requestedSymbols = new Set<string>();
+const resolvedSymbols = new Map<string, string>();
+const pendingSubscriptions = new Map<string, Promise<string>>();
+let activeSymbolsCache: DerivActiveSymbol[] = [];
+let waitForOpenPromise: Promise<WebSocket> | null = null;
+let resolveWaitForOpen: ((ws: WebSocket) => void) | null = null;
+let rejectWaitForOpen: ((error: Error) => void) | null = null;
 
 const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, '');
 
@@ -34,6 +41,25 @@ function clearPendingRequests(error: Error) {
     pending.reject(error);
   }
   pendingRequests.clear();
+}
+
+function resetWaitForOpen() {
+  waitForOpenPromise = new Promise<WebSocket>((resolve, reject) => {
+    resolveWaitForOpen = resolve;
+    rejectWaitForOpen = reject;
+  });
+}
+
+function waitForSocketOpen() {
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    return Promise.resolve(socket);
+  }
+
+  if (!waitForOpenPromise) {
+    resetWaitForOpen();
+  }
+
+  return waitForOpenPromise!;
 }
 
 function sendRequest(ws: WebSocket, payload: Record<string, unknown>) {
@@ -92,34 +118,58 @@ async function seedHistoricalCandles(ws: WebSocket, logicalSymbol: string, deriv
   await saveCandles(logicalSymbol, 'M15', aggregateCandles(historicalCandles, 900));
 }
 
-async function subscribeToSymbols(ws: WebSocket, symbols: string[]) {
+async function getActiveSymbols(ws: WebSocket) {
+  if (activeSymbolsCache.length > 0) {
+    return activeSymbolsCache;
+  }
+
   const response = await sendRequest(ws, {
     active_symbols: 'brief',
     product_type: 'basic',
   });
 
-  const activeSymbols = (response?.active_symbols ?? []) as DerivActiveSymbol[];
+  activeSymbolsCache = (response?.active_symbols ?? []) as DerivActiveSymbol[];
+  return activeSymbolsCache;
+}
 
+function resolveRequestedSymbol(requestedSymbol: string, activeSymbols: DerivActiveSymbol[]) {
+  const normalizedRequested = requestedSymbol.trim().toUpperCase();
+  const exactMatch = activeSymbols.find((activeSymbol) => activeSymbol.symbol.trim().toUpperCase() === normalizedRequested);
+  if (exactMatch) {
+    return exactMatch.symbol;
+  }
+
+  const configSymbol = DERIV_SCANNER_SYMBOLS.find((symbol) => symbol.symbol === normalizedRequested);
+  if (configSymbol) {
+    const aliased = resolveSymbolCode(configSymbol, activeSymbols);
+    if (aliased) {
+      return aliased;
+    }
+  }
+
+  return normalizedRequested;
+}
+
+async function subscribeSymbol(ws: WebSocket, requestedSymbol: string) {
+  const normalizedSymbol = requestedSymbol.trim().toUpperCase();
+  const activeSymbols = await getActiveSymbols(ws);
+  const derivSymbol = resolveRequestedSymbol(normalizedSymbol, activeSymbols);
+
+  registerTrackedDerivSymbol(normalizedSymbol, derivSymbol);
+  resolvedSymbols.set(normalizedSymbol, derivSymbol);
+
+  await seedHistoricalCandles(ws, normalizedSymbol, derivSymbol).catch((error) => {
+    console.error(`[deriv-ws] failed to seed historical candles for ${normalizedSymbol}:`, error);
+  });
+
+  ws.send(JSON.stringify({ ticks: derivSymbol, subscribe: 1 }));
+  console.log(`[deriv-ws] subscribed ${normalizedSymbol} -> ${derivSymbol}`);
+  return derivSymbol;
+}
+
+async function subscribeToSymbols(ws: WebSocket, symbols: string[]) {
   for (const requestedSymbol of symbols) {
-    const configSymbol = DERIV_SCANNER_SYMBOLS.find((symbol) => symbol.symbol === requestedSymbol);
-    if (!configSymbol) {
-      console.warn(`[deriv-ws] no Deriv config found for ${requestedSymbol}`);
-      continue;
-    }
-
-    const derivSymbol = resolveSymbolCode(configSymbol, activeSymbols);
-    if (!derivSymbol) {
-      console.warn(`[deriv-ws] unable to resolve Deriv symbol for ${requestedSymbol}`);
-      continue;
-    }
-
-    registerTrackedDerivSymbol(requestedSymbol, derivSymbol);
-    await seedHistoricalCandles(ws, requestedSymbol, derivSymbol).catch((error) => {
-      console.error(`[deriv-ws] failed to seed historical candles for ${requestedSymbol}:`, error);
-    });
-
-    ws.send(JSON.stringify({ ticks: derivSymbol, subscribe: 1 }));
-    console.log(`[deriv-ws] subscribed ${requestedSymbol} -> ${derivSymbol}`);
+    await subscribeSymbol(ws, requestedSymbol);
   }
 }
 
@@ -135,14 +185,17 @@ function scheduleReconnect(symbols: string[]) {
 }
 
 function connect(symbols: string[]) {
+  resetWaitForOpen();
   const ws = new WebSocket(buildWsUrl());
   socket = ws;
 
   ws.on('open', async () => {
     console.log('[deriv-ws] connected');
+    activeSymbolsCache = [];
+    resolveWaitForOpen?.(ws);
 
     try {
-      await subscribeToSymbols(ws, symbols);
+      await subscribeToSymbols(ws, Array.from(new Set([...symbols, ...requestedSymbols])));
     } catch (error) {
       console.error('[deriv-ws] subscription bootstrap failed:', error);
     }
@@ -184,7 +237,11 @@ function connect(symbols: string[]) {
   ws.on('close', () => {
     console.warn('[deriv-ws] closed');
     socket = null;
+    activeSymbolsCache = [];
+    resolvedSymbols.clear();
     clearPendingRequests(new Error('Deriv websocket closed'));
+    rejectWaitForOpen?.(new Error('Deriv websocket closed'));
+    resetWaitForOpen();
     scheduleReconnect(symbols);
   });
 }
@@ -195,6 +252,57 @@ export function startDerivStream(symbols: string[]) {
   }
 
   started = true;
+  for (const symbol of symbols) {
+    requestedSymbols.add(symbol.trim().toUpperCase());
+  }
   console.log('[deriv-ws] starting stream');
   connect(symbols);
+}
+
+export async function ensureDerivSubscription(symbol: string): Promise<string> {
+  const normalizedSymbol = symbol.trim().toUpperCase();
+  requestedSymbols.add(normalizedSymbol);
+
+  const existing = resolvedSymbols.get(normalizedSymbol);
+  if (existing) {
+    return existing;
+  }
+
+  const inFlight = pendingSubscriptions.get(normalizedSymbol);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const subscriptionPromise = (async () => {
+    const ws = await waitForSocketOpen();
+    return subscribeSymbol(ws, normalizedSymbol);
+  })().finally(() => {
+    pendingSubscriptions.delete(normalizedSymbol);
+  });
+
+  pendingSubscriptions.set(normalizedSymbol, subscriptionPromise);
+  return subscriptionPromise;
+}
+
+export async function getDerivHistoryCandles(symbol: string, granularity: number, count: number): Promise<DerivedCandle[]> {
+  const derivSymbol = await ensureDerivSubscription(symbol);
+  const ws = await waitForSocketOpen();
+  const response = await sendRequest(ws, {
+    ticks_history: derivSymbol,
+    style: 'candles',
+    granularity,
+    count,
+    end: 'latest',
+    adjust_start_time: 1,
+  });
+
+  return Array.isArray(response?.candles)
+    ? (response.candles as Array<{ epoch: number; open: number; high: number; low: number; close: number }>).map((candle) => ({
+        time: Number(candle.epoch),
+        open: Number(candle.open),
+        high: Number(candle.high),
+        low: Number(candle.low),
+        close: Number(candle.close),
+      }))
+    : [];
 }
