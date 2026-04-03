@@ -7,6 +7,7 @@ import {
   getAlertsForUser,
   markAlertsRead,
   getSessionSummary,
+  getPotentialTrades,
   runSessionScanner,
   checkZoneProximityAlerts,
   expireSessionResults,
@@ -142,6 +143,20 @@ export const getSummary = async (req: AuthRequest, res: Response) => {
   } catch (error: any) {
     console.error('[Scanner] Summary error:', error);
     return res.status(500).json({ error: error?.message || 'Failed to get session summary' });
+  }
+};
+
+// GET /api/scanner/potentials
+export const getPotentials = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Authentication required' });
+
+    const limit = Math.min(parseInt(req.query.limit as string) || 12, 20);
+    const potentials = await getPotentialTrades(req.user.id, limit);
+    return res.json({ potentials });
+  } catch (error: any) {
+    console.error('[Scanner] Potential trades error:', error);
+    return res.status(500).json({ error: error?.message || 'Failed to get potential trades' });
   }
 };
 

@@ -1,7 +1,7 @@
 import { supabase } from '../lib/supabase';
 import { getCachedCandles } from '../lib/db/saveCandles';
 import { DERIV_SCANNER_SYMBOL_IDS, SESSION_SCANNER_SYMBOL_IDS, VOLATILITY_SCANNER_SYMBOL_IDS } from '../lib/deriv/symbols';
-import { analyzeMarket, type Candle } from './scannerEngine';
+import { analyzeMarket, analyzePotentialTrade, type Candle, type PotentialTradeSetup } from './scannerEngine';
 import { sendPushToUser } from './pushService';
 
 // ── Types ──
@@ -50,6 +50,22 @@ export interface ScannerAlert {
   type: AlertType;
   read: boolean;
   createdAt: string;
+}
+
+export interface PotentialTrade {
+  symbol: string;
+  sessionType: SessionType;
+  direction: 'buy' | 'sell';
+  currentPrice: number;
+  entry: number;
+  stopLoss: number;
+  takeProfit: number;
+  activationProbability: number;
+  strategy: string;
+  narrative: string;
+  fulfilledConditions: string[];
+  requiredTriggers: string[];
+  contextLabels: string[];
 }
 
 // ── Table names ──
@@ -385,6 +401,28 @@ interface ScanCycleResult {
   score: number;
 }
 
+async function buildPotentialForSymbol(symbol: string): Promise<PotentialTradeSetup | null> {
+  try {
+    const cachedCandles = await getCachedCandles(symbol, SCANNER_TIMEFRAME, 600);
+    if (cachedCandles.length < 50) {
+      return null;
+    }
+
+    const candles: Candle[] = cachedCandles.map((c) => ({
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+      time: new Date(c.time).getTime(),
+    }));
+
+    return analyzePotentialTrade(symbol, candles);
+  } catch (err) {
+    console.error(`[Scanner] Failed to build potential trade for ${symbol}:`, err);
+    return null;
+  }
+}
+
 async function scanSymbol(symbol: string): Promise<ScanCycleResult | null> {
   try {
     const cachedCandles = await getCachedCandles(symbol, SCANNER_TIMEFRAME, 600);
@@ -656,6 +694,54 @@ export async function checkZoneProximityAlerts(userId: string): Promise<ScannerA
   }
 
   return alerts;
+}
+
+export async function getPotentialTrades(userId: string, limit = 12): Promise<PotentialTrade[]> {
+  const userSessions = await getActiveSessionsForUser(userId);
+  const enabledTypes = new Set(
+    userSessions.filter((session) => session.isActive).map((session) => session.sessionType)
+  );
+
+  const relevantSessions = getRelevantScannerModes(enabledTypes);
+  if (relevantSessions.length === 0) {
+    return [];
+  }
+
+  const { data: openResults, error } = await supabase
+    .from(SCAN_RESULT_TABLE)
+    .select('symbol')
+    .eq('userId', userId)
+    .in('status', ['active', 'triggered']);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  const blockedSymbols = new Set((openResults ?? []).map((row: any) => String(row.symbol)));
+  const potentials: PotentialTrade[] = [];
+
+  for (const sessionType of relevantSessions) {
+    const rawPotentials = await Promise.all(
+      SCANNER_SYMBOLS_BY_SESSION[sessionType]
+        .filter((symbol) => !blockedSymbols.has(symbol))
+        .map((symbol) => buildPotentialForSymbol(symbol))
+    );
+
+    const sessionPotentials = rawPotentials
+      .filter((item): item is PotentialTradeSetup => item !== null)
+      .sort((a, b) => b.activationProbability - a.activationProbability)
+      .slice(0, limit)
+      .map((item) => ({
+        ...item,
+        sessionType,
+      }));
+
+    potentials.push(...sessionPotentials);
+  }
+
+  return potentials
+    .sort((a, b) => b.activationProbability - a.activationProbability)
+    .slice(0, limit);
 }
 
 // ── Session summary at end ──

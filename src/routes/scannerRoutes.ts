@@ -8,6 +8,7 @@ import {
   getAlerts,
   markRead,
   getSummary,
+  getPotentials,
   checkProximity,
   expireSession,
 } from '../controllers/scannerController';
@@ -23,6 +24,7 @@ router.get('/results', getResults);
 router.get('/alerts', getAlerts);
 router.post('/alerts/read', markRead);
 router.get('/summary', getSummary);
+router.get('/potentials', getPotentials);
 router.post('/check-proximity', checkProximity);
 router.post('/expire', expireSession);
 

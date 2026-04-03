@@ -58,6 +58,28 @@ export interface PriceZone {
   distanceToPrice: number;
 }
 
+export interface FairValueGap {
+  type: 'bullish' | 'bearish';
+  top: number;
+  bottom: number;
+  distanceToPrice: number;
+}
+
+export interface PotentialTradeSetup {
+  symbol: string;
+  direction: 'buy' | 'sell';
+  currentPrice: number;
+  entry: number;
+  stopLoss: number;
+  takeProfit: number;
+  activationProbability: number;
+  strategy: string;
+  narrative: string;
+  fulfilledConditions: string[];
+  requiredTriggers: string[];
+  contextLabels: string[];
+}
+
 // ── 1. Trend Detection ──
 // Counts higher-highs/higher-lows vs lower-highs/lower-lows
 // over the last 20 candles to classify the trend.
@@ -363,6 +385,59 @@ export function buildZones(candles: Candle[], currentPrice: number): PriceZone[]
   return zones.sort((left, right) => left.distanceToPrice - right.distanceToPrice);
 }
 
+export function buildFairValueGaps(candles: Candle[], currentPrice: number): FairValueGap[] {
+  const gaps: FairValueGap[] = [];
+
+  for (let index = 2; index < candles.length; index++) {
+    const left = candles[index - 2];
+    const right = candles[index];
+
+    if (right.low > left.high) {
+      gaps.push({
+        type: 'bullish',
+        top: right.low,
+        bottom: left.high,
+        distanceToPrice: Math.min(Math.abs(currentPrice - right.low), Math.abs(currentPrice - left.high)),
+      });
+    }
+
+    if (right.high < left.low) {
+      gaps.push({
+        type: 'bearish',
+        top: left.low,
+        bottom: right.high,
+        distanceToPrice: Math.min(Math.abs(currentPrice - left.low), Math.abs(currentPrice - right.high)),
+      });
+    }
+  }
+
+  return gaps.sort((left, right) => left.distanceToPrice - right.distanceToPrice);
+}
+
+function findDirectionalZone(direction: 'buy' | 'sell', zones: PriceZone[], currentPrice: number): PriceZone | null {
+  const matchingZones = zones.filter((zone) => {
+    if (direction === 'buy') {
+      return zone.type === 'demand' && zone.top <= currentPrice * 1.01;
+    }
+
+    return zone.type === 'supply' && zone.bottom >= currentPrice * 0.99;
+  });
+
+  return matchingZones[0] ?? null;
+}
+
+function findDirectionalFvg(direction: 'buy' | 'sell', gaps: FairValueGap[]): FairValueGap | null {
+  return gaps.find((gap) => (direction === 'buy' ? gap.type === 'bullish' : gap.type === 'bearish')) ?? null;
+}
+
+function buildPotentialNarrative(direction: 'buy' | 'sell', currentPrice: number, contextLabels: string[], requiredTriggers: string[]) {
+  const side = direction === 'buy' ? 'bullish' : 'bearish';
+  const triggerText = requiredTriggers.length > 0 ? requiredTriggers.join(', ') : 'confirmation alignment';
+  const contextText = contextLabels.length > 0 ? contextLabels.join(', ') : 'trend context';
+
+  return `Market is showing ${side} potential around ${currentPrice.toFixed(currentPrice >= 100 ? 2 : 5)}. Current context: ${contextText}. The scanner is waiting for ${triggerText} before activating the trade.`;
+}
+
 export function isNearZone(currentPrice: number, zones: PriceZone[], bufferRatio = 0.0015): PriceZone | null {
   for (const zone of zones) {
     const dynamicBuffer = Math.max(currentPrice * bufferRatio, Math.abs(zone.top - zone.bottom) * 0.2);
@@ -499,4 +574,116 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   }
 
   return candidateSetup;
+}
+
+export function analyzePotentialTrade(symbol: string, candles: Candle[]): PotentialTradeSetup | null {
+  if (candles.length < 30) return null;
+
+  const trend = detectTrend(candles);
+  if (trend === 'ranging') return null;
+
+  const direction: 'buy' | 'sell' = trend === 'bullish' ? 'buy' : 'sell';
+  const currentPrice = candles[candles.length - 1].close;
+  const lookLeftCandles = candles.slice(-Math.min(500, candles.length));
+  const zones = buildZones(lookLeftCandles, currentPrice);
+  const gaps = buildFairValueGaps(lookLeftCandles, currentPrice);
+  const directionalZone = findDirectionalZone(direction, zones, currentPrice);
+  const directionalFvg = findDirectionalFvg(direction, gaps);
+  const pullback = detectPullback(trend, candles);
+  const sweep = detectLiquiditySweep(candles);
+  const last = candles[candles.length - 1];
+  const prev = candles[candles.length - 2];
+  const engulfing = detectEngulfing(prev, last);
+  const rejection = detectRejection(last);
+  const structure = detectStructureBreak(candles);
+
+  const alignedSweep = sweep && ((direction === 'buy' && sweep.type === 'sweep_low') || (direction === 'sell' && sweep.type === 'sweep_high'));
+  const alignedRejection = rejection && ((direction === 'buy' && rejection === 'bullish_rejection') || (direction === 'sell' && rejection === 'bearish_rejection'));
+  const alignedEngulfing = engulfing && ((direction === 'buy' && engulfing === 'bullish') || (direction === 'sell' && engulfing === 'bearish'));
+  const alignedStructure = structure && ((direction === 'buy' && structure === 'bullish') || (direction === 'sell' && structure === 'bearish'));
+
+  let probability = 20;
+  if (pullback) probability += 15;
+  if (directionalZone) probability += 20;
+  if (directionalFvg) probability += 10;
+  if (alignedSweep) probability += 10;
+  if (alignedRejection) probability += 10;
+  if (alignedEngulfing) probability += 10;
+  if (alignedStructure) probability += 5;
+
+  if (!directionalZone && !directionalFvg && !pullback) {
+    return null;
+  }
+
+  if (probability < 35) {
+    return null;
+  }
+
+  const fulfilledConditions: string[] = [trend === 'bullish' ? 'Bullish trend context' : 'Bearish trend context'];
+  const requiredTriggers: string[] = [];
+  const contextLabels: string[] = [];
+
+  if (directionalZone) {
+    fulfilledConditions.push(direction === 'buy' ? 'Price is near demand/support zone' : 'Price is near supply/resistance zone');
+    contextLabels.push(direction === 'buy' ? 'Near demand/support' : 'Near supply/resistance');
+  } else {
+    requiredTriggers.push(direction === 'buy' ? 'Price revisit into demand/support zone' : 'Price revisit into supply/resistance zone');
+  }
+
+  if (directionalFvg) {
+    fulfilledConditions.push(direction === 'buy' ? 'Bullish FVG in play' : 'Bearish FVG in play');
+    contextLabels.push(direction === 'buy' ? 'Bullish FVG nearby' : 'Bearish FVG nearby');
+  } else {
+    requiredTriggers.push(direction === 'buy' ? 'Bullish FVG retest or demand reaction' : 'Bearish FVG retest or supply reaction');
+  }
+
+  if (pullback) {
+    fulfilledConditions.push('Pullback location is developing');
+    contextLabels.push('Pullback structure intact');
+  } else {
+    requiredTriggers.push('Cleaner pullback into value area');
+  }
+
+  if (alignedSweep) {
+    fulfilledConditions.push(direction === 'buy' ? 'Sell-side liquidity sweep printed' : 'Buy-side liquidity sweep printed');
+  } else {
+    requiredTriggers.push(direction === 'buy' ? 'Sell-side liquidity sweep or zone reaction' : 'Buy-side liquidity sweep or zone reaction');
+  }
+
+  if (alignedRejection) {
+    fulfilledConditions.push(direction === 'buy' ? 'Bullish rejection from zone' : 'Bearish rejection from zone');
+  } else {
+    requiredTriggers.push(direction === 'buy' ? 'Bullish rejection wick from demand/support/FVG' : 'Bearish rejection wick from supply/resistance/FVG');
+  }
+
+  if (alignedEngulfing) {
+    fulfilledConditions.push(direction === 'buy' ? 'Bullish engulfing confirmation' : 'Bearish engulfing confirmation');
+  } else {
+    requiredTriggers.push(direction === 'buy' ? 'Bullish engulfing candle' : 'Bearish engulfing candle');
+  }
+
+  if (alignedStructure) {
+    fulfilledConditions.push(direction === 'buy' ? 'Bullish micro BOS printed' : 'Bearish micro BOS printed');
+  } else {
+    requiredTriggers.push(direction === 'buy' ? 'Bullish micro BOS / momentum shift' : 'Bearish micro BOS / momentum shift');
+  }
+
+  const entry = currentPrice;
+  const stopLoss = computeStopLoss(direction, candles);
+  const takeProfit = computeTakeProfit(direction, entry, stopLoss);
+
+  return {
+    symbol,
+    direction,
+    currentPrice,
+    entry,
+    stopLoss,
+    takeProfit,
+    activationProbability: Math.min(95, probability),
+    strategy: `${deriveStrategy(trend, sweep)} Watchlist`,
+    narrative: buildPotentialNarrative(direction, currentPrice, contextLabels, requiredTriggers.slice(0, 3)),
+    fulfilledConditions,
+    requiredTriggers,
+    contextLabels,
+  };
 }
