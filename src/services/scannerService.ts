@@ -974,4 +974,4 @@ export async function expireSessionResults(userId: string, sessionType: SessionT
     .eq('status', 'active');
 }
 
-export { isSessionActive, getCurrentSessionTypes, SCANNER_SYMBOLS, SCANNER_TIMEFRAME };
+export { SCANNER_SYMBOLS, SCANNER_TIMEFRAME };
