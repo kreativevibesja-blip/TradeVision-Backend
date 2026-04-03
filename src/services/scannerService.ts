@@ -1,12 +1,13 @@
 import { supabase } from '../lib/supabase';
 import { getCachedCandles } from '../lib/db/saveCandles';
-import { DERIV_SCANNER_SYMBOL_IDS } from '../lib/deriv/symbols';
+import { DERIV_SCANNER_SYMBOL_IDS, SESSION_SCANNER_SYMBOL_IDS, VOLATILITY_SCANNER_SYMBOL_IDS } from '../lib/deriv/symbols';
 import { analyzeMarket, type Candle } from './scannerEngine';
 import { sendPushToUser } from './pushService';
 
 // ── Types ──
 
-export type SessionType = 'london' | 'newyork';
+export type SessionType = 'london' | 'newyork' | 'volatility';
+type ForexSessionType = Extract<SessionType, 'london' | 'newyork'>;
 export type ScanResultStatus = 'active' | 'triggered' | 'closed' | 'invalidated' | 'expired';
 export type AlertType = 'info' | 'trade' | 'warning';
 export type ScanCloseReason = 'tp' | 'sl' | null;
@@ -64,7 +65,7 @@ interface SessionWindow {
   endHour: number;
 }
 
-const SESSION_WINDOWS: Record<SessionType, SessionWindow> = {
+const SESSION_WINDOWS: Record<ForexSessionType, SessionWindow> = {
   london: { startHour: 2, endHour: 11 },
   newyork: { startHour: 8, endHour: 17 },
 };
@@ -72,6 +73,11 @@ const SESSION_WINDOWS: Record<SessionType, SessionWindow> = {
 // ── Scanner symbols and timeframe ──
 
 const SCANNER_SYMBOLS = DERIV_SCANNER_SYMBOL_IDS;
+const SCANNER_SYMBOLS_BY_SESSION: Record<SessionType, readonly string[]> = {
+  london: SESSION_SCANNER_SYMBOL_IDS,
+  newyork: SESSION_SCANNER_SYMBOL_IDS,
+  volatility: VOLATILITY_SCANNER_SYMBOL_IDS,
+};
 
 const SCANNER_TIMEFRAME = 'M15';
 
@@ -87,6 +93,10 @@ function getCurrentEstHour(): number {
 }
 
 function isSessionActive(sessionType: SessionType): boolean {
+  if (sessionType === 'volatility') {
+    return true;
+  }
+
   const hour = getCurrentEstHour();
   const window = SESSION_WINDOWS[sessionType];
   return hour >= window.startHour && hour < window.endHour;
@@ -96,7 +106,24 @@ function getCurrentSessionTypes(): SessionType[] {
   const active: SessionType[] = [];
   if (isSessionActive('london')) active.push('london');
   if (isSessionActive('newyork')) active.push('newyork');
+  active.push('volatility');
   return active;
+}
+
+function getRelevantScannerModes(enabledTypes: Set<SessionType>): SessionType[] {
+  const relevantModes: SessionType[] = [];
+
+  if (enabledTypes.has('volatility')) {
+    relevantModes.push('volatility');
+  }
+
+  if (enabledTypes.has('newyork') && isSessionActive('newyork')) {
+    relevantModes.push('newyork');
+  } else if (enabledTypes.has('london') && isSessionActive('london')) {
+    relevantModes.push('london');
+  }
+
+  return relevantModes;
 }
 
 // ── Deduplication ──
@@ -253,17 +280,22 @@ export async function markAlertsRead(userId: string, alertIds: string[]): Promis
 
 export async function getSessionSummary(
   userId: string,
-  sessionType: SessionType,
+  sessionType?: SessionType,
 ): Promise<{ total: number; triggered: number; closed: number; invalidated: number; active: number }> {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  const { data, error } = await supabase
+  let query = supabase
     .from(SCAN_RESULT_TABLE)
     .select('status')
     .eq('userId', userId)
-    .eq('sessionType', sessionType)
     .gte('createdAt', today.toISOString());
+
+  if (sessionType) {
+    query = query.eq('sessionType', sessionType);
+  }
+
+  const { data, error } = await query;
 
   if (error) throw new Error(error.message);
 
@@ -389,104 +421,103 @@ async function scanSymbol(symbol: string): Promise<ScanCycleResult | null> {
 }
 
 export async function runSessionScanner(userId: string): Promise<{ results: ScanResult[]; alerts: ScannerAlert[] }> {
-  const activeSessions = getCurrentSessionTypes();
-  if (activeSessions.length === 0) {
-    return { results: [], alerts: [] };
-  }
-
   // Get user's enabled sessions
   const userSessions = await getActiveSessionsForUser(userId);
   const enabledTypes = new Set(
     userSessions.filter((s) => s.isActive).map((s) => s.sessionType)
   );
 
-  const relevantSessions = activeSessions.filter((s) => enabledTypes.has(s));
+  const relevantSessions = getRelevantScannerModes(enabledTypes);
   if (relevantSessions.length === 0) {
     return { results: [], alerts: [] };
   }
 
-  const sessionType = relevantSessions[0]; // Primary session
-
-  // ── Enforce daily & per-session trade limits ──
-  const [dailyCount, sessionCount] = await Promise.all([
-    getTodayTradeCount(userId),
-    getTodayTradeCount(userId, sessionType),
-  ]);
+  let dailyCount = await getTodayTradeCount(userId);
 
   if (dailyCount >= MAX_TRADES_PER_DAY) {
     console.log(`[Scanner] Daily limit reached for user ${userId} (${dailyCount}/${MAX_TRADES_PER_DAY})`);
     return { results: [], alerts: [] };
   }
 
-  if (sessionCount >= MAX_TRADES_PER_SESSION) {
-    console.log(`[Scanner] Session limit reached for user ${userId} ${sessionType} (${sessionCount}/${MAX_TRADES_PER_SESSION})`);
-    return { results: [], alerts: [] };
-  }
-
-  const remainingDaily = MAX_TRADES_PER_DAY - dailyCount;
-  const remainingSession = MAX_TRADES_PER_SESSION - sessionCount;
-  const slotsAvailable = Math.min(remainingDaily, remainingSession);
-
-  // Scan all symbols in parallel
-  const scanPromises = SCANNER_SYMBOLS.map((symbol) => scanSymbol(symbol));
-  const rawResults = await Promise.all(scanPromises);
-
-  // Filter valid, sort by score, cap to available slots
-  const validResults = rawResults
-    .filter((r): r is ScanCycleResult => r !== null)
-    .sort((a, b) => b.score - a.score || b.confidenceScore - a.confidenceScore)
-    .slice(0, slotsAvailable);
-
   const savedResults: ScanResult[] = [];
   const savedAlerts: ScannerAlert[] = [];
 
-  for (let i = 0; i < validResults.length; i++) {
-    const result = validResults[i];
-
-    // Deduplicate
-    if (isDuplicate(userId, result.symbol, result.direction)) {
+  for (const sessionType of relevantSessions) {
+    const sessionCount = await getTodayTradeCount(userId, sessionType);
+    if (sessionCount >= MAX_TRADES_PER_SESSION) {
+      console.log(`[Scanner] Session limit reached for user ${userId} ${sessionType} (${sessionCount}/${MAX_TRADES_PER_SESSION})`);
       continue;
     }
 
-    const scanResult = await insertScanResult({
-      userId,
-      symbol: result.symbol,
-      timeframe: SCANNER_TIMEFRAME,
-      direction: result.direction,
-      entry: result.entry,
-      stopLoss: result.stopLoss,
-      takeProfit: result.takeProfit,
-      confidenceScore: result.confidenceScore,
-      strategy: result.strategy,
-      confirmations: result.confirmations,
-      sessionType,
-      status: 'active',
-      closeReason: null,
-      triggeredAt: null,
-      closedAt: null,
-      rank: i + 1,
-    });
+    const remainingDaily = MAX_TRADES_PER_DAY - dailyCount;
+    const remainingSession = MAX_TRADES_PER_SESSION - sessionCount;
+    const slotsAvailable = Math.min(remainingDaily, remainingSession);
+    if (slotsAvailable <= 0) {
+      break;
+    }
 
-    savedResults.push(scanResult);
+    const rawResults = await Promise.all(SCANNER_SYMBOLS_BY_SESSION[sessionType].map((symbol) => scanSymbol(symbol)));
+    const validResults = rawResults
+      .filter((r): r is ScanCycleResult => r !== null)
+      .sort((a, b) => b.score - a.score || b.confidenceScore - a.confidenceScore)
+      .slice(0, slotsAvailable);
 
-    // Create alert
-    const directionLabel = result.direction.toUpperCase();
-    const alert = await insertAlert({
-      userId,
-      scanResultId: scanResult.id,
-      message: `High-quality setup detected on ${result.symbol} (${directionLabel}) — Score ${result.score}/9, ${result.strategy}`,
-      type: 'trade',
-    });
+    for (let i = 0; i < validResults.length; i++) {
+      const result = validResults[i];
 
-    savedAlerts.push(alert);
+      if (isDuplicate(userId, result.symbol, result.direction)) {
+        continue;
+      }
 
-    // Send browser push notification
-    sendPushToUser(userId, {
-      title: 'TradeVision Alert \ud83d\udea8',
-      body: `${result.symbol} ${directionLabel} setup detected (Score ${result.score}/9)`,
-      tag: `scan-${result.symbol}-${result.direction}`,
-      url: '/dashboard/scanner',
-    }).catch((err) => console.error('[Push] Failed to send:', err));
+      const scanResult = await insertScanResult({
+        userId,
+        symbol: result.symbol,
+        timeframe: SCANNER_TIMEFRAME,
+        direction: result.direction,
+        entry: result.entry,
+        stopLoss: result.stopLoss,
+        takeProfit: result.takeProfit,
+        confidenceScore: result.confidenceScore,
+        strategy: result.strategy,
+        confirmations: result.confirmations,
+        sessionType,
+        status: 'active',
+        closeReason: null,
+        triggeredAt: null,
+        closedAt: null,
+        rank: i + 1,
+      });
+
+      savedResults.push(scanResult);
+      dailyCount += 1;
+
+      const directionLabel = result.direction.toUpperCase();
+      const modeLabel = sessionType === 'volatility' ? 'Volatility 24/7' : `${sessionType === 'london' ? 'London' : 'New York'} Session`;
+      const alert = await insertAlert({
+        userId,
+        scanResultId: scanResult.id,
+        message: `High-quality ${modeLabel} setup detected on ${result.symbol} (${directionLabel}) — Score ${result.score}/9, ${result.strategy}`,
+        type: 'trade',
+      });
+
+      savedAlerts.push(alert);
+
+      sendPushToUser(userId, {
+        title: 'TradeVision Alert 🚨',
+        body: `${result.symbol} ${directionLabel} setup detected (${sessionType === 'volatility' ? 'Volatility 24/7' : 'Session scanner'})`,
+        tag: `scan-${result.symbol}-${result.direction}`,
+        url: '/dashboard/scanner',
+      }).catch((err) => console.error('[Push] Failed to send:', err));
+
+      if (dailyCount >= MAX_TRADES_PER_DAY) {
+        break;
+      }
+    }
+
+    if (dailyCount >= MAX_TRADES_PER_DAY) {
+      console.log(`[Scanner] Daily limit reached for user ${userId} during ${sessionType} scanning`);
+      break;
+    }
   }
 
   // Cleanup old dedup entries

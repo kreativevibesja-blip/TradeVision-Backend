@@ -18,7 +18,7 @@ import {
 } from '../services/scannerService';
 
 const isValidSessionType = (value: unknown): value is SessionType =>
-  value === 'london' || value === 'newyork';
+  value === 'london' || value === 'newyork' || value === 'volatility';
 
 // GET /api/scanner/status
 export const getScannerStatus = async (req: AuthRequest, res: Response) => {
@@ -33,6 +33,7 @@ export const getScannerStatus = async (req: AuthRequest, res: Response) => {
       activeWindows: activeSessions,
       londonActive: isSessionActive('london'),
       newyorkActive: isSessionActive('newyork'),
+      volatilityActive: isSessionActive('volatility'),
       symbols: SCANNER_SYMBOLS,
       timeframe: SCANNER_TIMEFRAME,
     });
@@ -49,7 +50,7 @@ export const toggleScanner = async (req: AuthRequest, res: Response) => {
 
     const { sessionType, enabled } = req.body;
     if (!isValidSessionType(sessionType)) {
-      return res.status(400).json({ error: 'Invalid session type. Use "london" or "newyork".' });
+      return res.status(400).json({ error: 'Invalid session type. Use "london", "newyork", or "volatility".' });
     }
     if (typeof enabled !== 'boolean') {
       return res.status(400).json({ error: 'enabled must be a boolean' });
@@ -134,7 +135,7 @@ export const getSummary = async (req: AuthRequest, res: Response) => {
 
     const sessionType = typeof req.query.sessionType === 'string' && isValidSessionType(req.query.sessionType)
       ? req.query.sessionType
-      : 'london';
+      : undefined;
 
     const summary = await getSessionSummary(req.user.id, sessionType);
     return res.json({ summary });
