@@ -1,9 +1,9 @@
 import WebSocket from 'ws';
 import { config } from '../../config';
-import { saveCandles } from '../db/saveCandles';
-import { aggregateCandles, type DerivedCandle } from './candles';
+import { type DerivedCandle } from './candles';
 import { DERIV_SCANNER_SYMBOLS, type DerivScannerSymbolConfig } from './symbols';
-import { handleTick, registerTrackedDerivSymbol } from './store';
+import { getLogicalSymbolForDerivSymbol, handleTick, registerTrackedDerivSymbol } from './store';
+import { updateCandlesForTick } from './updateCandle';
 
 type PendingResolver = {
   resolve: (payload: any) => void;
@@ -88,36 +88,6 @@ function resolveSymbolCode(configSymbol: DerivScannerSymbolConfig, activeSymbols
   })?.symbol ?? null;
 }
 
-async function seedHistoricalCandles(ws: WebSocket, logicalSymbol: string, derivSymbol: string) {
-  const response = await sendRequest(ws, {
-    ticks_history: derivSymbol,
-    style: 'candles',
-    granularity: 60,
-    count: config.deriv.historyM1Count,
-    end: 'latest',
-    adjust_start_time: 1,
-  });
-
-  const historicalCandles = Array.isArray(response?.candles)
-    ? (response.candles as Array<{ epoch: number; open: number; high: number; low: number; close: number }>).map((candle) => ({
-        time: Number(candle.epoch),
-        open: Number(candle.open),
-        high: Number(candle.high),
-        low: Number(candle.low),
-        close: Number(candle.close),
-      }))
-    : [];
-
-  if (historicalCandles.length === 0) {
-    console.warn(`[deriv-ws] no historical candles returned for ${logicalSymbol} (${derivSymbol})`);
-    return;
-  }
-
-  await saveCandles(logicalSymbol, 'M1', historicalCandles);
-  await saveCandles(logicalSymbol, 'M5', aggregateCandles(historicalCandles, 300));
-  await saveCandles(logicalSymbol, 'M15', aggregateCandles(historicalCandles, 900));
-}
-
 async function getActiveSymbols(ws: WebSocket) {
   if (activeSymbolsCache.length > 0) {
     return activeSymbolsCache;
@@ -157,10 +127,6 @@ async function subscribeSymbol(ws: WebSocket, requestedSymbol: string) {
 
   registerTrackedDerivSymbol(normalizedSymbol, derivSymbol);
   resolvedSymbols.set(normalizedSymbol, derivSymbol);
-
-  await seedHistoricalCandles(ws, normalizedSymbol, derivSymbol).catch((error) => {
-    console.error(`[deriv-ws] failed to seed historical candles for ${normalizedSymbol}:`, error);
-  });
 
   ws.send(JSON.stringify({ ticks: derivSymbol, subscribe: 1 }));
   console.log(`[deriv-ws] subscribed ${normalizedSymbol} -> ${derivSymbol}`);
@@ -219,11 +185,20 @@ function connect(symbols: string[]) {
       }
 
       if (payload?.tick?.symbol && Number.isFinite(Number(payload.tick.quote)) && Number.isFinite(Number(payload.tick.epoch))) {
-        handleTick({
+        const tick = {
           symbol: payload.tick.symbol,
           quote: Number(payload.tick.quote),
           epoch: Number(payload.tick.epoch),
-        });
+        };
+
+        handleTick(tick);
+
+        const logicalSymbol = getLogicalSymbolForDerivSymbol(tick.symbol);
+        if (logicalSymbol) {
+          void updateCandlesForTick(logicalSymbol, tick.quote, tick.epoch).catch((error) => {
+            console.error(`[deriv-ws] candle update failed for ${logicalSymbol}:`, error);
+          });
+        }
       }
     } catch (error) {
       console.error('[deriv-ws] failed to parse message:', error);

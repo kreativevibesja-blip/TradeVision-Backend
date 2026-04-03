@@ -5,28 +5,15 @@ export interface TickPoint {
 
 type TickListener = (tick: { logicalSymbol: string; price: number; time: number }) => void;
 
-const tickStore: Record<string, TickPoint[]> = {};
 const derivToLogicalSymbol = new Map<string, string>();
 const tickListeners = new Set<TickListener>();
 
 export function registerTrackedDerivSymbol(logicalSymbol: string, derivSymbol: string) {
   derivToLogicalSymbol.set(derivSymbol, logicalSymbol);
-
-  if (!tickStore[logicalSymbol]) {
-    tickStore[logicalSymbol] = [];
-  }
 }
 
-export function getTrackedLogicalSymbols() {
-  return Object.keys(tickStore);
-}
-
-export function getTicksForSymbol(symbol: string): TickPoint[] {
-  return tickStore[symbol] ?? [];
-}
-
-export function setTicksForSymbol(symbol: string, ticks: TickPoint[]) {
-  tickStore[symbol] = ticks;
+export function getLogicalSymbolForDerivSymbol(derivSymbol: string) {
+  return derivToLogicalSymbol.get(derivSymbol);
 }
 
 export function handleTick(tick: { symbol: string; quote: number; epoch: number }) {
@@ -34,15 +21,6 @@ export function handleTick(tick: { symbol: string; quote: number; epoch: number 
   if (!logicalSymbol) {
     return;
   }
-
-  if (!tickStore[logicalSymbol]) {
-    tickStore[logicalSymbol] = [];
-  }
-
-  tickStore[logicalSymbol].push({
-    price: Number(tick.quote),
-    time: Number(tick.epoch),
-  });
 
   for (const listener of tickListeners) {
     listener({
