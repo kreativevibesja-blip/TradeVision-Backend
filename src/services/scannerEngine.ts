@@ -301,21 +301,135 @@ function buildConfirmationLabels(confirmations: SetupConfirmations): string[] {
 
 // ── SL/TP calculation helpers ──
 
-function computeStopLoss(direction: 'buy' | 'sell', candles: Candle[]): number {
-  const recent = candles.slice(-10);
-  const last = candles[candles.length - 1];
+interface SymbolRiskProfile {
+  structureLookback: number;
+  atrPeriod: number;
+  minStopAtrMultiplier: number;
+  minStopRangeMultiplier: number;
+  minStopPriceRatio: number;
+  bufferAtrMultiplier: number;
+  bufferRangeMultiplier: number;
+  bufferPriceRatio: number;
+}
 
-  if (direction === 'buy') {
-    // SL below the recent swing low with a small buffer
-    const swingLow = Math.min(...recent.map((c) => c.low));
-    const buffer = (last.close - swingLow) * 0.1;
-    return swingLow - Math.max(buffer, last.close * 0.0005);
+function isVolatilitySymbol(symbol: string): boolean {
+  return /^R_\d+$/.test(symbol) || /^1HZ\d+V$/i.test(symbol);
+}
+
+function isForexSymbol(symbol: string): boolean {
+  return /^[A-Z]{6}$/.test(symbol) && !['XAUUSD', 'BTCUSD'].includes(symbol);
+}
+
+function average(values: number[]): number {
+  if (values.length === 0) {
+    return 0;
   }
 
-  // SL above the recent swing high with a small buffer
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function computeAtr(candles: Candle[], period: number): number {
+  if (candles.length < 2) {
+    return 0;
+  }
+
+  const startIndex = Math.max(1, candles.length - period);
+  const trueRanges: number[] = [];
+
+  for (let index = startIndex; index < candles.length; index++) {
+    const current = candles[index];
+    const previous = candles[index - 1];
+    trueRanges.push(
+      Math.max(
+        current.high - current.low,
+        Math.abs(current.high - previous.close),
+        Math.abs(current.low - previous.close),
+      ),
+    );
+  }
+
+  return average(trueRanges);
+}
+
+function getSymbolRiskProfile(symbol: string): SymbolRiskProfile {
+  if (isVolatilitySymbol(symbol)) {
+    return {
+      structureLookback: 24,
+      atrPeriod: 21,
+      minStopAtrMultiplier: 2.1,
+      minStopRangeMultiplier: 3,
+      minStopPriceRatio: 0.006,
+      bufferAtrMultiplier: 0.7,
+      bufferRangeMultiplier: 1.1,
+      bufferPriceRatio: 0.0015,
+    };
+  }
+
+  if (isForexSymbol(symbol)) {
+    return {
+      structureLookback: 12,
+      atrPeriod: 14,
+      minStopAtrMultiplier: 0.9,
+      minStopRangeMultiplier: 1.25,
+      minStopPriceRatio: 0.0007,
+      bufferAtrMultiplier: 0.25,
+      bufferRangeMultiplier: 0.35,
+      bufferPriceRatio: 0.0002,
+    };
+  }
+
+  return {
+    structureLookback: 16,
+    atrPeriod: 14,
+    minStopAtrMultiplier: 1.2,
+    minStopRangeMultiplier: 1.7,
+    minStopPriceRatio: 0.0015,
+    bufferAtrMultiplier: 0.35,
+    bufferRangeMultiplier: 0.5,
+    bufferPriceRatio: 0.0004,
+  };
+}
+
+function computeStopLoss(symbol: string, direction: 'buy' | 'sell', candles: Candle[]): number {
+  const profile = getSymbolRiskProfile(symbol);
+  const recent = candles.slice(-profile.structureLookback);
+  const last = candles[candles.length - 1];
+  const atr = computeAtr(candles, profile.atrPeriod);
+  const averageRange = average(recent.map((c) => c.high - c.low));
+
+  if (direction === 'buy') {
+    const swingLow = Math.min(...recent.map((c) => c.low));
+    const structuralDistance = Math.abs(last.close - swingLow);
+    const minDistance = Math.max(
+      atr * profile.minStopAtrMultiplier,
+      averageRange * profile.minStopRangeMultiplier,
+      last.close * profile.minStopPriceRatio,
+    );
+    const buffer = Math.max(
+      atr * profile.bufferAtrMultiplier,
+      averageRange * profile.bufferRangeMultiplier,
+      last.close * profile.bufferPriceRatio,
+    );
+
+    const stopDistance = Math.max(structuralDistance + buffer, minDistance);
+    return last.close - stopDistance;
+  }
+
   const swingHigh = Math.max(...recent.map((c) => c.high));
-  const buffer = (swingHigh - last.close) * 0.1;
-  return swingHigh + Math.max(buffer, last.close * 0.0005);
+  const structuralDistance = Math.abs(swingHigh - last.close);
+  const minDistance = Math.max(
+    atr * profile.minStopAtrMultiplier,
+    averageRange * profile.minStopRangeMultiplier,
+    last.close * profile.minStopPriceRatio,
+  );
+  const buffer = Math.max(
+    atr * profile.bufferAtrMultiplier,
+    averageRange * profile.bufferRangeMultiplier,
+    last.close * profile.bufferPriceRatio,
+  );
+
+  const stopDistance = Math.max(structuralDistance + buffer, minDistance);
+  return last.close + stopDistance;
 }
 
 function computeTakeProfit(direction: 'buy' | 'sell', entry: number, stopLoss: number): number {
@@ -618,7 +732,7 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   if (!alignedMomentum && !alignedStructure && !alignedEngulfing) return null;
 
   const entry = last.close;
-  const stopLoss = computeStopLoss(direction, candles);
+  const stopLoss = computeStopLoss(symbol, direction, candles);
   const takeProfit = computeTakeProfit(direction, entry, stopLoss);
   const takeProfit2 = computeSecondaryTakeProfit(direction, entry, stopLoss);
 
@@ -753,7 +867,7 @@ export function analyzePotentialTrade(symbol: string, candles: Candle[]): Potent
   }
 
   const entry = currentPrice;
-  const stopLoss = computeStopLoss(direction, candles);
+  const stopLoss = computeStopLoss(symbol, direction, candles);
   const takeProfit = computeTakeProfit(direction, entry, stopLoss);
   const takeProfit2 = computeSecondaryTakeProfit(direction, entry, stopLoss);
 
