@@ -30,6 +30,7 @@ export interface ScanResult {
   entry: number;
   stopLoss: number;
   takeProfit: number;
+  takeProfit2: number | null;
   confidenceScore: number;
   strategy: string | null;
   confirmations: string[];
@@ -60,6 +61,7 @@ export interface PotentialTrade {
   entry: number;
   stopLoss: number;
   takeProfit: number;
+  takeProfit2: number;
   activationProbability: number;
   strategy: string;
   narrative: string;
@@ -521,6 +523,7 @@ interface ScanCycleResult {
   entry: number;
   stopLoss: number;
   takeProfit: number;
+  takeProfit2: number;
   confidenceScore: number;
   strategy: string;
   confirmations: string[];
@@ -573,6 +576,7 @@ async function scanSymbol(symbol: string): Promise<ScanCycleResult | null> {
       entry: setup.entry,
       stopLoss: setup.stopLoss,
       takeProfit: setup.takeProfit,
+      takeProfit2: setup.takeProfit2,
       confidenceScore: setup.confidenceScore,
       strategy: setup.strategy,
       confirmations: setup.confirmationLabels,
@@ -641,6 +645,7 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
         entry: result.entry,
         stopLoss: result.stopLoss,
         takeProfit: result.takeProfit,
+        takeProfit2: result.takeProfit2,
         confidenceScore: result.confidenceScore,
         strategy: result.strategy,
         confirmations: result.confirmations,
@@ -660,7 +665,7 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
       const alert = await insertAlert({
         userId,
         scanResultId: scanResult.id,
-        message: `High-quality ${modeLabel} setup detected on ${result.symbol} (${directionLabel}) — Score ${result.score}/9, ${result.strategy}`,
+        message: `High-quality ${modeLabel} setup detected on ${result.symbol} (${directionLabel}) — Score ${result.score}/9, ${result.strategy}, TP1 1:2 and TP2 1:3 mapped.`,
         type: 'trade',
       });
 

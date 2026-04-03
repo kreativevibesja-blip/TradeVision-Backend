@@ -38,6 +38,7 @@ export interface TradeSetup {
   entry: number;
   stopLoss: number;
   takeProfit: number;
+  takeProfit2: number;
   score: number;
   confidenceScore: number;
   strategy: string;
@@ -72,6 +73,7 @@ export interface PotentialTradeSetup {
   entry: number;
   stopLoss: number;
   takeProfit: number;
+  takeProfit2: number;
   activationProbability: number;
   strategy: string;
   narrative: string;
@@ -265,13 +267,13 @@ function scoreToConfidence(score: number): number {
 
 // ── Strategy label ──
 
-function deriveStrategy(trend: TrendDirection, sweep: LiquiditySweep | null): string {
+function deriveStrategy(direction: 'buy' | 'sell', sweep: LiquiditySweep | null): string {
   if (sweep) {
-    return trend === 'bullish'
+    return direction === 'buy'
       ? 'Bullish Liquidity Sweep Reversal'
       : 'Bearish Liquidity Sweep Reversal';
   }
-  return trend === 'bullish'
+  return direction === 'buy'
     ? 'Bullish Pullback Continuation'
     : 'Bearish Pullback Continuation';
 }
@@ -320,6 +322,67 @@ function computeTakeProfit(direction: 'buy' | 'sell', entry: number, stopLoss: n
   const risk = Math.abs(entry - stopLoss);
   // 2:1 risk-reward ratio
   return direction === 'buy' ? entry + risk * 2 : entry - risk * 2;
+}
+
+function computeSecondaryTakeProfit(direction: 'buy' | 'sell', entry: number, stopLoss: number): number {
+  const risk = Math.abs(entry - stopLoss);
+  // 3:1 risk-reward ratio
+  return direction === 'buy' ? entry + risk * 3 : entry - risk * 3;
+}
+
+function isSweepAligned(direction: 'buy' | 'sell', sweep: LiquiditySweep | null): boolean {
+  if (!sweep) {
+    return false;
+  }
+
+  return (direction === 'buy' && sweep.type === 'sweep_low') || (direction === 'sell' && sweep.type === 'sweep_high');
+}
+
+function isEngulfingAligned(direction: 'buy' | 'sell', engulfing: EngulfingSignal | null): boolean {
+  if (!engulfing) {
+    return false;
+  }
+
+  return (direction === 'buy' && engulfing === 'bullish') || (direction === 'sell' && engulfing === 'bearish');
+}
+
+function isRejectionAligned(direction: 'buy' | 'sell', rejection: RejectionSignal | null): boolean {
+  if (!rejection) {
+    return false;
+  }
+
+  return (direction === 'buy' && rejection === 'bullish_rejection') || (direction === 'sell' && rejection === 'bearish_rejection');
+}
+
+function isStructureAligned(direction: 'buy' | 'sell', structure: StructureBreak | null): boolean {
+  if (!structure) {
+    return false;
+  }
+
+  return (direction === 'buy' && structure === 'bullish') || (direction === 'sell' && structure === 'bearish');
+}
+
+function detectRecentMomentum(candles: Candle[]): TrendDirection {
+  if (candles.length < 5) {
+    return 'ranging';
+  }
+
+  const recent = candles.slice(-4);
+  let upCloses = 0;
+  let downCloses = 0;
+  let higherLows = 0;
+  let lowerHighs = 0;
+
+  for (let index = 1; index < recent.length; index++) {
+    if (recent[index].close > recent[index - 1].close) upCloses++;
+    if (recent[index].close < recent[index - 1].close) downCloses++;
+    if (recent[index].low > recent[index - 1].low) higherLows++;
+    if (recent[index].high < recent[index - 1].high) lowerHighs++;
+  }
+
+  if (upCloses >= 2 && higherLows >= 2) return 'bullish';
+  if (downCloses >= 2 && lowerHighs >= 2) return 'bearish';
+  return 'ranging';
 }
 
 // ── 8. Look-left supply/demand detection ──
@@ -529,24 +592,41 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   if (score < 5) return null;
 
   const direction: 'buy' | 'sell' = trend === 'bullish' ? 'buy' : 'sell';
+  const recentMomentum = detectRecentMomentum(candles);
+  const alignedSweep = isSweepAligned(direction, sweep);
+  const alignedEngulfing = isEngulfingAligned(direction, engulfing);
+  const alignedRejection = isRejectionAligned(direction, rejection);
+  const alignedStructure = isStructureAligned(direction, structure);
+  const alignedMomentum = (direction === 'buy' && recentMomentum === 'bullish') || (direction === 'sell' && recentMomentum === 'bearish');
 
-  // Guard: confirmations should align with direction
-  if (engulfing && engulfing !== trend) return null;
-  if (rejection) {
-    const rejectionAligned =
-      (direction === 'buy' && rejection === 'bullish_rejection') ||
-      (direction === 'sell' && rejection === 'bearish_rejection');
-    if (!rejectionAligned) return null;
-  }
-  if (structure && structure !== trend) return null;
+  if (sweep && !alignedSweep) return null;
+  if (engulfing && !alignedEngulfing) return null;
+  if (rejection && !alignedRejection) return null;
+  if (structure && !alignedStructure) return null;
+
+  const directionalConfirmationCount = [alignedSweep, alignedEngulfing, alignedRejection, alignedStructure, alignedMomentum]
+    .filter(Boolean)
+    .length;
+
+  if (directionalConfirmationCount < 2) return null;
+  if (!alignedEngulfing && !alignedRejection && !alignedStructure) return null;
+
+  // Liquidity sweeps need actual reversal confirmation before the scanner fires.
+  if (alignedSweep && !alignedEngulfing && !alignedStructure) return null;
+
+  // If the local tape is still moving against the setup, do not force an entry from the higher-level trend.
+  if (!alignedMomentum && !alignedStructure && !alignedEngulfing) return null;
 
   const entry = last.close;
   const stopLoss = computeStopLoss(direction, candles);
   const takeProfit = computeTakeProfit(direction, entry, stopLoss);
+  const takeProfit2 = computeSecondaryTakeProfit(direction, entry, stopLoss);
 
   // Sanity: TP must be in the right direction
   if (direction === 'buy' && takeProfit <= entry) return null;
   if (direction === 'sell' && takeProfit >= entry) return null;
+  if (direction === 'buy' && takeProfit2 <= takeProfit) return null;
+  if (direction === 'sell' && takeProfit2 >= takeProfit) return null;
 
   // Sanity: SL must be on the correct side
   if (direction === 'buy' && stopLoss >= entry) return null;
@@ -560,9 +640,10 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
     entry,
     stopLoss,
     takeProfit,
+    takeProfit2,
     score,
     confidenceScore: scoreToConfidence(score),
-    strategy: deriveStrategy(trend, sweep),
+    strategy: deriveStrategy(direction, sweep),
     confirmations,
     confirmationLabels: buildConfirmationLabels(confirmations),
   };
@@ -597,10 +678,12 @@ export function analyzePotentialTrade(symbol: string, candles: Candle[]): Potent
   const rejection = detectRejection(last);
   const structure = detectStructureBreak(candles);
 
-  const alignedSweep = sweep && ((direction === 'buy' && sweep.type === 'sweep_low') || (direction === 'sell' && sweep.type === 'sweep_high'));
-  const alignedRejection = rejection && ((direction === 'buy' && rejection === 'bullish_rejection') || (direction === 'sell' && rejection === 'bearish_rejection'));
-  const alignedEngulfing = engulfing && ((direction === 'buy' && engulfing === 'bullish') || (direction === 'sell' && engulfing === 'bearish'));
-  const alignedStructure = structure && ((direction === 'buy' && structure === 'bullish') || (direction === 'sell' && structure === 'bearish'));
+  const alignedSweep = isSweepAligned(direction, sweep);
+  const alignedRejection = isRejectionAligned(direction, rejection);
+  const alignedEngulfing = isEngulfingAligned(direction, engulfing);
+  const alignedStructure = isStructureAligned(direction, structure);
+  const recentMomentum = detectRecentMomentum(candles);
+  const alignedMomentum = (direction === 'buy' && recentMomentum === 'bullish') || (direction === 'sell' && recentMomentum === 'bearish');
 
   let probability = 20;
   if (pullback) probability += 15;
@@ -610,6 +693,7 @@ export function analyzePotentialTrade(symbol: string, candles: Candle[]): Potent
   if (alignedRejection) probability += 10;
   if (alignedEngulfing) probability += 10;
   if (alignedStructure) probability += 5;
+  if (alignedMomentum) probability += 5;
 
   if (!directionalZone && !directionalFvg && !pullback) {
     return null;
@@ -671,6 +755,7 @@ export function analyzePotentialTrade(symbol: string, candles: Candle[]): Potent
   const entry = currentPrice;
   const stopLoss = computeStopLoss(direction, candles);
   const takeProfit = computeTakeProfit(direction, entry, stopLoss);
+  const takeProfit2 = computeSecondaryTakeProfit(direction, entry, stopLoss);
 
   return {
     symbol,
@@ -679,8 +764,9 @@ export function analyzePotentialTrade(symbol: string, candles: Candle[]): Potent
     entry,
     stopLoss,
     takeProfit,
+    takeProfit2,
     activationProbability: Math.min(95, probability),
-    strategy: `${deriveStrategy(trend, sweep)} Watchlist`,
+    strategy: `${deriveStrategy(direction, sweep)} Watchlist`,
     narrative: buildPotentialNarrative(direction, currentPrice, contextLabels, requiredTriggers.slice(0, 3)),
     fulfilledConditions,
     requiredTriggers,
