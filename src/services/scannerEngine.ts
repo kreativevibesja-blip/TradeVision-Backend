@@ -45,6 +45,19 @@ export interface TradeSetup {
   confirmationLabels: string[];
 }
 
+export interface SwingPoint {
+  type: 'high' | 'low';
+  price: number;
+  index: number;
+}
+
+export interface PriceZone {
+  type: 'supply' | 'demand';
+  top: number;
+  bottom: number;
+  distanceToPrice: number;
+}
+
 // ── 1. Trend Detection ──
 // Counts higher-highs/higher-lows vs lower-highs/lower-lows
 // over the last 20 candles to classify the trend.
@@ -287,7 +300,137 @@ function computeTakeProfit(direction: 'buy' | 'sell', entry: number, stopLoss: n
   return direction === 'buy' ? entry + risk * 2 : entry - risk * 2;
 }
 
-// ── 8. Main Analysis Function (single symbol) ──
+// ── 8. Look-left supply/demand detection ──
+
+export function findSwingHighsLows(candles: Candle[]): SwingPoint[] {
+  const swings: SwingPoint[] = [];
+
+  for (let index = 2; index < candles.length - 2; index++) {
+    const current = candles[index];
+
+    if (
+      current.high > candles[index - 1].high &&
+      current.high > candles[index - 2].high &&
+      current.high > candles[index + 1].high &&
+      current.high > candles[index + 2].high
+    ) {
+      swings.push({ type: 'high', price: current.high, index });
+    }
+
+    if (
+      current.low < candles[index - 1].low &&
+      current.low < candles[index - 2].low &&
+      current.low < candles[index + 1].low &&
+      current.low < candles[index + 2].low
+    ) {
+      swings.push({ type: 'low', price: current.low, index });
+    }
+  }
+
+  return swings;
+}
+
+export function buildZones(candles: Candle[], currentPrice: number): PriceZone[] {
+  const swings = findSwingHighsLows(candles);
+  const zones: PriceZone[] = [];
+
+  for (const swing of swings) {
+    const baseCandle = candles[swing.index];
+
+    if (swing.type === 'high') {
+      const top = Math.max(baseCandle.high, baseCandle.open, baseCandle.close);
+      const bottom = Math.min(baseCandle.open, baseCandle.close);
+      zones.push({
+        type: 'supply',
+        top,
+        bottom,
+        distanceToPrice: Math.min(Math.abs(currentPrice - top), Math.abs(currentPrice - bottom)),
+      });
+    }
+
+    if (swing.type === 'low') {
+      const top = Math.max(baseCandle.open, baseCandle.close);
+      const bottom = Math.min(baseCandle.low, baseCandle.open, baseCandle.close);
+      zones.push({
+        type: 'demand',
+        top,
+        bottom,
+        distanceToPrice: Math.min(Math.abs(currentPrice - top), Math.abs(currentPrice - bottom)),
+      });
+    }
+  }
+
+  return zones.sort((left, right) => left.distanceToPrice - right.distanceToPrice);
+}
+
+export function isNearZone(currentPrice: number, zones: PriceZone[], bufferRatio = 0.0015): PriceZone | null {
+  for (const zone of zones) {
+    const dynamicBuffer = Math.max(currentPrice * bufferRatio, Math.abs(zone.top - zone.bottom) * 0.2);
+
+    if (currentPrice >= zone.bottom - dynamicBuffer && currentPrice <= zone.top + dynamicBuffer) {
+      return zone;
+    }
+  }
+
+  return null;
+}
+
+function isTooCloseToOpposingZone(
+  direction: 'buy' | 'sell',
+  entry: number,
+  zones: PriceZone[],
+  thresholdRatio = 0.002,
+): PriceZone | null {
+  const threshold = Math.max(entry * thresholdRatio, 0.0005);
+
+  for (const zone of zones) {
+    if (direction === 'buy' && zone.type === 'supply' && zone.bottom >= entry) {
+      const distance = zone.bottom - entry;
+      if (distance <= threshold) {
+        return zone;
+      }
+    }
+
+    if (direction === 'sell' && zone.type === 'demand' && zone.top <= entry) {
+      const distance = entry - zone.top;
+      if (distance <= threshold) {
+        return zone;
+      }
+    }
+  }
+
+  return null;
+}
+
+export function zoneFilter(signal: Pick<TradeSetup, 'symbol' | 'direction' | 'entry'>, candles: Candle[]) {
+  const lookLeftCandles = candles.slice(-Math.min(500, candles.length));
+  const zones = buildZones(lookLeftCandles, signal.entry);
+  const currentZone = isNearZone(signal.entry, zones);
+
+  if (currentZone) {
+    if (signal.direction === 'buy' && currentZone.type === 'supply') {
+      return { valid: false, reason: 'Buying into supply zone' };
+    }
+
+    if (signal.direction === 'sell' && currentZone.type === 'demand') {
+      return { valid: false, reason: 'Selling into demand zone' };
+    }
+  }
+
+  const opposingZoneTooClose = isTooCloseToOpposingZone(signal.direction, signal.entry, zones);
+  if (opposingZoneTooClose) {
+    return {
+      valid: false,
+      reason: signal.direction === 'buy'
+        ? 'Buy entry is too close to overhead supply'
+        : 'Sell entry is too close to underlying demand',
+    };
+  }
+
+  return { valid: true, reason: null as string | null };
+}
+
+// ── 9. Main Analysis Function (single symbol) ──
 // Pure logic — no AI, no network calls. Just candles in, setup out.
 
 export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | null {
@@ -336,7 +479,7 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
 
   const confirmations: SetupConfirmations = { sweep, engulfing, rejection, structure };
 
-  return {
+  const candidateSetup: TradeSetup = {
     symbol,
     direction,
     entry,
@@ -348,4 +491,12 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
     confirmations,
     confirmationLabels: buildConfirmationLabels(confirmations),
   };
+
+  const zoneCheck = zoneFilter(candidateSetup, candles);
+  if (!zoneCheck.valid) {
+    console.log(`[scanner-engine] Blocked ${symbol} ${direction.toUpperCase()} by zone filter: ${zoneCheck.reason}`);
+    return null;
+  }
+
+  return candidateSetup;
 }

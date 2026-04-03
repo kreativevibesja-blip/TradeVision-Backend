@@ -1,5 +1,5 @@
 import { supabase } from '../lib/supabase';
-import { fetchMarketDataForLiveChart, resolveLiveChartSymbol } from './marketData';
+import { fetchMarketDataForLiveChart, listLiveChartSymbols, resolveLiveChartSymbol } from './marketData';
 import { analyzeMarket, type Candle } from './scannerEngine';
 import { sendPushToUser } from './pushService';
 
@@ -70,12 +70,14 @@ const SESSION_WINDOWS: Record<SessionType, SessionWindow> = {
 
 // ── Scanner symbols and timeframe ──
 
-const SCANNER_SYMBOLS = [
-  'EURUSD',
-  'GBPUSD',
-  'USDJPY',
-  'XAUUSD',
-];
+const SCANNER_SYMBOLS = listLiveChartSymbols()
+  .filter((symbol) =>
+    symbol.category === 'forex-major' ||
+    symbol.category === 'forex-minor' ||
+    symbol.category === 'commodities' ||
+    symbol.category === 'indices'
+  )
+  .map((symbol) => symbol.id);
 
 const SCANNER_TIMEFRAME = 'M15';
 
