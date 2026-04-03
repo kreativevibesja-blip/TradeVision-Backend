@@ -838,7 +838,7 @@ export async function checkZoneProximityAlerts(userId: string): Promise<ScannerA
 
   for (const result of activeResults as ScanResult[]) {
     try {
-      const latestCandles = await getCachedCandles(result.symbol, 'M1', 1);
+      const latestCandles = await getCachedCandles(result.symbol, 'M5', 1);
       if (latestCandles.length === 0) {
         continue;
       }

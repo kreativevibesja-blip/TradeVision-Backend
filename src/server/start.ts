@@ -1,4 +1,3 @@
-import { startCandleEngine } from '../lib/deriv/engine';
 import { DERIV_SCANNER_SYMBOL_IDS } from '../lib/deriv/symbols';
 import { startDerivStream } from '../lib/deriv/ws';
 import { startLiveLifecycleMonitor } from '../lib/scanner/liveLifecycle';
@@ -14,7 +13,6 @@ export function startSystem() {
   started = true;
   startDerivStream(DERIV_SCANNER_SYMBOL_IDS);
   startLiveLifecycleMonitor();
-  startCandleEngine();
   startScanner();
   console.log('[system] market stream and scanner running');
 }

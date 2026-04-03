@@ -19,7 +19,6 @@ export interface DerivLiveChartMarketData {
 
 const SUPPORTED_GRANULARITIES = new Set([60, 300, 900, 1800, 3600, 14400, 86400]);
 const DB_TIMEFRAME_MAP: Record<number, string> = {
-  60: 'M1',
   300: 'M5',
   900: 'M15',
 };
