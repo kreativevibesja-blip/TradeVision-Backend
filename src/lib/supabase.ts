@@ -1,14 +1,74 @@
 import { createClient } from '@supabase/supabase-js';
 import { config } from '../config';
+import { getLivePlatformMetricsSnapshot, recordAnalysisCreated, recordQueueJobState } from './livePlatformMetrics';
 
 if (!config.supabase.url || !config.supabase.serviceRoleKey) {
   throw new Error('Missing Supabase backend configuration. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.');
 }
 
+const SUPABASE_REQUEST_TIMEOUT_MS = Math.max(1000, config.supabase.requestTimeoutMs);
+
+const extractErrorText = (error: unknown) => {
+  if (!error) {
+    return '';
+  }
+
+  if (error instanceof Error) {
+    return `${error.name} ${error.message} ${error.stack ?? ''}`.toLowerCase();
+  }
+
+  return String(error).toLowerCase();
+};
+
+const isTransientSupabaseError = (error: unknown) => {
+  const text = extractErrorText(error);
+  return [
+    'und_err_headers_timeout',
+    'headers timeout error',
+    'fetch failed',
+    'etimedout',
+    'econnreset',
+    'econnrefused',
+    'socket hang up',
+    'network error',
+    'aborterror',
+  ].some((token) => text.includes(token));
+};
+
+const supabaseFetch: typeof fetch = async (input, init) => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(new Error(`Supabase request timed out after ${SUPABASE_REQUEST_TIMEOUT_MS}ms`)), SUPABASE_REQUEST_TIMEOUT_MS);
+  const abortListener = () => controller.abort();
+
+  if (init?.signal) {
+    if (init.signal.aborted) {
+      clearTimeout(timeoutId);
+      controller.abort();
+    } else {
+      init.signal.addEventListener('abort', abortListener, { once: true });
+    }
+  }
+
+  try {
+    return await fetch(input, {
+      ...init,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeoutId);
+    if (init?.signal) {
+      init.signal.removeEventListener('abort', abortListener);
+    }
+  }
+};
+
 export const supabase = createClient(config.supabase.url, config.supabase.serviceRoleKey, {
   auth: {
     persistSession: false,
     autoRefreshToken: false,
+  },
+  global: {
+    fetch: supabaseFetch,
   },
 });
 
@@ -301,10 +361,27 @@ export interface LivePlatformMetrics {
   totalAnalysesToday: number;
 }
 
+export class DatabaseOperationError extends Error {
+  context: string;
+  transient: boolean;
+  originalError: unknown;
+
+  constructor(context: string, error: unknown) {
+    super('Database operation failed');
+    this.name = 'DatabaseOperationError';
+    this.context = context;
+    this.transient = isTransientSupabaseError(error);
+    this.originalError = error;
+  }
+}
+
 const logDbError = (context: string, error: unknown) => {
   console.error(`Database error: ${context}`, error);
-  throw new Error('Database operation failed');
+  throw new DatabaseOperationError(context, error);
 };
+
+const isTransientDatabaseOperationError = (error: unknown): error is DatabaseOperationError =>
+  error instanceof DatabaseOperationError && error.transient;
 
 const maybeSingle = async <T>(context: string, query: any): Promise<T | null> => {
   const { data, error } = await query;
@@ -543,8 +620,11 @@ export const countAnalysesForUserSince = (userId: string, fromIso: string) =>
     query.eq('userId', userId).gte('createdAt', fromIso)
   );
 
-export const createAnalysis = (values: Partial<AnalysisRecord> & Pick<AnalysisRecord, 'id' | 'jobId' | 'userId' | 'imageUrl' | 'pair' | 'timeframe'>) =>
-  insertSingle<AnalysisRecord>('createAnalysis', ANALYSIS_TABLE, values);
+export const createAnalysis = async (values: Partial<AnalysisRecord> & Pick<AnalysisRecord, 'id' | 'jobId' | 'userId' | 'imageUrl' | 'pair' | 'timeframe'>) => {
+  const analysis = await insertSingle<AnalysisRecord>('createAnalysis', ANALYSIS_TABLE, values);
+  recordAnalysisCreated(analysis.createdAt);
+  return analysis;
+};
 
 export const updateAnalysis = (id: string, values: Partial<AnalysisRecord>) =>
   updateSingle<AnalysisRecord>('updateAnalysis', ANALYSIS_TABLE, values, (query) => query.eq('id', id));
@@ -926,7 +1006,14 @@ export const listActiveAnnouncements = () =>
   many<AnnouncementRecord>(
     'listActiveAnnouncements',
     supabase.from(ANNOUNCEMENT_TABLE).select('*').eq('isActive', true).order('createdAt', { ascending: false })
-  );
+  ).catch((error) => {
+    if (isTransientDatabaseOperationError(error)) {
+      console.warn('[announcements] returning empty active announcements because Supabase is timing out');
+      return [];
+    }
+
+    throw error;
+  });
 
 export const createAnnouncementRecord = (values: Pick<AnnouncementRecord, 'title' | 'content'>) =>
   insertSingle<AnnouncementRecord>('createAnnouncementRecord', ANNOUNCEMENT_TABLE, values);
@@ -1350,12 +1437,15 @@ export interface QueueJobRecord {
   completedAt: string | null;
 }
 
-export const createQueueJob = (values: Pick<QueueJobRecord, 'userId' | 'priority' | 'inputData'> & { analysisId?: string }) =>
-  insertSingle<QueueJobRecord>('createQueueJob', QUEUE_TABLE, {
+export const createQueueJob = async (values: Pick<QueueJobRecord, 'userId' | 'priority' | 'inputData'> & { analysisId?: string }) => {
+  const job = await insertSingle<QueueJobRecord>('createQueueJob', QUEUE_TABLE, {
     status: 'queued',
     retryCount: 0,
     ...values,
   });
+  recordQueueJobState(job.id, job.status);
+  return job;
+};
 
 export const getQueueJobById = (id: string) =>
   maybeSingle<QueueJobRecord>('getQueueJobById', supabase.from(QUEUE_TABLE).select('*').eq('id', id).maybeSingle());
@@ -1381,11 +1471,18 @@ export const cancelQueueJobForUser = async (id: string, userId: string): Promise
     logDbError('cancelQueueJobForUser', error);
   }
 
+  if (data) {
+    recordQueueJobState((data as QueueJobRecord).id, (data as QueueJobRecord).status);
+  }
+
   return (data as QueueJobRecord | null) ?? null;
 };
 
-export const updateQueueJob = (id: string, values: Partial<QueueJobRecord>) =>
-  updateSingle<QueueJobRecord>('updateQueueJob', QUEUE_TABLE, values, (query) => query.eq('id', id));
+export const updateQueueJob = async (id: string, values: Partial<QueueJobRecord>) => {
+  const job = await updateSingle<QueueJobRecord>('updateQueueJob', QUEUE_TABLE, values, (query) => query.eq('id', id));
+  recordQueueJobState(job.id, job.status);
+  return job;
+};
 
 /** Atomically claim the next queued job (highest priority first, then FIFO). */
 export const claimNextQueueJob = async (): Promise<QueueJobRecord | null> => {
@@ -1414,6 +1511,8 @@ export const claimNextQueueJob = async (): Promise<QueueJobRecord | null> => {
   if (claimError || !claimed) {
     return null;
   }
+
+  recordQueueJobState((claimed as QueueJobRecord).id, (claimed as QueueJobRecord).status);
 
   return claimed as QueueJobRecord;
 };
@@ -1486,7 +1585,12 @@ export const upsertVisitorPresence = async (values: {
     .maybeSingle();
 
   if (error) {
-    logDbError('upsertVisitorPresence', error);
+    const dbError = new DatabaseOperationError('upsertVisitorPresence', error);
+    if (dbError.transient) {
+      console.warn('[presence] skipped visitor presence upsert because Supabase is timing out');
+      return null;
+    }
+    throw dbError;
   }
 
   return (data as VisitorPresenceRecord | null) ?? null;
@@ -1513,42 +1617,20 @@ export const upsertVisitorDailyRecord = async (values: {
     .maybeSingle();
 
   if (error) {
-    logDbError('upsertVisitorDailyRecord', error);
+    const dbError = new DatabaseOperationError('upsertVisitorDailyRecord', error);
+    if (dbError.transient) {
+      console.warn('[presence] skipped visitor daily upsert because Supabase is timing out');
+      return null;
+    }
+    throw dbError;
   }
 
   return (data as VisitorDailyRecord | null) ?? null;
 };
 
 export const getLivePlatformMetrics = async (todayDate: string, todayStartIso: string, activeSinceIso: string): Promise<LivePlatformMetrics> => {
-  const [currentVisitorsCount, totalVisitorsTodayCount, activeAnalysesCount, totalAnalysesTodayCount] = await Promise.all([
-    countRows(
-      'getLivePlatformMetrics currentVisitors',
-      VISITOR_PRESENCE_TABLE,
-      (query) => query.gte('lastSeenAt', activeSinceIso)
-    ),
-    countRows(
-      'getLivePlatformMetrics totalVisitorsToday',
-      VISITOR_DAILY_TABLE,
-      (query) => query.eq('visitorDate', todayDate)
-    ),
-    countRows(
-      'getLivePlatformMetrics activeAnalyses',
-      QUEUE_TABLE,
-      (query) => query.in('status', ['queued', 'processing'])
-    ),
-    countRows(
-      'getLivePlatformMetrics totalAnalysesToday',
-      ANALYSIS_TABLE,
-      (query) => query.gte('createdAt', todayStartIso)
-    ),
-  ]);
-
-  return {
-    currentVisitors: currentVisitorsCount,
-    totalVisitorsToday: totalVisitorsTodayCount,
-    activeAnalyses: activeAnalysesCount,
-    totalAnalysesToday: totalAnalysesTodayCount,
-  };
+  void todayStartIso;
+  return getLivePlatformMetricsSnapshot(todayDate, activeSinceIso);
 };
 
 // ── AutoTrader: Trade signals ──

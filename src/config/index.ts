@@ -46,6 +46,7 @@ export const config = {
     serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || '',
     jwtSecret: process.env.SUPABASE_JWT_SECRET || '',
     storageBucket: process.env.SUPABASE_STORAGE_BUCKET || 'chart-markups',
+    requestTimeoutMs: parseInt(process.env.SUPABASE_REQUEST_TIMEOUT_MS || '12000', 10),
   },
 
   admin: {
