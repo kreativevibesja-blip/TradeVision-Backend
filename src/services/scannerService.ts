@@ -70,6 +70,10 @@ export interface PotentialTrade {
   contextLabels: string[];
 }
 
+interface LifecycleProcessingOptions {
+  skipApproachAlerts?: boolean;
+}
+
 // ── Table names ──
 
 const SCANNER_SESSION_TABLE = 'ScannerSession';
@@ -98,8 +102,13 @@ const SCANNER_SYMBOLS_BY_SESSION: Record<SessionType, readonly string[]> = {
 };
 
 const SCANNER_TIMEFRAME = 'M15';
+const LIVE_RESULT_CACHE_SYNC_MS = 20_000;
 
 type ScanResultScope = 'all' | 'current' | 'history';
+
+const liveResultCache = new Map<string, Map<string, ScanResult>>();
+let liveResultCacheSyncedAt = 0;
+let liveResultCacheSyncPromise: Promise<void> | null = null;
 
 // ── Helpers ──
 
@@ -356,6 +365,8 @@ async function updateScanResult(
     .eq('id', id);
 
   if (error) throw new Error(error.message);
+
+  mutateLiveResultCache(id, updates);
 }
 
 async function insertScanResult(result: Omit<ScanResult, 'id' | 'createdAt'>): Promise<ScanResult> {
@@ -366,7 +377,88 @@ async function insertScanResult(result: Omit<ScanResult, 'id' | 'createdAt'>): P
     .single();
 
   if (error) throw new Error(error.message);
+  registerLiveResultInCache(data as ScanResult);
   return data as ScanResult;
+}
+
+function registerLiveResultInCache(result: ScanResult) {
+  if (result.status !== 'active' && result.status !== 'triggered') {
+    return;
+  }
+
+  const symbolBucket = liveResultCache.get(result.symbol) ?? new Map<string, ScanResult>();
+  symbolBucket.set(result.id, result);
+  liveResultCache.set(result.symbol, symbolBucket);
+}
+
+function removeLiveResultFromCache(result: ScanResult) {
+  const symbolBucket = liveResultCache.get(result.symbol);
+  if (!symbolBucket) {
+    return;
+  }
+
+  symbolBucket.delete(result.id);
+  if (symbolBucket.size === 0) {
+    liveResultCache.delete(result.symbol);
+  }
+}
+
+function mutateLiveResultCache(
+  resultId: string,
+  updates: Partial<Pick<ScanResult, 'status' | 'closeReason' | 'triggeredAt' | 'closedAt'>>,
+) {
+  for (const [, symbolBucket] of liveResultCache) {
+    const existing = symbolBucket.get(resultId);
+    if (!existing) {
+      continue;
+    }
+
+    const nextResult: ScanResult = { ...existing, ...updates };
+    if (nextResult.status === 'active' || nextResult.status === 'triggered') {
+      symbolBucket.set(resultId, nextResult);
+    } else {
+      symbolBucket.delete(resultId);
+      if (symbolBucket.size === 0) {
+        liveResultCache.delete(existing.symbol);
+      }
+    }
+    return;
+  }
+}
+
+async function syncLiveResultCache(force = false): Promise<void> {
+  const cacheIsFresh = !force && Date.now() - liveResultCacheSyncedAt < LIVE_RESULT_CACHE_SYNC_MS;
+  if (cacheIsFresh) {
+    return;
+  }
+
+  if (liveResultCacheSyncPromise) {
+    return liveResultCacheSyncPromise;
+  }
+
+  liveResultCacheSyncPromise = (async () => {
+    const { data, error } = await supabase
+      .from(SCAN_RESULT_TABLE)
+      .select('*')
+      .in('status', ['active', 'triggered'])
+      .order('createdAt', { ascending: false })
+      .limit(500);
+
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    liveResultCache.clear();
+    for (const result of (data ?? []) as ScanResult[]) {
+      registerLiveResultInCache(result);
+    }
+
+    liveResultCacheSyncedAt = Date.now();
+  })().finally(() => {
+    liveResultCacheSyncPromise = null;
+  });
+
+  return liveResultCacheSyncPromise;
 }
 
 async function insertAlert(alert: { userId: string; scanResultId?: string; message: string; type: AlertType }): Promise<ScannerAlert> {
@@ -385,7 +477,11 @@ async function insertAlert(alert: { userId: string; scanResultId?: string; messa
   return data as ScannerAlert;
 }
 
-async function processResultLifecycle(result: ScanResult, currentPrice: number): Promise<ScannerAlert[]> {
+async function processResultLifecycle(
+  result: ScanResult,
+  currentPrice: number,
+  options: LifecycleProcessingOptions = {},
+): Promise<ScannerAlert[]> {
   const alerts: ScannerAlert[] = [];
   const decimals = result.entry >= 100 ? 2 : 5;
 
@@ -422,7 +518,7 @@ async function processResultLifecycle(result: ScanResult, currentPrice: number):
       return alerts;
     }
 
-    if (proximityRatio <= 0.3 && !(await hasRecentApproachAlert(result.id))) {
+    if (!options.skipApproachAlerts && proximityRatio <= 0.3 && !(await hasRecentApproachAlert(result.id))) {
       const alert = await insertAlert({
         userId: result.userId,
         scanResultId: result.id,
@@ -729,23 +825,23 @@ export async function checkZoneProximityAlerts(userId: string): Promise<ScannerA
 }
 
 export async function processLivePriceUpdate(symbol: string, currentPrice: number): Promise<number> {
-  const { data, error } = await supabase
-    .from(SCAN_RESULT_TABLE)
-    .select('*')
-    .eq('symbol', symbol)
-    .in('status', ['active', 'triggered'])
-    .order('createdAt', { ascending: false })
-    .limit(50);
-
-  if (error) {
-    throw new Error(error.message);
+  if (!liveResultCacheSyncedAt) {
+    await syncLiveResultCache(true);
+  } else if (Date.now() - liveResultCacheSyncedAt >= LIVE_RESULT_CACHE_SYNC_MS) {
+    void syncLiveResultCache().catch((error) => {
+      console.error('[scanner-live-lifecycle] cache sync failed:', error);
+    });
   }
 
-  const results = (data ?? []) as ScanResult[];
+  const results = Array.from(liveResultCache.get(symbol)?.values() ?? []);
+  if (results.length === 0) {
+    return 0;
+  }
+
   let updates = 0;
 
   for (const result of results) {
-    const alerts = await processResultLifecycle(result, currentPrice);
+    const alerts = await processResultLifecycle(result, currentPrice, { skipApproachAlerts: true });
     if (alerts.length > 0) {
       updates += 1;
     }
