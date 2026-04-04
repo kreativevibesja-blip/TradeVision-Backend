@@ -44,6 +44,7 @@ export interface ScanResult {
   closedAt: string | null;
   rank: number | null;
   createdAt: string;
+  currentPrice?: number | null;
 }
 
 export interface ScannerAlert {
@@ -496,6 +497,26 @@ async function loadLatestScannerPrice(symbol: string): Promise<number | null> {
   return candles[candles.length - 1]?.close ?? null;
 }
 
+async function attachLivePricesToResults(results: ScanResult[]): Promise<ScanResult[]> {
+  const openResults = results.filter((result) => result.status === 'active' || result.status === 'triggered');
+  if (openResults.length === 0) {
+    return results.map((result) => ({ ...result, currentPrice: result.currentPrice ?? null }));
+  }
+
+  const uniqueSymbols = Array.from(new Set(openResults.map((result) => result.symbol)));
+  const latestPricePairs = await Promise.all(
+    uniqueSymbols.map(async (symbol) => [symbol, await loadLatestScannerPrice(symbol)] as const),
+  );
+  const latestPriceBySymbol = new Map<string, number | null>(latestPricePairs);
+
+  return results.map((result) => ({
+    ...result,
+    currentPrice: (result.status === 'active' || result.status === 'triggered')
+      ? (latestPriceBySymbol.get(result.symbol) ?? null)
+      : (result.currentPrice ?? null),
+  }));
+}
+
 async function hasRecentApproachAlert(scanResultId: string): Promise<boolean> {
   const cutoff = new Date(Date.now() - 30 * 60_000).toISOString();
   const { count, error } = await supabase
@@ -592,7 +613,8 @@ export async function getScanResults(
   if (error) throw new Error(error.message);
 
   const results = (data ?? []) as ScanResult[];
-  return scope === 'current' ? dedupeOpenResultsBySymbol(results).slice(0, limit) : results;
+  const scopedResults = scope === 'current' ? dedupeOpenResultsBySymbol(results).slice(0, limit) : results;
+  return attachLivePricesToResults(scopedResults);
 }
 
 export async function getAlertsForUser(
