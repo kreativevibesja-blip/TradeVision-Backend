@@ -1021,7 +1021,7 @@ const MAX_TRADES_PER_DAY = 10;
 const MAX_TRADES_PER_DAY_BY_SESSION: Record<SessionType, number> = {
   london: 3,
   newyork: 3,
-  volatility: 10,
+  volatility: 5,
 };
 
 async function getTodayTradeCount(userId: string, sessionType?: SessionType): Promise<number> {
