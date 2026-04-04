@@ -1072,15 +1072,91 @@ function hasStrongClosure(direction: 'buy' | 'sell', candles: Candle[]): boolean
   return last.close < last.open && last.close <= last.high - range * 0.3 && last.close < prev.low;
 }
 
+function isZoneRetestStillTradable(currentPrice: number, zone: PriceZone, candles: Candle[]): boolean {
+  const zoneHeight = Math.max(Math.abs(zone.top - zone.bottom), 0.0001);
+  const baselineRange = Math.max(averageRange(candles, 12), currentPrice * 0.0004);
+  const outsideDistance = currentPrice < zone.bottom
+    ? zone.bottom - currentPrice
+    : currentPrice > zone.top
+      ? currentPrice - zone.top
+      : 0;
+  const maxTradableDistance = Math.max(zoneHeight * 0.35, baselineRange * 0.45);
+
+  return outsideDistance <= maxTradableDistance;
+}
+
+function findActiveReversalZone(currentPrice: number, zones: PriceZone[], candles: Candle[]): PriceZone | null {
+  const baselineRange = Math.max(averageRange(candles, 12), currentPrice * 0.0004);
+
+  for (const zone of zones) {
+    const zoneHeight = Math.max(Math.abs(zone.top - zone.bottom), 0.0001);
+    const dynamicBuffer = Math.max(zoneHeight * 0.12, baselineRange * 0.3, currentPrice * 0.00045);
+
+    if (currentPrice >= zone.bottom - dynamicBuffer && currentPrice <= zone.top + dynamicBuffer) {
+      return zone;
+    }
+  }
+
+  return null;
+}
+
+interface PatternPoint {
+  candle: Candle;
+  index: number;
+}
+
+function isInDemandReversalBand(point: PatternPoint, zone: PriceZone): boolean {
+  const zoneHeight = Math.max(zone.top - zone.bottom, 0.0001);
+  const lowerBandCeiling = zone.bottom + zoneHeight * 0.55;
+  return point.candle.low >= zone.bottom * 0.9985 && point.candle.low <= lowerBandCeiling;
+}
+
+function isInSupplyReversalBand(point: PatternPoint, zone: PriceZone): boolean {
+  const zoneHeight = Math.max(zone.top - zone.bottom, 0.0001);
+  const upperBandFloor = zone.top - zoneHeight * 0.55;
+  return point.candle.high <= zone.top * 1.0015 && point.candle.high >= upperBandFloor;
+}
+
+function hasMeaningfulSwingBetween(
+  candles: Candle[],
+  firstIndex: number,
+  secondIndex: number,
+  direction: 'buy' | 'sell',
+  minimumDepth: number,
+): boolean {
+  if (secondIndex - firstIndex < 2) {
+    return false;
+  }
+
+  const middle = candles.slice(firstIndex + 1, secondIndex);
+  if (middle.length === 0) {
+    return false;
+  }
+
+  if (direction === 'buy') {
+    const firstLow = candles[firstIndex].low;
+    const secondLow = candles[secondIndex].low;
+    const neckline = Math.max(...middle.map((candle) => candle.high));
+    return neckline - Math.max(firstLow, secondLow) >= minimumDepth;
+  }
+
+  const firstHigh = candles[firstIndex].high;
+  const secondHigh = candles[secondIndex].high;
+  const neckline = Math.min(...middle.map((candle) => candle.low));
+  return Math.min(firstHigh, secondHigh) - neckline >= minimumDepth;
+}
+
 function detectDoubleBottom(candles: Candle[], zone: PriceZone | null): boolean {
   if (!zone || zone.type !== 'demand' || candles.length < 8) {
     return false;
   }
 
-  const recent = candles.slice(-10);
+  const recent = candles.slice(-12);
+  const baselineRange = Math.max(averageRange(candles, 12), 0.0001);
+  const zoneHeight = Math.max(Math.abs(zone.top - zone.bottom), 0.0001);
   const lows = recent
     .map((candle, index) => ({ candle, index }))
-    .filter(({ candle }) => candle.low <= zone.top && candle.low >= zone.bottom * 0.995)
+    .filter((point) => isInDemandReversalBand(point, zone))
     .sort((left, right) => left.candle.low - right.candle.low);
 
   if (lows.length < 2) {
@@ -1088,9 +1164,26 @@ function detectDoubleBottom(candles: Candle[], zone: PriceZone | null): boolean 
   }
 
   const first = lows[0];
-  const second = lows.find((item) => Math.abs(item.candle.low - first.candle.low) <= Math.max(Math.abs(zone.top - zone.bottom) * 0.35, first.candle.low * 0.0015) && Math.abs(item.index - first.index) >= 2);
+  const second = lows.find((item) => {
+    if (Math.abs(item.index - first.index) < 2) {
+      return false;
+    }
 
-  return Boolean(second);
+    const sameLevel = Math.abs(item.candle.low - first.candle.low) <= Math.max(zoneHeight * 0.25, baselineRange * 0.35, first.candle.low * 0.001);
+    const meaningfulSwing = hasMeaningfulSwingBetween(recent, Math.min(first.index, item.index), Math.max(first.index, item.index), 'buy', Math.max(zoneHeight * 0.45, baselineRange * 0.9));
+
+    return sameLevel && meaningfulSwing;
+  });
+
+  if (!second) {
+    return false;
+  }
+
+  const laterIndex = Math.max(first.index, second.index);
+  const neckline = Math.max(...recent.slice(Math.min(first.index, second.index) + 1, laterIndex).map((candle) => candle.high));
+  const last = recent[recent.length - 1];
+
+  return last.close >= neckline - baselineRange * 0.15;
 }
 
 function detectDoubleTop(candles: Candle[], zone: PriceZone | null): boolean {
@@ -1098,10 +1191,12 @@ function detectDoubleTop(candles: Candle[], zone: PriceZone | null): boolean {
     return false;
   }
 
-  const recent = candles.slice(-10);
+  const recent = candles.slice(-12);
+  const baselineRange = Math.max(averageRange(candles, 12), 0.0001);
+  const zoneHeight = Math.max(Math.abs(zone.top - zone.bottom), 0.0001);
   const highs = recent
     .map((candle, index) => ({ candle, index }))
-    .filter(({ candle }) => candle.high >= zone.bottom && candle.high <= zone.top * 1.005)
+    .filter((point) => isInSupplyReversalBand(point, zone))
     .sort((left, right) => right.candle.high - left.candle.high);
 
   if (highs.length < 2) {
@@ -1109,9 +1204,26 @@ function detectDoubleTop(candles: Candle[], zone: PriceZone | null): boolean {
   }
 
   const first = highs[0];
-  const second = highs.find((item) => Math.abs(item.candle.high - first.candle.high) <= Math.max(Math.abs(zone.top - zone.bottom) * 0.35, first.candle.high * 0.0015) && Math.abs(item.index - first.index) >= 2);
+  const second = highs.find((item) => {
+    if (Math.abs(item.index - first.index) < 2) {
+      return false;
+    }
 
-  return Boolean(second);
+    const sameLevel = Math.abs(item.candle.high - first.candle.high) <= Math.max(zoneHeight * 0.25, baselineRange * 0.35, first.candle.high * 0.001);
+    const meaningfulSwing = hasMeaningfulSwingBetween(recent, Math.min(first.index, item.index), Math.max(first.index, item.index), 'sell', Math.max(zoneHeight * 0.45, baselineRange * 0.9));
+
+    return sameLevel && meaningfulSwing;
+  });
+
+  if (!second) {
+    return false;
+  }
+
+  const laterIndex = Math.max(first.index, second.index);
+  const neckline = Math.min(...recent.slice(Math.min(first.index, second.index) + 1, laterIndex).map((candle) => candle.low));
+  const last = recent[recent.length - 1];
+
+  return last.close <= neckline + baselineRange * 0.15;
 }
 
 function findRecentDirectionalTargets(direction: 'buy' | 'sell', candles: Candle[], entry: number): number[] {
@@ -1234,9 +1346,9 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   const lookLeftCandles = candles.slice(-Math.min(500, candles.length));
   const zones = buildZones(lookLeftCandles, currentPrice);
   const gaps = buildFairValueGaps(lookLeftCandles, currentPrice);
-  const currentZone = isNearZone(currentPrice, zones, 0.0025);
-  const bullishReversal = detectDoubleBottom(candles, currentZone) && hasStrongClosure('buy', candles);
-  const bearishReversal = detectDoubleTop(candles, currentZone) && hasStrongClosure('sell', candles);
+  const currentZone = findActiveReversalZone(currentPrice, zones, candles);
+  const bullishReversal = Boolean(currentZone && isZoneRetestStillTradable(currentPrice, currentZone, candles) && detectDoubleBottom(candles, currentZone) && hasStrongClosure('buy', candles));
+  const bearishReversal = Boolean(currentZone && isZoneRetestStillTradable(currentPrice, currentZone, candles) && detectDoubleTop(candles, currentZone) && hasStrongClosure('sell', candles));
 
   if (trend === 'ranging' && !bullishReversal && !bearishReversal) return null;
 
@@ -1355,9 +1467,9 @@ export function analyzePotentialTrade(symbol: string, candles: Candle[]): Potent
   const lookLeftCandles = candles.slice(-Math.min(500, candles.length));
   const zones = buildZones(lookLeftCandles, currentPrice);
   const gaps = buildFairValueGaps(lookLeftCandles, currentPrice);
-  const currentZone = isNearZone(currentPrice, zones, 0.0025);
-  const bullishReversal = detectDoubleBottom(candles, currentZone) && hasStrongClosure('buy', candles);
-  const bearishReversal = detectDoubleTop(candles, currentZone) && hasStrongClosure('sell', candles);
+  const currentZone = findActiveReversalZone(currentPrice, zones, candles);
+  const bullishReversal = Boolean(currentZone && isZoneRetestStillTradable(currentPrice, currentZone, candles) && detectDoubleBottom(candles, currentZone) && hasStrongClosure('buy', candles));
+  const bearishReversal = Boolean(currentZone && isZoneRetestStillTradable(currentPrice, currentZone, candles) && detectDoubleTop(candles, currentZone) && hasStrongClosure('sell', candles));
 
   const candidates = analyzePotentialTrades(symbol, candles, {
     trend,
@@ -1394,9 +1506,9 @@ export function analyzePotentialTrades(
   const lookLeftCandles = candles.slice(-Math.min(500, candles.length));
   const zones = context?.zones ?? buildZones(lookLeftCandles, currentPrice);
   const gaps = context?.gaps ?? buildFairValueGaps(lookLeftCandles, currentPrice);
-  const currentZone = context?.currentZone ?? isNearZone(currentPrice, zones, 0.0025);
-  const bullishReversal = context?.bullishReversal ?? (detectDoubleBottom(candles, currentZone) && hasStrongClosure('buy', candles));
-  const bearishReversal = context?.bearishReversal ?? (detectDoubleTop(candles, currentZone) && hasStrongClosure('sell', candles));
+  const currentZone = context?.currentZone ?? findActiveReversalZone(currentPrice, zones, candles);
+  const bullishReversal = context?.bullishReversal ?? Boolean(currentZone && isZoneRetestStillTradable(currentPrice, currentZone, candles) && detectDoubleBottom(candles, currentZone) && hasStrongClosure('buy', candles));
+  const bearishReversal = context?.bearishReversal ?? Boolean(currentZone && isZoneRetestStillTradable(currentPrice, currentZone, candles) && detectDoubleTop(candles, currentZone) && hasStrongClosure('sell', candles));
 
   if (trend === 'ranging' && !bullishReversal && !bearishReversal) {
     return [];
