@@ -833,6 +833,14 @@ async function insertAlert(alert: { userId: string; scanResultId?: string; messa
   return data as ScannerAlert;
 }
 
+function getFinalTakeProfit(result: ScanResult): number {
+  if (result.takeProfit2 != null && Number.isFinite(result.takeProfit2)) {
+    return result.takeProfit2;
+  }
+
+  return result.takeProfit;
+}
+
 async function processResultLifecycle(
   result: ScanResult,
   priceWindow: number | LivePriceWindow,
@@ -910,9 +918,10 @@ async function processResultLifecycle(
   }
 
   if (result.status === 'triggered') {
+    const finalTakeProfit = getFinalTakeProfit(result);
     const hitTakeProfit = result.direction === 'buy'
-      ? highPrice >= result.takeProfit
-      : lowPrice <= result.takeProfit;
+      ? highPrice >= finalTakeProfit
+      : lowPrice <= finalTakeProfit;
 
     const hitStopLoss = result.direction === 'buy'
       ? lowPrice <= result.stopLoss
@@ -930,16 +939,16 @@ async function processResultLifecycle(
         userId: result.userId,
         scanResultId: result.id,
         message: hitTakeProfit
-          ? `${result.symbol} trade closed in profit — take profit hit at ${currentPrice.toFixed(decimals)}`
+          ? `${result.symbol} trade closed in profit — final take profit hit at ${currentPrice.toFixed(decimals)}`
           : `${result.symbol} trade closed at stop loss — SL hit at ${currentPrice.toFixed(decimals)}`,
         type: hitTakeProfit ? 'trade' : 'warning',
       });
       alerts.push(alert);
 
       sendPushToUser(result.userId, {
-        title: hitTakeProfit ? 'Take Profit Hit' : 'Stop Loss Hit',
+        title: hitTakeProfit ? 'Final Take Profit Hit' : 'Stop Loss Hit',
         body: hitTakeProfit
-          ? `${result.symbol} closed in profit.`
+          ? `${result.symbol} closed in profit at the final target.`
           : `${result.symbol} closed at stop loss.`,
         tag: `closed-${result.id}`,
         url: '/dashboard/scanner',
