@@ -95,10 +95,10 @@ type PotentialSetupMode = 'trend' | 'counter';
 // Counts higher-highs/higher-lows vs lower-highs/lower-lows
 // over the last 20 candles to classify the trend.
 
-export function detectTrend(candles: Candle[]): TrendDirection {
-  if (candles.length < 21) return 'ranging';
+function detectTrendFromLookback(candles: Candle[], lookback: number, minimumMoves: number): TrendDirection {
+  if (candles.length < lookback + 1) return 'ranging';
 
-  const recent = candles.slice(-20);
+  const recent = candles.slice(-lookback);
 
   let higherHighs = 0;
   let higherLows = 0;
@@ -112,10 +112,18 @@ export function detectTrend(candles: Candle[]): TrendDirection {
     if (recent[i].low < recent[i - 1].low) lowerLows++;
   }
 
-  if (higherHighs > 10 && higherLows > 10) return 'bullish';
-  if (lowerHighs > 10 && lowerLows > 10) return 'bearish';
+  if (higherHighs > minimumMoves && higherLows > minimumMoves) return 'bullish';
+  if (lowerHighs > minimumMoves && lowerLows > minimumMoves) return 'bearish';
 
   return 'ranging';
+}
+
+export function detectTrend(candles: Candle[]): TrendDirection {
+  return detectTrendFromLookback(candles, 20, 10);
+}
+
+function detectContextTrend(candles: Candle[]): TrendDirection {
+  return detectTrendFromLookback(candles, 48, 24);
 }
 
 // ── 2. Liquidity Sweep Detection ──
@@ -385,6 +393,39 @@ function isDirectionalReactionFromArea(
   }
 
   return latest.close < area.bottom && area.bottom - latest.close >= baselineRange * 0.35;
+}
+
+function hasPoiReclaim(
+  direction: 'buy' | 'sell',
+  area: PriceArea | null,
+  candles: Candle[],
+): boolean {
+  if (!area || candles.length < 4) {
+    return false;
+  }
+
+  const recent = candles.slice(-4);
+  const latest = recent[recent.length - 1];
+  const previous = recent[recent.length - 2];
+  const baselineRange = Math.max(averageRange(candles, 10), 0.0001);
+  const areaMidpoint = (area.top + area.bottom) / 2;
+  const hadTouch = recent.slice(0, -1).some((candle) => candleTouchesArea(candle, area));
+
+  if (!hadTouch) {
+    return false;
+  }
+
+  if (direction === 'buy') {
+    const reclaimedMidpoint = latest.close >= areaMidpoint;
+    const bullishClose = latest.close > latest.open && latest.close > previous.close;
+    const respectedArea = latest.low <= area.top + baselineRange * 0.2;
+    return reclaimedMidpoint && bullishClose && respectedArea;
+  }
+
+  const reclaimedMidpoint = latest.close <= areaMidpoint;
+  const bearishClose = latest.close < latest.open && latest.close < previous.close;
+  const respectedArea = latest.high >= area.bottom - baselineRange * 0.2;
+  return reclaimedMidpoint && bearishClose && respectedArea;
 }
 
 function hasFreshDisplacement(direction: 'buy' | 'sell', candles: Candle[]): boolean {
@@ -800,6 +841,7 @@ interface PotentialCandidateInput {
   symbol: string;
   candles: Candle[];
   trend: TrendDirection;
+  broaderTrend: TrendDirection;
   currentPrice: number;
   zones: PriceZone[];
   gaps: FairValueGap[];
@@ -808,12 +850,15 @@ interface PotentialCandidateInput {
   mode: PotentialSetupMode;
   bullishReversal: boolean;
   bearishReversal: boolean;
+  bullishPoiReclaim: boolean;
+  bearishPoiReclaim: boolean;
 }
 
 function buildPotentialCandidate({
   symbol,
   candles,
   trend,
+  broaderTrend,
   currentPrice,
   zones,
   gaps,
@@ -822,6 +867,8 @@ function buildPotentialCandidate({
   mode,
   bullishReversal,
   bearishReversal,
+  bullishPoiReclaim,
+  bearishPoiReclaim,
 }: PotentialCandidateInput): PotentialTradeSetup | null {
   const directionalZone = findDirectionalZone(direction, zones, currentPrice);
   const directionalFvg = findDirectionalFvg(direction, gaps);
@@ -840,6 +887,7 @@ function buildPotentialCandidate({
   const alignedStructure = isStructureAligned(direction, structure);
   const alignedMomentum = (direction === 'buy' && recentMomentum === 'bullish') || (direction === 'sell' && recentMomentum === 'bearish');
   const freshReaction = isDirectionalReactionFromArea(direction, preferredArea, candles);
+  const poiReclaim = direction === 'buy' ? bullishPoiReclaim : bearishPoiReclaim;
   const freshDisplacement = hasFreshDisplacement(direction, candles);
   const stretchedFromArea = isExtendedFromArea(direction, currentPrice, preferredArea, candles);
   const nearDirectionalZone = directionalZone ? isNearZone(currentPrice, [directionalZone], 0.0025) !== null : false;
@@ -847,6 +895,7 @@ function buildPotentialCandidate({
   const counterPressureCount = [
     nearDirectionalZone,
     freshReaction,
+    poiReclaim,
     alignedSweep,
     alignedRejection,
     alignedEngulfing,
@@ -854,6 +903,14 @@ function buildPotentialCandidate({
     alignedMomentum,
     isReversalSetup,
   ].filter(Boolean).length;
+
+  if (direction === 'sell' && currentZone?.type === 'demand' && bullishPoiReclaim) {
+    return null;
+  }
+
+  if (direction === 'buy' && currentZone?.type === 'supply' && bearishPoiReclaim) {
+    return null;
+  }
 
   if (mode === 'trend' && trend === 'ranging' && !isReversalSetup) {
     return null;
@@ -880,6 +937,7 @@ function buildPotentialCandidate({
   if (matchesZoneDirection(direction, currentZone)) probability += mode === 'counter' ? 12 : 6;
   if (isReversalSetup) probability += mode === 'counter' ? 24 : 20;
   if (freshReaction) probability += 12;
+  if (poiReclaim) probability += 12;
   if (freshDisplacement) probability += 8;
   if (alignedSweep) probability += 10;
   if (alignedRejection) probability += 10;
@@ -938,6 +996,9 @@ function buildPotentialCandidate({
   if (freshReaction) {
     fulfilledConditions.push(direction === 'buy' ? 'Fresh demand reaction confirmed' : 'Fresh supply reaction confirmed');
     contextLabels.push(direction === 'buy' ? 'Fresh bullish reaction' : 'Fresh bearish reaction');
+  } else if (poiReclaim) {
+    fulfilledConditions.push(direction === 'buy' ? 'Bullish reclaim from POI is forming' : 'Bearish reclaim from POI is forming');
+    contextLabels.push(direction === 'buy' ? 'POI reclaim up' : 'POI reclaim down');
   } else {
     requiredTriggers.push(
       mode === 'counter'
@@ -1019,11 +1080,33 @@ function buildPotentialCandidate({
   const { takeProfit, takeProfit2 } = resolveTakeProfitTargets(direction, entry, stopLoss, candles);
 
   const strategy = mode === 'counter'
-    ? `${nearDirectionalZone || isReversalSetup ? 'Counter-Trend Zone Reversal' : 'Counter-Trend Zone Tap'} Watchlist`
+    ? `${poiReclaim
+      ? direction === 'buy'
+        ? broaderTrend === 'bearish'
+          ? 'Bullish POI Reclaim Countertrend'
+          : 'Bullish Higher-Timeframe Reversal'
+        : broaderTrend === 'bullish'
+          ? 'Bearish POI Reclaim Countertrend'
+          : 'Bearish Higher-Timeframe Reversal'
+      : nearDirectionalZone || isReversalSetup
+        ? 'Counter-Trend Zone Reversal'
+        : 'Counter-Trend Zone Tap'} Watchlist`
     : `${isReversalSetup
       ? direction === 'buy'
-        ? 'Demand Double Bottom Reversal'
-        : 'Supply Double Top Reversal'
+        ? broaderTrend === 'bearish'
+          ? 'Bullish Countertrend Reversal from Demand'
+          : 'Bullish Higher-Timeframe Reversal'
+        : broaderTrend === 'bullish'
+          ? 'Bearish Countertrend Reversal from Supply'
+          : 'Bearish Higher-Timeframe Reversal'
+      : poiReclaim
+        ? direction === 'buy'
+          ? broaderTrend === 'bearish'
+            ? 'Bullish POI Reclaim Countertrend'
+            : 'Bullish POI Reclaim Continuation'
+          : broaderTrend === 'bullish'
+            ? 'Bearish POI Reclaim Countertrend'
+            : 'Bearish POI Reclaim Continuation'
       : nearDirectionalZone
         ? deriveStrategy(direction, sweep)
         : direction === 'buy'
@@ -1342,6 +1425,7 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   if (candles.length < 30) return null;
 
   const trend = detectTrend(candles);
+  const broaderTrend = detectContextTrend(candles);
   const currentPrice = candles[candles.length - 1].close;
   const lookLeftCandles = candles.slice(-Math.min(500, candles.length));
   const zones = buildZones(lookLeftCandles, currentPrice);
@@ -1349,6 +1433,10 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   const currentZone = findActiveReversalZone(currentPrice, zones, candles);
   const bullishReversal = Boolean(currentZone && isZoneRetestStillTradable(currentPrice, currentZone, candles) && detectDoubleBottom(candles, currentZone) && hasStrongClosure('buy', candles));
   const bearishReversal = Boolean(currentZone && isZoneRetestStillTradable(currentPrice, currentZone, candles) && detectDoubleTop(candles, currentZone) && hasStrongClosure('sell', candles));
+  const bullishArea = toPriceArea(findDirectionalZone('buy', zones, currentPrice) ?? findDirectionalFvg('buy', gaps));
+  const bearishArea = toPriceArea(findDirectionalZone('sell', zones, currentPrice) ?? findDirectionalFvg('sell', gaps));
+  const bullishPoiReclaim = hasPoiReclaim('buy', bullishArea, candles);
+  const bearishPoiReclaim = hasPoiReclaim('sell', bearishArea, candles);
 
   if (trend === 'ranging' && !bullishReversal && !bearishReversal) return null;
 
@@ -1356,6 +1444,10 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
     ? 'buy'
     : bearishReversal
       ? 'sell'
+      : currentZone?.type === 'demand' && bullishPoiReclaim
+        ? 'buy'
+        : currentZone?.type === 'supply' && bearishPoiReclaim
+          ? 'sell'
       : trend === 'bullish'
         ? 'buy'
         : 'sell';
@@ -1386,8 +1478,12 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   const alignedStructure = isStructureAligned(direction, structure);
   const alignedMomentum = (direction === 'buy' && recentMomentum === 'bullish') || (direction === 'sell' && recentMomentum === 'bearish');
   const freshReaction = isDirectionalReactionFromArea(direction, preferredArea, candles);
+  const poiReclaim = direction === 'buy' ? bullishPoiReclaim : bearishPoiReclaim;
   const freshDisplacement = hasFreshDisplacement(direction, candles);
   const stretchedFromArea = isExtendedFromArea(direction, currentPrice, preferredArea, candles);
+
+  if (direction === 'sell' && currentZone?.type === 'demand' && bullishPoiReclaim) return null;
+  if (direction === 'buy' && currentZone?.type === 'supply' && bearishPoiReclaim) return null;
 
   if (sweep && !alignedSweep) return null;
   if (engulfing && !alignedEngulfing) return null;
@@ -1396,22 +1492,22 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   if (!directionalZone && !directionalFvg) return null;
   if (stretchedFromArea && !freshDisplacement) return null;
 
-  const directionalConfirmationCount = [alignedSweep, alignedEngulfing, alignedRejection, alignedStructure, alignedMomentum]
+  const directionalConfirmationCount = [alignedSweep, alignedEngulfing, alignedRejection, alignedStructure, alignedMomentum, poiReclaim]
     .filter(Boolean)
     .length;
 
   if (directionalConfirmationCount < 2 && !isReversalSetup) return null;
-  if (!alignedEngulfing && !alignedRejection && !alignedStructure && !isReversalSetup) return null;
+  if (!alignedEngulfing && !alignedRejection && !alignedStructure && !poiReclaim && !isReversalSetup) return null;
 
   // Liquidity sweeps need actual reversal confirmation before the scanner fires.
   if (alignedSweep && !alignedEngulfing && !alignedStructure && !isReversalSetup) return null;
 
   // If the local tape is still moving against the setup, do not force an entry from the higher-level trend.
-  if (!alignedMomentum && !alignedStructure && !alignedEngulfing && !isReversalSetup) return null;
+  if (!alignedMomentum && !alignedStructure && !alignedEngulfing && !poiReclaim && !isReversalSetup) return null;
 
   // Favor the same setup family shown in the winning examples: reaction from a clean area, then displacement.
-  if (!freshReaction && !alignedSweep && !alignedRejection && !alignedEngulfing && !isReversalSetup) return null;
-  if (!freshDisplacement && !alignedStructure && !alignedEngulfing && !isReversalSetup) return null;
+  if (!freshReaction && !poiReclaim && !alignedSweep && !alignedRejection && !alignedEngulfing && !isReversalSetup) return null;
+  if (!freshDisplacement && !alignedStructure && !alignedEngulfing && !poiReclaim && !isReversalSetup) return null;
 
   const entry = last.close;
   const stopLoss = computeStopLoss(symbol, direction, candles);
@@ -1440,12 +1536,25 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
     confidenceScore: isReversalSetup ? Math.max(90, scoreToConfidence(Math.min(9, score + 2))) : scoreToConfidence(score),
     strategy: isReversalSetup
       ? direction === 'buy'
-        ? 'Demand Double Bottom Reversal'
-        : 'Supply Double Top Reversal'
+        ? broaderTrend === 'bearish'
+          ? 'Bullish Countertrend Reversal from Demand'
+          : 'Bullish Higher-Timeframe Reversal'
+        : broaderTrend === 'bullish'
+          ? 'Bearish Countertrend Reversal from Supply'
+          : 'Bearish Higher-Timeframe Reversal'
+      : poiReclaim
+        ? direction === 'buy'
+          ? broaderTrend === 'bearish'
+            ? 'Bullish POI Reclaim Countertrend'
+            : 'Bullish POI Reclaim Continuation'
+          : broaderTrend === 'bullish'
+            ? 'Bearish POI Reclaim Countertrend'
+            : 'Bearish POI Reclaim Continuation'
       : deriveStrategy(direction, sweep),
     confirmations,
     confirmationLabels: [
       ...(isReversalSetup ? [direction === 'buy' ? 'Double bottom at demand' : 'Double top at supply', direction === 'buy' ? 'Bullish closure confirmation' : 'Bearish closure confirmation'] : []),
+      ...(poiReclaim && !isReversalSetup ? [direction === 'buy' ? 'POI reclaim from demand/support' : 'POI reclaim from supply/resistance'] : []),
       ...buildConfirmationLabels(confirmations),
     ],
   };
@@ -1486,12 +1595,15 @@ export function analyzePotentialTrade(symbol: string, candles: Candle[]): Potent
 
 interface AnalyzePotentialTradeContext {
   trend: TrendDirection;
+  broaderTrend?: TrendDirection;
   currentPrice: number;
   zones: PriceZone[];
   gaps: FairValueGap[];
   currentZone: PriceZone | null;
   bullishReversal: boolean;
   bearishReversal: boolean;
+  bullishPoiReclaim?: boolean;
+  bearishPoiReclaim?: boolean;
 }
 
 export function analyzePotentialTrades(
@@ -1502,6 +1614,7 @@ export function analyzePotentialTrades(
   if (candles.length < 30) return [];
 
   const trend = context?.trend ?? detectTrend(candles);
+  const broaderTrend = context?.broaderTrend ?? detectContextTrend(candles);
   const currentPrice = context?.currentPrice ?? candles[candles.length - 1].close;
   const lookLeftCandles = candles.slice(-Math.min(500, candles.length));
   const zones = context?.zones ?? buildZones(lookLeftCandles, currentPrice);
@@ -1509,6 +1622,10 @@ export function analyzePotentialTrades(
   const currentZone = context?.currentZone ?? findActiveReversalZone(currentPrice, zones, candles);
   const bullishReversal = context?.bullishReversal ?? Boolean(currentZone && isZoneRetestStillTradable(currentPrice, currentZone, candles) && detectDoubleBottom(candles, currentZone) && hasStrongClosure('buy', candles));
   const bearishReversal = context?.bearishReversal ?? Boolean(currentZone && isZoneRetestStillTradable(currentPrice, currentZone, candles) && detectDoubleTop(candles, currentZone) && hasStrongClosure('sell', candles));
+  const bullishArea = toPriceArea(findDirectionalZone('buy', zones, currentPrice) ?? findDirectionalFvg('buy', gaps));
+  const bearishArea = toPriceArea(findDirectionalZone('sell', zones, currentPrice) ?? findDirectionalFvg('sell', gaps));
+  const bullishPoiReclaim = context?.bullishPoiReclaim ?? hasPoiReclaim('buy', bullishArea, candles);
+  const bearishPoiReclaim = context?.bearishPoiReclaim ?? hasPoiReclaim('sell', bearishArea, candles);
 
   if (trend === 'ranging' && !bullishReversal && !bearishReversal) {
     return [];
@@ -1522,6 +1639,7 @@ export function analyzePotentialTrades(
       symbol,
       candles,
       trend,
+      broaderTrend,
       currentPrice,
       zones,
       gaps,
@@ -1530,6 +1648,8 @@ export function analyzePotentialTrades(
       mode: 'trend',
       bullishReversal,
       bearishReversal,
+      bullishPoiReclaim,
+      bearishPoiReclaim,
     });
     if (continuationCandidate) {
       candidates.push(continuationCandidate);
@@ -1539,6 +1659,7 @@ export function analyzePotentialTrades(
       symbol,
       candles,
       trend,
+      broaderTrend,
       currentPrice,
       zones,
       gaps,
@@ -1547,6 +1668,8 @@ export function analyzePotentialTrades(
       mode: 'counter',
       bullishReversal,
       bearishReversal,
+      bullishPoiReclaim,
+      bearishPoiReclaim,
     });
     if (counterCandidate) {
       candidates.push(counterCandidate);
@@ -1558,6 +1681,7 @@ export function analyzePotentialTrades(
         symbol,
         candles,
         trend,
+        broaderTrend,
         currentPrice,
         zones,
         gaps,
@@ -1566,6 +1690,8 @@ export function analyzePotentialTrades(
         mode: 'counter',
         bullishReversal,
         bearishReversal,
+        bullishPoiReclaim,
+        bearishPoiReclaim,
       });
       if (reversalCandidate) {
         candidates.push(reversalCandidate);
