@@ -50,7 +50,18 @@ export const DERIV_SCANNER_SYMBOLS: DerivScannerSymbolConfig[] = [
   { symbol: 'LTCUSD', aliases: buildAliases('LTCUSD', ['cryltcusd', 'litecoin']) },
 ];
 
-export const SESSION_SCANNER_SYMBOL_IDS = DERIV_SCANNER_SYMBOLS.map((item) => item.symbol);
+export const SESSION_SCANNER_SYMBOL_IDS = [
+  'GBPJPY',
+  'EURUSD',
+  'USDJPY',
+  'USDCAD',
+  'XAUUSD',
+  'USOIL',
+  'US30',
+  'NAS100',
+  'SPX500',
+  'BTCUSD',
+] as const;
 
 export const VOLATILITY_SCANNER_SYMBOL_IDS = [
   'R_10',
