@@ -5,19 +5,20 @@ import { processLivePriceUpdate } from '../../services/scannerService';
 const SYMBOL_DEBOUNCE_MS = 750;
 
 let started = false;
-const latestPrices = new Map<string, number>();
+const latestPrices = new Map<string, { currentPrice: number; lowPrice: number; highPrice: number }>();
 const scheduledSymbols = new Set<string>();
 
 async function flushSymbol(symbol: string) {
   scheduledSymbols.delete(symbol);
-  const price = latestPrices.get(symbol);
+  const priceWindow = latestPrices.get(symbol);
+  latestPrices.delete(symbol);
   scheduleScannerPanelRefreshForAllUsers();
-  if (price == null) {
+  if (priceWindow == null) {
     return;
   }
 
   try {
-    const updates = await processLivePriceUpdate(symbol, price);
+    const updates = await processLivePriceUpdate(symbol, priceWindow);
     if (updates > 0) {
       console.log(`[scanner-live-lifecycle] ${symbol} processed ${updates} live trade update(s)`);
     }
@@ -34,7 +35,18 @@ export function startLiveLifecycleMonitor() {
   started = true;
 
   subscribeToTicks(({ logicalSymbol, price }) => {
-    latestPrices.set(logicalSymbol, price);
+    const existing = latestPrices.get(logicalSymbol);
+    latestPrices.set(logicalSymbol, existing
+      ? {
+          currentPrice: price,
+          lowPrice: Math.min(existing.lowPrice, price),
+          highPrice: Math.max(existing.highPrice, price),
+        }
+      : {
+          currentPrice: price,
+          lowPrice: price,
+          highPrice: price,
+        });
 
     if (scheduledSymbols.has(logicalSymbol)) {
       return;

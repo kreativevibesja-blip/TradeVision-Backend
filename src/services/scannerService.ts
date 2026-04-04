@@ -77,6 +77,12 @@ interface LifecycleProcessingOptions {
   skipApproachAlerts?: boolean;
 }
 
+interface LivePriceWindow {
+  currentPrice: number;
+  lowPrice: number;
+  highPrice: number;
+}
+
 type OpenScanResult = Pick<ScanResult, 'id' | 'userId' | 'symbol' | 'status' | 'confidenceScore' | 'createdAt'>;
 
 // ── Table names ──
@@ -808,10 +814,14 @@ async function insertAlert(alert: { userId: string; scanResultId?: string; messa
 
 async function processResultLifecycle(
   result: ScanResult,
-  currentPrice: number,
+  priceWindow: number | LivePriceWindow,
   options: LifecycleProcessingOptions = {},
 ): Promise<ScannerAlert[]> {
   const alerts: ScannerAlert[] = [];
+  const normalizedWindow = typeof priceWindow === 'number'
+    ? { currentPrice: priceWindow, lowPrice: priceWindow, highPrice: priceWindow }
+    : priceWindow;
+  const { currentPrice, lowPrice, highPrice } = normalizedWindow;
   const decimals = result.entry >= 100 ? 2 : 5;
 
   if (result.status === 'active') {
@@ -819,9 +829,27 @@ async function processResultLifecycle(
     const slDistance = Math.abs(result.entry - result.stopLoss) || 1;
     const proximityRatio = entryDistance / slDistance;
 
+    const isInvalidated = result.direction === 'buy'
+      ? lowPrice <= result.stopLoss
+      : highPrice >= result.stopLoss;
+
+    if (isInvalidated) {
+      await updateScanResult(result.id, { status: 'invalidated' });
+
+      const alert = await insertAlert({
+        userId: result.userId,
+        scanResultId: result.id,
+        message: `${result.symbol} setup invalidated — price broke through stop loss level before entry`,
+        type: 'warning',
+      });
+      alerts.push(alert);
+
+      return alerts;
+    }
+
     const entryTriggered = result.direction === 'buy'
-      ? currentPrice <= result.entry && currentPrice > result.stopLoss
-      : currentPrice >= result.entry && currentPrice < result.stopLoss;
+      ? lowPrice <= result.entry
+      : highPrice >= result.entry;
 
     if (entryTriggered) {
       await updateScanResult(result.id, {
@@ -857,33 +885,17 @@ async function processResultLifecycle(
       alerts.push(alert);
     }
 
-    const isInvalidated = result.direction === 'buy'
-      ? currentPrice < result.stopLoss
-      : currentPrice > result.stopLoss;
-
-    if (isInvalidated) {
-      await updateScanResult(result.id, { status: 'invalidated' });
-
-      const alert = await insertAlert({
-        userId: result.userId,
-        scanResultId: result.id,
-        message: `${result.symbol} setup invalidated — price broke through stop loss level before entry`,
-        type: 'warning',
-      });
-      alerts.push(alert);
-    }
-
     return alerts;
   }
 
   if (result.status === 'triggered') {
     const hitTakeProfit = result.direction === 'buy'
-      ? currentPrice >= result.takeProfit
-      : currentPrice <= result.takeProfit;
+      ? highPrice >= result.takeProfit
+      : lowPrice <= result.takeProfit;
 
     const hitStopLoss = result.direction === 'buy'
-      ? currentPrice <= result.stopLoss
-      : currentPrice >= result.stopLoss;
+      ? lowPrice <= result.stopLoss
+      : highPrice >= result.stopLoss;
 
     if (hitTakeProfit || hitStopLoss) {
       const closeReason: ScanCloseReason = hitTakeProfit ? 'tp' : 'sl';
@@ -1186,7 +1198,7 @@ export async function checkZoneProximityAlerts(userId: string): Promise<ScannerA
   return alerts;
 }
 
-export async function processLivePriceUpdate(symbol: string, currentPrice: number): Promise<number> {
+export async function processLivePriceUpdate(symbol: string, priceWindow: number | LivePriceWindow): Promise<number> {
   if (!liveResultCacheSyncedAt) {
     await syncLiveResultCache(true);
   } else if (Date.now() - liveResultCacheSyncedAt >= LIVE_RESULT_CACHE_SYNC_MS) {
@@ -1203,7 +1215,7 @@ export async function processLivePriceUpdate(symbol: string, currentPrice: numbe
   let updates = 0;
 
   for (const result of results) {
-    const alerts = await processResultLifecycle(result, currentPrice, { skipApproachAlerts: true });
+    const alerts = await processResultLifecycle(result, priceWindow, { skipApproachAlerts: true });
     if (alerts.length > 0) {
       updates += 1;
     }
