@@ -1131,13 +1131,6 @@ export async function checkPotentialTradeAlerts(userId: string): Promise<Scanner
     });
 
     alerts.push(alert);
-
-    sendPushToUser(userId, {
-      title: 'Potential Trade Building',
-      body: `${potential.symbol} ${directionLabel} is at ${Math.round(potential.activationProbability)}% activation probability.`,
-      tag: `potential-${potential.sessionType}-${potential.symbol}-${potential.direction}`,
-      url: '/dashboard/scanner',
-    }).catch((err) => console.error('[Push] Failed to send potential trade notification:', err));
   }
 
   cleanupDedupCache();
