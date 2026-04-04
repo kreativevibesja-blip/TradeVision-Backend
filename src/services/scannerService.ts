@@ -531,6 +531,18 @@ async function hasRecentApproachAlert(scanResultId: string): Promise<boolean> {
   return (count ?? 0) > 0;
 }
 
+async function hasTakeProfitOneAlert(scanResultId: string): Promise<boolean> {
+  const { count, error } = await supabase
+    .from(SCANNER_ALERT_TABLE)
+    .select('id', { count: 'exact', head: true })
+    .eq('scanResultId', scanResultId)
+    .eq('type', 'trade')
+    .like('message', '%TP1 hit%');
+
+  if (error) throw new Error(error.message);
+  return (count ?? 0) > 0;
+}
+
 function getStartOfNewYorkDay(): string {
   const now = new Date();
   const zonedNow = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
@@ -841,6 +853,12 @@ function getFinalTakeProfit(result: ScanResult): number {
   return result.takeProfit;
 }
 
+function hasSecondaryTakeProfit(result: ScanResult): boolean {
+  return result.takeProfit2 != null
+    && Number.isFinite(result.takeProfit2)
+    && Math.abs(result.takeProfit2 - result.takeProfit) > Number.EPSILON;
+}
+
 async function processResultLifecycle(
   result: ScanResult,
   priceWindow: number | LivePriceWindow,
@@ -919,6 +937,9 @@ async function processResultLifecycle(
 
   if (result.status === 'triggered') {
     const finalTakeProfit = getFinalTakeProfit(result);
+    const hitTakeProfitOne = result.direction === 'buy'
+      ? highPrice >= result.takeProfit
+      : lowPrice <= result.takeProfit;
     const hitTakeProfit = result.direction === 'buy'
       ? highPrice >= finalTakeProfit
       : lowPrice <= finalTakeProfit;
@@ -926,6 +947,23 @@ async function processResultLifecycle(
     const hitStopLoss = result.direction === 'buy'
       ? lowPrice <= result.stopLoss
       : highPrice >= result.stopLoss;
+
+    if (hasSecondaryTakeProfit(result) && hitTakeProfitOne && !hitTakeProfit && !(await hasTakeProfitOneAlert(result.id))) {
+      const alert = await insertAlert({
+        userId: result.userId,
+        scanResultId: result.id,
+        message: `${result.symbol} TP1 hit at ${result.takeProfit.toFixed(decimals)} — trade remains live toward final target`,
+        type: 'trade',
+      });
+      alerts.push(alert);
+
+      sendPushToUser(result.userId, {
+        title: 'TP1 Hit',
+        body: `${result.symbol} reached TP1 at ${result.takeProfit.toFixed(decimals)}. Trade is still running toward the final target.`,
+        tag: `tp1-${result.id}`,
+        url: '/dashboard/scanner',
+      }).catch((err) => console.error('[Push] Failed to send TP1 notification:', err));
+    }
 
     if (hitTakeProfit || hitStopLoss) {
       const closeReason: ScanCloseReason = hitTakeProfit ? 'tp' : 'sl';
