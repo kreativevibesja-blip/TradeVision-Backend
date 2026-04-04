@@ -1,5 +1,7 @@
 import { supabase } from '../lib/supabase';
 import { getCachedCandles } from '../lib/db/saveCandles';
+import { getRuntimeCandles } from '../lib/deriv/activeCandles';
+import { ensureDerivSubscription, getDerivHistoryCandles } from '../lib/deriv/ws';
 import { DERIV_SCANNER_SYMBOL_IDS, SESSION_SCANNER_SYMBOL_IDS, VOLATILITY_SCANNER_SYMBOL_IDS } from '../lib/deriv/symbols';
 import { analyzeMarket, analyzePotentialTrade, type Candle, type PotentialTradeSetup } from './scannerEngine';
 import { sendPushToUser } from './pushService';
@@ -103,6 +105,11 @@ const SCANNER_SYMBOLS_BY_SESSION: Record<SessionType, readonly string[]> = {
 
 const SCANNER_TIMEFRAME = 'M15';
 const LIVE_RESULT_CACHE_SYNC_MS = 20_000;
+
+const TIMEFRAME_TO_GRANULARITY: Record<'M5' | 'M15', 300 | 900> = {
+  M5: 300,
+  M15: 900,
+};
 
 type ScanResultScope = 'all' | 'current' | 'history';
 
@@ -217,6 +224,56 @@ function isDuplicatePotentialAlert(userId: string, potential: Pick<PotentialTrad
 
   recentPotentialAlertKeys.set(key, Date.now());
   return false;
+}
+
+async function loadScannerCandles(symbol: string, timeframe: 'M5' | 'M15', limit: number, minimum = 50): Promise<Candle[]> {
+  const granularity = TIMEFRAME_TO_GRANULARITY[timeframe];
+
+  try {
+    await ensureDerivSubscription(symbol);
+  } catch (error) {
+    console.error(`[Scanner] Failed to ensure Deriv subscription for ${symbol}:`, error);
+  }
+
+  const runtimeCandles = getRuntimeCandles(symbol, granularity, limit, timeframe === 'M5');
+  if (runtimeCandles.length >= minimum) {
+    return runtimeCandles.map((candle) => ({
+      open: candle.open,
+      high: candle.high,
+      low: candle.low,
+      close: candle.close,
+      time: candle.time * 1000,
+    }));
+  }
+
+  const cachedCandles = await getCachedCandles(symbol, timeframe, limit);
+  if (cachedCandles.length >= minimum) {
+    return cachedCandles.map((candle) => ({
+      open: candle.open,
+      high: candle.high,
+      low: candle.low,
+      close: candle.close,
+      time: new Date(candle.time).getTime(),
+    }));
+  }
+
+  const historyCandles = await getDerivHistoryCandles(symbol, granularity, limit);
+  if (historyCandles.length >= minimum) {
+    return historyCandles.map((candle) => ({
+      open: candle.open,
+      high: candle.high,
+      low: candle.low,
+      close: candle.close,
+      time: candle.time * 1000,
+    }));
+  }
+
+  return [];
+}
+
+async function loadLatestScannerPrice(symbol: string): Promise<number | null> {
+  const candles = await loadScannerCandles(symbol, 'M5', 2, 1);
+  return candles[candles.length - 1]?.close ?? null;
 }
 
 async function hasRecentApproachAlert(scanResultId: string): Promise<boolean> {
@@ -657,18 +714,10 @@ interface ScanCycleResult {
 
 async function buildPotentialForSymbol(symbol: string): Promise<PotentialTradeSetup | null> {
   try {
-    const cachedCandles = await getCachedCandles(symbol, SCANNER_TIMEFRAME, 600);
-    if (cachedCandles.length < 50) {
+    const candles = await loadScannerCandles(symbol, 'M15', 600);
+    if (candles.length < 50) {
       return null;
     }
-
-    const candles: Candle[] = cachedCandles.map((c) => ({
-      open: c.open,
-      high: c.high,
-      low: c.low,
-      close: c.close,
-      time: new Date(c.time).getTime(),
-    }));
 
     return analyzePotentialTrade(symbol, candles);
   } catch (err) {
@@ -679,18 +728,10 @@ async function buildPotentialForSymbol(symbol: string): Promise<PotentialTradeSe
 
 async function scanSymbol(symbol: string): Promise<ScanCycleResult | null> {
   try {
-    const cachedCandles = await getCachedCandles(symbol, SCANNER_TIMEFRAME, 600);
-    if (cachedCandles.length < 50) {
+    const candles = await loadScannerCandles(symbol, 'M15', 600);
+    if (candles.length < 50) {
       return null;
     }
-
-    const candles: Candle[] = cachedCandles.map((c) => ({
-      open: c.open,
-      high: c.high,
-      low: c.low,
-      close: c.close,
-      time: new Date(c.time).getTime(),
-    }));
 
     const setup = analyzeMarket(symbol, candles);
     if (!setup) return null;
@@ -838,12 +879,10 @@ export async function checkZoneProximityAlerts(userId: string): Promise<ScannerA
 
   for (const result of activeResults as ScanResult[]) {
     try {
-      const latestCandles = await getCachedCandles(result.symbol, 'M5', 1);
-      if (latestCandles.length === 0) {
+      const currentPrice = await loadLatestScannerPrice(result.symbol);
+      if (currentPrice === null) {
         continue;
       }
-
-      const currentPrice = latestCandles[latestCandles.length - 1].close;
       const lifecycleAlerts = await processResultLifecycle(result, currentPrice);
       alerts.push(...lifecycleAlerts);
     } catch {
