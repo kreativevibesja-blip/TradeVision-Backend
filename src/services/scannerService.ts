@@ -3,6 +3,7 @@ import { getCachedCandles } from '../lib/db/saveCandles';
 import { getRuntimeCandles } from '../lib/deriv/activeCandles';
 import { ensureDerivSubscription, getDerivHistoryCandles } from '../lib/deriv/ws';
 import { DERIV_SCANNER_SYMBOL_IDS, SESSION_SCANNER_SYMBOL_IDS, VOLATILITY_SCANNER_SYMBOL_IDS } from '../lib/deriv/symbols';
+import { scheduleScannerPanelRefreshForAllUsers, scheduleScannerPanelRefreshForUser } from '../lib/scanner/panelStream';
 import { analyzeMarket, analyzePotentialTrade, type Candle, type PotentialTradeSetup } from './scannerEngine';
 import { sendPushToUser } from './pushService';
 
@@ -440,6 +441,14 @@ async function updateScanResult(
   id: string,
   updates: Partial<Pick<ScanResult, 'status' | 'closeReason' | 'triggeredAt' | 'closedAt'>>,
 ): Promise<void> {
+  const { data: existingResult, error: existingError } = await supabase
+    .from(SCAN_RESULT_TABLE)
+    .select('userId')
+    .eq('id', id)
+    .single();
+
+  if (existingError) throw new Error(existingError.message);
+
   const { error } = await supabase
     .from(SCAN_RESULT_TABLE)
     .update(updates)
@@ -448,6 +457,9 @@ async function updateScanResult(
   if (error) throw new Error(error.message);
 
   mutateLiveResultCache(id, updates);
+  if (existingResult?.userId) {
+    scheduleScannerPanelRefreshForUser(String(existingResult.userId));
+  }
 }
 
 async function insertScanResult(result: Omit<ScanResult, 'id' | 'createdAt'>): Promise<ScanResult> {
@@ -555,6 +567,7 @@ async function insertAlert(alert: { userId: string; scanResultId?: string; messa
     .single();
 
   if (error) throw new Error(error.message);
+  scheduleScannerPanelRefreshForUser(alert.userId);
   return data as ScannerAlert;
 }
 
@@ -915,6 +928,8 @@ export async function processLivePriceUpdate(symbol: string, currentPrice: numbe
     }
   }
 
+  scheduleScannerPanelRefreshForAllUsers();
+
   return updates;
 }
 
@@ -964,6 +979,19 @@ export async function getPotentialTrades(userId: string, limit = 12): Promise<Po
   return potentials
     .sort((a, b) => b.activationProbability - a.activationProbability)
     .slice(0, limit);
+}
+
+export async function getRealtimeScannerPanels(userId: string, resultLimit = 20, potentialLimit = 10) {
+  const [results, potentials] = await Promise.all([
+    getScanResults(userId, undefined, resultLimit, 'current'),
+    getPotentialTrades(userId, potentialLimit),
+  ]);
+
+  return {
+    results,
+    potentials,
+    generatedAt: new Date().toISOString(),
+  };
 }
 
 export async function checkPotentialTradeAlerts(userId: string): Promise<ScannerAlert[]> {

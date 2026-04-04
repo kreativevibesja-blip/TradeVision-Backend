@@ -1,4 +1,5 @@
 import { subscribeToTicks } from '../deriv/store';
+import { scheduleScannerPanelRefreshForAllUsers } from './panelStream';
 import { processLivePriceUpdate } from '../../services/scannerService';
 
 const SYMBOL_DEBOUNCE_MS = 750;
@@ -10,6 +11,7 @@ const scheduledSymbols = new Set<string>();
 async function flushSymbol(symbol: string) {
   scheduledSymbols.delete(symbol);
   const price = latestPrices.get(symbol);
+  scheduleScannerPanelRefreshForAllUsers();
   if (price == null) {
     return;
   }

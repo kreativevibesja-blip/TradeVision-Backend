@@ -1,5 +1,6 @@
 import type { Response } from 'express';
 import type { AuthRequest } from '../middleware/auth';
+import { registerScannerPanelStream } from '../lib/scanner/panelStream';
 import {
   getActiveSessionsForUser,
   toggleScannerSession,
@@ -10,6 +11,7 @@ import {
   getPotentialTrades,
   runSessionScanner,
   checkZoneProximityAlerts,
+  getRealtimeScannerPanels,
   expireSessionResults,
   isSessionActive,
   getCurrentSessionTypes,
@@ -160,6 +162,19 @@ export const getPotentials = async (req: AuthRequest, res: Response) => {
   }
 };
 
+// GET /api/scanner/stream
+export const streamScannerPanels = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Authentication required' });
+
+    registerScannerPanelStream(req.user.id, res, () => getRealtimeScannerPanels(req.user!.id));
+  } catch (error: any) {
+    console.error('[Scanner] Stream error:', error);
+    if (!res.headersSent) {
+      return res.status(500).json({ error: error?.message || 'Failed to open scanner stream' });
+    }
+  }
+};
 // POST /api/scanner/check-proximity
 export const checkProximity = async (req: AuthRequest, res: Response) => {
   try {

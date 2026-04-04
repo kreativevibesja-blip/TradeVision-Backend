@@ -9,6 +9,7 @@ import {
   markRead,
   getSummary,
   getPotentials,
+  streamScannerPanels,
   checkProximity,
   expireSession,
 } from '../controllers/scannerController';
@@ -25,6 +26,7 @@ router.get('/alerts', getAlerts);
 router.post('/alerts/read', markRead);
 router.get('/summary', getSummary);
 router.get('/potentials', getPotentials);
+router.get('/stream', streamScannerPanels);
 router.post('/check-proximity', checkProximity);
 router.post('/expire', expireSession);
 
