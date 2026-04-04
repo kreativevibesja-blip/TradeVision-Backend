@@ -4,7 +4,7 @@ import { getRuntimeCandles } from '../lib/deriv/activeCandles';
 import { ensureDerivSubscription, getDerivHistoryCandles } from '../lib/deriv/ws';
 import { DERIV_SCANNER_SYMBOL_IDS, SESSION_SCANNER_SYMBOL_IDS, VOLATILITY_SCANNER_SYMBOL_IDS } from '../lib/deriv/symbols';
 import { scheduleScannerPanelRefreshForAllUsers, scheduleScannerPanelRefreshForUser } from '../lib/scanner/panelStream';
-import { analyzeMarket, analyzePotentialTrade, type Candle, type PotentialTradeSetup } from './scannerEngine';
+import { analyzeMarket, analyzePotentialTrades, type Candle, type PotentialTradeSetup } from './scannerEngine';
 import { sendPushToUser } from './pushService';
 
 // ── Types ──
@@ -724,17 +724,17 @@ interface ScanCycleResult {
   score: number;
 }
 
-async function buildPotentialForSymbol(symbol: string): Promise<PotentialTradeSetup | null> {
+async function buildPotentialForSymbol(symbol: string): Promise<PotentialTradeSetup[]> {
   try {
     const candles = await loadScannerCandles(symbol, 'M15', 600);
     if (candles.length < 50) {
-      return null;
+      return [];
     }
 
-    return analyzePotentialTrade(symbol, candles);
+    return analyzePotentialTrades(symbol, candles);
   } catch (err) {
     console.error(`[Scanner] Failed to build potential trade for ${symbol}:`, err);
-    return null;
+    return [];
   }
 }
 
@@ -965,7 +965,7 @@ export async function getPotentialTrades(userId: string, limit = 12): Promise<Po
     );
 
     const sessionPotentials = rawPotentials
-      .filter((item): item is PotentialTradeSetup => item !== null)
+      .flat()
       .sort((a, b) => b.activationProbability - a.activationProbability)
       .slice(0, limit)
       .map((item) => ({

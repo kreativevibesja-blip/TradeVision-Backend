@@ -89,6 +89,8 @@ export interface PotentialTradeSetup {
   contextLabels: string[];
 }
 
+type PotentialSetupMode = 'trend' | 'counter';
+
 // ── 1. Trend Detection ──
 // Counts higher-highs/higher-lows vs lower-highs/lower-lows
 // over the last 20 candles to classify the trend.
@@ -767,6 +769,288 @@ function buildPotentialNarrative(direction: 'buy' | 'sell', currentPrice: number
   return `Market is showing ${side} potential around ${currentPrice.toFixed(currentPrice >= 100 ? 2 : 5)}. Current context: ${contextText}. The scanner is waiting for ${triggerText} before activating the trade.`;
 }
 
+function buildCounterTrendNarrative(
+  trend: TrendDirection,
+  direction: 'buy' | 'sell',
+  currentPrice: number,
+  contextLabels: string[],
+  requiredTriggers: string[],
+) {
+  const side = direction === 'buy' ? 'buy' : 'sell';
+  const trendText = trend === 'ranging' ? 'range' : `${trend} backdrop`;
+  const triggerText = requiredTriggers.length > 0 ? requiredTriggers.join(', ') : 'a rejection and structure shift';
+  const contextText = contextLabels.length > 0 ? contextLabels.join(', ') : 'opposing zone context';
+
+  return `Scanner is tracking a one-tap style counter-trend ${side} idea around ${currentPrice.toFixed(currentPrice >= 100 ? 2 : 5)}. Context: ${contextText} against a ${trendText}. It will wait for ${triggerText} at the zone before treating the counter move as tradable.`;
+}
+
+function matchesZoneDirection(direction: 'buy' | 'sell', zone: PriceZone | null): boolean {
+  if (!zone) {
+    return false;
+  }
+
+  return (direction === 'buy' && zone.type === 'demand') || (direction === 'sell' && zone.type === 'supply');
+}
+
+function getOppositeDirection(direction: 'buy' | 'sell'): 'buy' | 'sell' {
+  return direction === 'buy' ? 'sell' : 'buy';
+}
+
+interface PotentialCandidateInput {
+  symbol: string;
+  candles: Candle[];
+  trend: TrendDirection;
+  currentPrice: number;
+  zones: PriceZone[];
+  gaps: FairValueGap[];
+  currentZone: PriceZone | null;
+  direction: 'buy' | 'sell';
+  mode: PotentialSetupMode;
+  bullishReversal: boolean;
+  bearishReversal: boolean;
+}
+
+function buildPotentialCandidate({
+  symbol,
+  candles,
+  trend,
+  currentPrice,
+  zones,
+  gaps,
+  currentZone,
+  direction,
+  mode,
+  bullishReversal,
+  bearishReversal,
+}: PotentialCandidateInput): PotentialTradeSetup | null {
+  const directionalZone = findDirectionalZone(direction, zones, currentPrice);
+  const directionalFvg = findDirectionalFvg(direction, gaps);
+  const preferredArea = toPriceArea(directionalZone ?? directionalFvg);
+  const pullback = detectPullback(trend, candles);
+  const sweep = detectLiquiditySweep(candles);
+  const last = candles[candles.length - 1];
+  const prev = candles[candles.length - 2];
+  const engulfing = detectEngulfing(prev, last);
+  const rejection = detectRejection(last);
+  const structure = detectStructureBreak(candles);
+  const recentMomentum = detectRecentMomentum(candles);
+  const alignedSweep = isSweepAligned(direction, sweep);
+  const alignedRejection = isRejectionAligned(direction, rejection);
+  const alignedEngulfing = isEngulfingAligned(direction, engulfing);
+  const alignedStructure = isStructureAligned(direction, structure);
+  const alignedMomentum = (direction === 'buy' && recentMomentum === 'bullish') || (direction === 'sell' && recentMomentum === 'bearish');
+  const freshReaction = isDirectionalReactionFromArea(direction, preferredArea, candles);
+  const freshDisplacement = hasFreshDisplacement(direction, candles);
+  const stretchedFromArea = isExtendedFromArea(direction, currentPrice, preferredArea, candles);
+  const nearDirectionalZone = directionalZone ? isNearZone(currentPrice, [directionalZone], 0.0025) !== null : false;
+  const isReversalSetup = direction === 'buy' ? bullishReversal : bearishReversal;
+  const counterPressureCount = [
+    nearDirectionalZone,
+    freshReaction,
+    alignedSweep,
+    alignedRejection,
+    alignedEngulfing,
+    alignedStructure,
+    alignedMomentum,
+    isReversalSetup,
+  ].filter(Boolean).length;
+
+  if (mode === 'trend' && trend === 'ranging' && !isReversalSetup) {
+    return null;
+  }
+
+  if (mode === 'counter' && trend === 'ranging' && !isReversalSetup) {
+    return null;
+  }
+
+  if (!directionalZone && !directionalFvg && !(mode === 'trend' && pullback)) {
+    return null;
+  }
+
+  if (mode === 'counter' && !directionalZone) {
+    return null;
+  }
+
+  let probability = mode === 'trend' ? 20 : 16;
+
+  if (directionalZone) probability += mode === 'trend' ? 20 : 24;
+  if (directionalFvg) probability += mode === 'trend' ? 10 : 6;
+  if (pullback) probability += mode === 'trend' ? 15 : 4;
+  if (nearDirectionalZone) probability += mode === 'counter' ? 16 : 8;
+  if (matchesZoneDirection(direction, currentZone)) probability += mode === 'counter' ? 12 : 6;
+  if (isReversalSetup) probability += mode === 'counter' ? 24 : 20;
+  if (freshReaction) probability += 12;
+  if (freshDisplacement) probability += 8;
+  if (alignedSweep) probability += 10;
+  if (alignedRejection) probability += 10;
+  if (alignedEngulfing) probability += 10;
+  if (alignedStructure) probability += mode === 'counter' ? 10 : 5;
+  if (alignedMomentum) probability += 5;
+  if (stretchedFromArea) probability -= 15;
+
+  if (mode === 'counter' && !nearDirectionalZone && counterPressureCount < 2) {
+    return null;
+  }
+
+  if (mode === 'counter' && !isReversalSetup && !alignedSweep && !alignedRejection && !alignedEngulfing && !alignedStructure) {
+    probability -= 8;
+  }
+
+  if (probability < (mode === 'trend' ? 35 : 42)) {
+    return null;
+  }
+
+  const fulfilledConditions: string[] = [];
+  const requiredTriggers: string[] = [];
+  const contextLabels: string[] = [];
+
+  if (mode === 'trend') {
+    fulfilledConditions.push(trend === 'bullish' ? 'Bullish trend context' : trend === 'bearish' ? 'Bearish trend context' : 'Range-to-reversal context');
+  } else {
+    fulfilledConditions.push(`Counter-trend idea against ${trend === 'ranging' ? 'a range' : trend} backdrop`);
+    contextLabels.push('Aggressive one-tap style setup');
+  }
+
+  if (directionalZone) {
+    if (nearDirectionalZone) {
+      fulfilledConditions.push(direction === 'buy' ? 'Price is at demand/support zone' : 'Price is at supply/resistance zone');
+      contextLabels.push(direction === 'buy' ? 'Testing demand/support' : 'Testing supply/resistance');
+    } else {
+      requiredTriggers.push(direction === 'buy' ? 'Price tap back into demand/support zone' : 'Price tap back into supply/resistance zone');
+      contextLabels.push(direction === 'buy' ? 'Demand/support mapped' : 'Supply/resistance mapped');
+    }
+  }
+
+  if (directionalFvg) {
+    fulfilledConditions.push(direction === 'buy' ? 'Bullish FVG in play' : 'Bearish FVG in play');
+    contextLabels.push(direction === 'buy' ? 'Bullish imbalance nearby' : 'Bearish imbalance nearby');
+  } else if (mode === 'trend') {
+    requiredTriggers.push(direction === 'buy' ? 'Bullish FVG retest or cleaner demand reaction' : 'Bearish FVG retest or cleaner supply reaction');
+  }
+
+  if (pullback) {
+    fulfilledConditions.push('Pullback location is developing');
+    contextLabels.push('Pullback structure intact');
+  } else if (mode === 'trend') {
+    requiredTriggers.push('Cleaner pullback into value area');
+  }
+
+  if (freshReaction) {
+    fulfilledConditions.push(direction === 'buy' ? 'Fresh demand reaction confirmed' : 'Fresh supply reaction confirmed');
+    contextLabels.push(direction === 'buy' ? 'Fresh bullish reaction' : 'Fresh bearish reaction');
+  } else {
+    requiredTriggers.push(
+      mode === 'counter'
+        ? direction === 'buy'
+          ? 'Clear bullish rejection from opposing demand zone'
+          : 'Clear bearish rejection from opposing supply zone'
+        : direction === 'buy'
+          ? 'Clean bullish reaction from the POI'
+          : 'Clean bearish reaction from the POI',
+    );
+  }
+
+  if (freshDisplacement) {
+    fulfilledConditions.push(direction === 'buy' ? 'Bullish displacement is underway' : 'Bearish displacement is underway');
+    contextLabels.push(direction === 'buy' ? 'Displacement up' : 'Displacement down');
+  } else {
+    requiredTriggers.push(
+      mode === 'counter'
+        ? direction === 'buy'
+          ? 'Bullish displacement away from the demand tap'
+          : 'Bearish displacement away from the supply tap'
+        : direction === 'buy'
+          ? 'Stronger bullish displacement candle'
+          : 'Stronger bearish displacement candle',
+    );
+  }
+
+  if (stretchedFromArea) {
+    requiredTriggers.push(direction === 'buy' ? 'Retest closer to demand/FVG before entry' : 'Retest closer to supply/FVG before entry');
+  }
+
+  if (alignedSweep) {
+    fulfilledConditions.push(direction === 'buy' ? 'Sell-side liquidity sweep printed' : 'Buy-side liquidity sweep printed');
+  } else {
+    requiredTriggers.push(
+      mode === 'counter'
+        ? direction === 'buy'
+          ? 'Sweep lower into demand before reversal trigger'
+          : 'Sweep higher into supply before reversal trigger'
+        : direction === 'buy'
+          ? 'Sell-side liquidity sweep or zone reaction'
+          : 'Buy-side liquidity sweep or zone reaction',
+    );
+  }
+
+  if (alignedRejection) {
+    fulfilledConditions.push(direction === 'buy' ? 'Bullish rejection from zone' : 'Bearish rejection from zone');
+  } else {
+    requiredTriggers.push(direction === 'buy' ? 'Bullish rejection wick from demand/support/FVG' : 'Bearish rejection wick from supply/resistance/FVG');
+  }
+
+  if (alignedEngulfing) {
+    fulfilledConditions.push(direction === 'buy' ? 'Bullish engulfing confirmation' : 'Bearish engulfing confirmation');
+  } else {
+    requiredTriggers.push(direction === 'buy' ? 'Bullish engulfing candle' : 'Bearish engulfing candle');
+  }
+
+  if (alignedStructure) {
+    fulfilledConditions.push(direction === 'buy' ? 'Bullish micro BOS printed' : 'Bearish micro BOS printed');
+  } else {
+    requiredTriggers.push(
+      mode === 'counter'
+        ? direction === 'buy'
+          ? 'Bullish CHoCH / BOS against the prior drop'
+          : 'Bearish CHoCH / BOS against the prior rally'
+        : direction === 'buy'
+          ? 'Bullish micro BOS / momentum shift'
+          : 'Bearish micro BOS / momentum shift',
+    );
+  }
+
+  if (isReversalSetup) {
+    fulfilledConditions.push(direction === 'buy' ? 'Demand double bottom reversal is visible' : 'Supply double top reversal is visible');
+    contextLabels.push(direction === 'buy' ? 'Demand reversal in play' : 'Supply reversal in play');
+  }
+
+  const entry = currentPrice;
+  const stopLoss = computeStopLoss(symbol, direction, candles);
+  const { takeProfit, takeProfit2 } = resolveTakeProfitTargets(direction, entry, stopLoss, candles);
+
+  const strategy = mode === 'counter'
+    ? `${nearDirectionalZone || isReversalSetup ? 'Counter-Trend Zone Reversal' : 'Counter-Trend Zone Tap'} Watchlist`
+    : `${isReversalSetup
+      ? direction === 'buy'
+        ? 'Demand Double Bottom Reversal'
+        : 'Supply Double Top Reversal'
+      : nearDirectionalZone
+        ? deriveStrategy(direction, sweep)
+        : direction === 'buy'
+          ? 'Bullish Pullback Zone Tap'
+          : 'Bearish Pullback Zone Tap'} Watchlist`;
+
+  const narrative = mode === 'counter'
+    ? buildCounterTrendNarrative(trend, direction, currentPrice, contextLabels, requiredTriggers.slice(0, 3))
+    : buildPotentialNarrative(direction, currentPrice, contextLabels, requiredTriggers.slice(0, 3));
+
+  return {
+    symbol,
+    direction,
+    currentPrice,
+    entry,
+    stopLoss,
+    takeProfit,
+    takeProfit2,
+    activationProbability: Math.min(95, probability),
+    strategy,
+    narrative,
+    fulfilledConditions,
+    requiredTriggers,
+    contextLabels,
+  };
+}
+
 function hasStrongClosure(direction: 'buy' | 'sell', candles: Candle[]): boolean {
   if (candles.length < 2) {
     return false;
@@ -1075,148 +1359,109 @@ export function analyzePotentialTrade(symbol: string, candles: Candle[]): Potent
   const bullishReversal = detectDoubleBottom(candles, currentZone) && hasStrongClosure('buy', candles);
   const bearishReversal = detectDoubleTop(candles, currentZone) && hasStrongClosure('sell', candles);
 
-  if (trend === 'ranging' && !bullishReversal && !bearishReversal) return null;
-
-  const direction: 'buy' | 'sell' = bullishReversal
-    ? 'buy'
-    : bearishReversal
-      ? 'sell'
-      : trend === 'bullish'
-        ? 'buy'
-        : 'sell';
-
-  const isReversalSetup = bullishReversal || bearishReversal;
-  const directionalZone = findDirectionalZone(direction, zones, currentPrice);
-  const directionalFvg = findDirectionalFvg(direction, gaps);
-  const preferredArea = toPriceArea(directionalZone ?? directionalFvg);
-  const pullback = detectPullback(trend, candles);
-  const sweep = detectLiquiditySweep(candles);
-  const last = candles[candles.length - 1];
-  const prev = candles[candles.length - 2];
-  const engulfing = detectEngulfing(prev, last);
-  const rejection = detectRejection(last);
-  const structure = detectStructureBreak(candles);
-
-  const alignedSweep = isSweepAligned(direction, sweep);
-  const alignedRejection = isRejectionAligned(direction, rejection);
-  const alignedEngulfing = isEngulfingAligned(direction, engulfing);
-  const alignedStructure = isStructureAligned(direction, structure);
-  const recentMomentum = detectRecentMomentum(candles);
-  const alignedMomentum = (direction === 'buy' && recentMomentum === 'bullish') || (direction === 'sell' && recentMomentum === 'bearish');
-  const freshReaction = isDirectionalReactionFromArea(direction, preferredArea, candles);
-  const freshDisplacement = hasFreshDisplacement(direction, candles);
-  const stretchedFromArea = isExtendedFromArea(direction, currentPrice, preferredArea, candles);
-
-  let probability = 20;
-  if (pullback) probability += 15;
-  if (directionalZone) probability += 20;
-  if (directionalFvg) probability += 10;
-  if (isReversalSetup) probability += 20;
-  if (freshReaction) probability += 12;
-  if (freshDisplacement) probability += 8;
-  if (alignedSweep) probability += 10;
-  if (alignedRejection) probability += 10;
-  if (alignedEngulfing) probability += 10;
-  if (alignedStructure) probability += 5;
-  if (alignedMomentum) probability += 5;
-  if (stretchedFromArea) probability -= 15;
-
-  if (!directionalZone && !directionalFvg && !pullback) {
-    return null;
-  }
-
-  if (probability < 35) {
-    return null;
-  }
-
-  const fulfilledConditions: string[] = [trend === 'bullish' ? 'Bullish trend context' : 'Bearish trend context'];
-  const requiredTriggers: string[] = [];
-  const contextLabels: string[] = [];
-
-  if (directionalZone) {
-    fulfilledConditions.push(direction === 'buy' ? 'Price is near demand/support zone' : 'Price is near supply/resistance zone');
-    contextLabels.push(direction === 'buy' ? 'Near demand/support' : 'Near supply/resistance');
-  } else {
-    requiredTriggers.push(direction === 'buy' ? 'Price revisit into demand/support zone' : 'Price revisit into supply/resistance zone');
-  }
-
-  if (directionalFvg) {
-    fulfilledConditions.push(direction === 'buy' ? 'Bullish FVG in play' : 'Bearish FVG in play');
-    contextLabels.push(direction === 'buy' ? 'Bullish FVG nearby' : 'Bearish FVG nearby');
-  } else {
-    requiredTriggers.push(direction === 'buy' ? 'Bullish FVG retest or demand reaction' : 'Bearish FVG retest or supply reaction');
-  }
-
-  if (pullback) {
-    fulfilledConditions.push('Pullback location is developing');
-    contextLabels.push('Pullback structure intact');
-  } else {
-    requiredTriggers.push('Cleaner pullback into value area');
-  }
-
-  if (freshReaction) {
-    fulfilledConditions.push(direction === 'buy' ? 'Fresh demand reaction confirmed' : 'Fresh supply reaction confirmed');
-    contextLabels.push(direction === 'buy' ? 'Fresh bullish reaction' : 'Fresh bearish reaction');
-  } else {
-    requiredTriggers.push(direction === 'buy' ? 'Clean bullish reaction from the POI' : 'Clean bearish reaction from the POI');
-  }
-
-  if (freshDisplacement) {
-    fulfilledConditions.push(direction === 'buy' ? 'Bullish displacement is underway' : 'Bearish displacement is underway');
-    contextLabels.push(direction === 'buy' ? 'Displacement up' : 'Displacement down');
-  } else {
-    requiredTriggers.push(direction === 'buy' ? 'Stronger bullish displacement candle' : 'Stronger bearish displacement candle');
-  }
-
-  if (stretchedFromArea) {
-    requiredTriggers.push(direction === 'buy' ? 'Retest closer to demand/FVG before entry' : 'Retest closer to supply/FVG before entry');
-  }
-
-  if (alignedSweep) {
-    fulfilledConditions.push(direction === 'buy' ? 'Sell-side liquidity sweep printed' : 'Buy-side liquidity sweep printed');
-  } else {
-    requiredTriggers.push(direction === 'buy' ? 'Sell-side liquidity sweep or zone reaction' : 'Buy-side liquidity sweep or zone reaction');
-  }
-
-  if (alignedRejection) {
-    fulfilledConditions.push(direction === 'buy' ? 'Bullish rejection from zone' : 'Bearish rejection from zone');
-  } else {
-    requiredTriggers.push(direction === 'buy' ? 'Bullish rejection wick from demand/support/FVG' : 'Bearish rejection wick from supply/resistance/FVG');
-  }
-
-  if (alignedEngulfing) {
-    fulfilledConditions.push(direction === 'buy' ? 'Bullish engulfing confirmation' : 'Bearish engulfing confirmation');
-  } else {
-    requiredTriggers.push(direction === 'buy' ? 'Bullish engulfing candle' : 'Bearish engulfing candle');
-  }
-
-  if (alignedStructure) {
-    fulfilledConditions.push(direction === 'buy' ? 'Bullish micro BOS printed' : 'Bearish micro BOS printed');
-  } else {
-    requiredTriggers.push(direction === 'buy' ? 'Bullish micro BOS / momentum shift' : 'Bearish micro BOS / momentum shift');
-  }
-
-  const entry = currentPrice;
-  const stopLoss = computeStopLoss(symbol, direction, candles);
-  const { takeProfit, takeProfit2 } = resolveTakeProfitTargets(direction, entry, stopLoss, candles);
-
-  return {
-    symbol,
-    direction,
+  const candidates = analyzePotentialTrades(symbol, candles, {
+    trend,
     currentPrice,
-    entry,
-    stopLoss,
-    takeProfit,
-    takeProfit2,
-    activationProbability: Math.min(95, probability),
-    strategy: `${isReversalSetup
-      ? direction === 'buy'
-        ? 'Demand Double Bottom Reversal'
-        : 'Supply Double Top Reversal'
-      : deriveStrategy(direction, sweep)} Watchlist`,
-    narrative: buildPotentialNarrative(direction, currentPrice, contextLabels, requiredTriggers.slice(0, 3)),
-    fulfilledConditions,
-    requiredTriggers,
-    contextLabels,
-  };
+    zones,
+    gaps,
+    currentZone,
+    bullishReversal,
+    bearishReversal,
+  });
+
+  return candidates[0] ?? null;
+}
+
+interface AnalyzePotentialTradeContext {
+  trend: TrendDirection;
+  currentPrice: number;
+  zones: PriceZone[];
+  gaps: FairValueGap[];
+  currentZone: PriceZone | null;
+  bullishReversal: boolean;
+  bearishReversal: boolean;
+}
+
+export function analyzePotentialTrades(
+  symbol: string,
+  candles: Candle[],
+  context?: AnalyzePotentialTradeContext,
+): PotentialTradeSetup[] {
+  if (candles.length < 30) return [];
+
+  const trend = context?.trend ?? detectTrend(candles);
+  const currentPrice = context?.currentPrice ?? candles[candles.length - 1].close;
+  const lookLeftCandles = candles.slice(-Math.min(500, candles.length));
+  const zones = context?.zones ?? buildZones(lookLeftCandles, currentPrice);
+  const gaps = context?.gaps ?? buildFairValueGaps(lookLeftCandles, currentPrice);
+  const currentZone = context?.currentZone ?? isNearZone(currentPrice, zones, 0.0025);
+  const bullishReversal = context?.bullishReversal ?? (detectDoubleBottom(candles, currentZone) && hasStrongClosure('buy', candles));
+  const bearishReversal = context?.bearishReversal ?? (detectDoubleTop(candles, currentZone) && hasStrongClosure('sell', candles));
+
+  if (trend === 'ranging' && !bullishReversal && !bearishReversal) {
+    return [];
+  }
+
+  const candidates: PotentialTradeSetup[] = [];
+
+  if (trend === 'bullish' || trend === 'bearish') {
+    const trendDirection = trend === 'bullish' ? 'buy' : 'sell';
+    const continuationCandidate = buildPotentialCandidate({
+      symbol,
+      candles,
+      trend,
+      currentPrice,
+      zones,
+      gaps,
+      currentZone,
+      direction: trendDirection,
+      mode: 'trend',
+      bullishReversal,
+      bearishReversal,
+    });
+    if (continuationCandidate) {
+      candidates.push(continuationCandidate);
+    }
+
+    const counterCandidate = buildPotentialCandidate({
+      symbol,
+      candles,
+      trend,
+      currentPrice,
+      zones,
+      gaps,
+      currentZone,
+      direction: getOppositeDirection(trendDirection),
+      mode: 'counter',
+      bullishReversal,
+      bearishReversal,
+    });
+    if (counterCandidate) {
+      candidates.push(counterCandidate);
+    }
+  } else {
+    const reversalDirection = bullishReversal ? 'buy' : bearishReversal ? 'sell' : null;
+    if (reversalDirection) {
+      const reversalCandidate = buildPotentialCandidate({
+        symbol,
+        candles,
+        trend,
+        currentPrice,
+        zones,
+        gaps,
+        currentZone,
+        direction: reversalDirection,
+        mode: 'counter',
+        bullishReversal,
+        bearishReversal,
+      });
+      if (reversalCandidate) {
+        candidates.push(reversalCandidate);
+      }
+    }
+  }
+
+  return candidates
+    .filter((candidate, index, array) => array.findIndex((item) => item.direction === candidate.direction && item.strategy === candidate.strategy) === index)
+    .sort((left, right) => right.activationProbability - left.activationProbability);
 }
