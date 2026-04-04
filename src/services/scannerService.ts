@@ -6,7 +6,6 @@ import { DERIV_SCANNER_SYMBOL_IDS, SESSION_SCANNER_SYMBOL_IDS, VOLATILITY_SCANNE
 import { scheduleScannerPanelRefreshForAllUsers, scheduleScannerPanelRefreshForUser } from '../lib/scanner/panelStream';
 import { analyzeMarket, analyzePotentialTrades, detectTrend, findSwingHighsLows, type Candle, type PotentialTradeSetup, type TrendDirection } from './scannerEngine';
 import { sendPushToUser } from './pushService';
-import { createTradeLogFromScanResult, syncTradeLogFromScanResult } from './tradeLogService';
 
 // ── Types ──
 
@@ -713,10 +712,6 @@ async function updateScanResult(
 
   if (error) throw new Error(error.message);
 
-  if (updates.status === 'closed' && updates.closeReason) {
-    await syncTradeLogFromScanResult(id, updates.status, updates.closeReason, updates.closedAt ?? null);
-  }
-
   mutateLiveResultCache(id, updates);
   if (existingResult?.userId) {
     scheduleScannerPanelRefreshForUser(String(existingResult.userId));
@@ -736,21 +731,8 @@ async function insertScanResult(result: Omit<ScanResult, 'id' | 'createdAt'>): P
     .single();
 
   if (error) throw new Error(error.message);
-  const scanResult = data as ScanResult;
-  registerLiveResultInCache(scanResult);
-
-  try {
-    await createTradeLogFromScanResult(scanResult);
-  } catch (tradeLogError) {
-    removeLiveResultFromCache(scanResult);
-    await supabase
-      .from(SCAN_RESULT_TABLE)
-      .delete()
-      .eq('id', scanResult.id);
-    throw tradeLogError;
-  }
-
-  return scanResult;
+  registerLiveResultInCache(data as ScanResult);
+  return data as ScanResult;
 }
 
 function registerLiveResultInCache(result: ScanResult) {

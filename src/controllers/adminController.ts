@@ -32,7 +32,6 @@ import { serializeAnalysis } from './analysisController';
 import { setBillingStateFromAdmin } from '../services/billing';
 import { setBillingStateFromPayment } from '../services/billing';
 import { processReferralPayment } from '../services/referralService';
-import { getAdminTradeLogOverview } from '../services/tradeLogService';
 
 const ANNOUNCEMENT_CONTENT_VERSION = 1;
 
@@ -148,16 +147,6 @@ export const getDashboardStats = async (_req: Request, res: Response) => {
   } catch (error) {
     console.error('Admin dashboard error:', error);
     return res.status(500).json({ error: 'Failed to get stats' });
-  }
-};
-
-export const getTradeLogDashboard = async (_req: Request, res: Response) => {
-  try {
-    const tradeLog = await getAdminTradeLogOverview();
-    return res.json(tradeLog);
-  } catch (error) {
-    console.error('Admin trade log error:', error);
-    return res.status(500).json({ error: 'Failed to get trade log analytics' });
   }
 };
 

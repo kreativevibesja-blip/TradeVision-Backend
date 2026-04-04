@@ -19,7 +19,6 @@ import {
   SCANNER_TIMEFRAME,
   type SessionType,
 } from '../services/scannerService';
-import { getUserTradeJournal, recordTradeDecision } from '../services/tradeLogService';
 
 const isValidSessionType = (value: unknown): value is SessionType =>
   value === 'london' || value === 'newyork' || value === 'volatility';
@@ -207,41 +206,3 @@ export const expireSession = async (req: AuthRequest, res: Response) => {
   }
 };
 
-// GET /api/scanner/trade-log
-export const getTradeLog = async (req: AuthRequest, res: Response) => {
-  try {
-    if (!req.user) return res.status(401).json({ error: 'Authentication required' });
-
-    const tradeLog = await getUserTradeJournal(req.user.id);
-    return res.json(tradeLog);
-  } catch (error: any) {
-    console.error('[Scanner] Trade log error:', error);
-    return res.status(500).json({ error: error?.message || 'Failed to load trade log' });
-  }
-};
-
-// POST /api/scanner/trade-log/action
-export const saveTradeAction = async (req: AuthRequest, res: Response) => {
-  try {
-    if (!req.user) return res.status(401).json({ error: 'Authentication required' });
-
-    const { tradeId, action, skipReason } = req.body;
-    if (typeof tradeId !== 'string' || tradeId.trim().length === 0) {
-      return res.status(400).json({ error: 'tradeId is required' });
-    }
-
-    if (action !== 'taken' && action !== 'skipped') {
-      return res.status(400).json({ error: 'action must be either "taken" or "skipped"' });
-    }
-
-    if (action === 'skipped' && (typeof skipReason !== 'string' || skipReason.trim().length === 0)) {
-      return res.status(400).json({ error: 'skipReason is required when skipping a trade' });
-    }
-
-    const trade = await recordTradeDecision(req.user.id, tradeId.trim(), action, skipReason);
-    return res.json({ trade });
-  } catch (error: any) {
-    console.error('[Scanner] Save trade action error:', error);
-    return res.status(500).json({ error: error?.message || 'Failed to save trade action' });
-  }
-};

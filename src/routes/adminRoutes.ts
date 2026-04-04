@@ -21,7 +21,6 @@ import {
   createAnnouncement,
   updateAnnouncement,
   deleteAnnouncement,
-  getTradeLogDashboard,
 } from '../controllers/adminController';
 import { getAdminTickets, getOpenTicketCount, updateAdminTicket, replyToTicket, createAdminTicket } from '../controllers/ticketController';
 import { getCoupons, createCoupon, toggleCoupon, deleteCoupon } from '../controllers/couponController';
@@ -54,7 +53,6 @@ router.get('/public-pricing-plans', getPublicPricingPlans);
 router.use(authenticate, requireAdmin);
 
 router.get('/dashboard', getDashboardStats);
-router.get('/trade-log', getTradeLogDashboard);
 router.get('/users', getUsers);
 router.patch('/users/:id', updateUser);
 router.get('/analyses', getAnalysisLogs);
