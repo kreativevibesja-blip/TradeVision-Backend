@@ -116,10 +116,9 @@ const SCANNER_TIMEFRAME = 'M15';
 const LIVE_RESULT_CACHE_SYNC_MS = 20_000;
 const HIGH_CONFIDENCE_POTENTIAL_THRESHOLD = 90;
 
-const TIMEFRAME_TO_GRANULARITY: Record<'M15' | 'H1' | 'H4', 900 | 3600 | 14400> = {
+const TIMEFRAME_TO_GRANULARITY: Record<'M15' | 'H1', 900 | 3600> = {
   M15: 900,
   H1: 3600,
-  H4: 14400,
 };
 
 type ScanResultScope = 'all' | 'current' | 'history';
@@ -309,7 +308,7 @@ function isDuplicatePotentialAlert(userId: string, potential: Pick<PotentialTrad
   return false;
 }
 
-async function loadScannerCandles(symbol: string, timeframe: 'M15' | 'H1' | 'H4', limit: number, minimum = 50): Promise<Candle[]> {
+async function loadScannerCandles(symbol: string, timeframe: 'M15' | 'H1', limit: number, minimum = 50): Promise<Candle[]> {
   const granularity = TIMEFRAME_TO_GRANULARITY[timeframe];
 
   try {
@@ -403,21 +402,17 @@ function selectDirectionalTarget(
   return Math.min(candidate, floorTarget);
 }
 
-interface HigherTimeframeScanContext {
+interface H1ScanContext {
   h1Candles: Candle[];
-  h4Candles: Candle[];
 }
 
-function refinePotentialTradeWithHigherTimeframes(
+function refinePotentialTradeWithH1(
   potential: PotentialTradeSetup,
-  higherTimeframes: HigherTimeframeScanContext,
+  h1Context: H1ScanContext,
 ): PotentialTradeSetup | null {
-  const h1Trend = detectTrend(higherTimeframes.h1Candles);
-  const h4Trend = detectTrend(higherTimeframes.h4Candles);
+  const h1Trend = detectTrend(h1Context.h1Candles);
   const alignedH1 = isTrendAlignedForDirection(potential.direction, h1Trend);
-  const alignedH4 = isTrendAlignedForDirection(potential.direction, h4Trend);
   const opposedH1 = isTrendOpposedToDirection(potential.direction, h1Trend);
-  const opposedH4 = isTrendOpposedToDirection(potential.direction, h4Trend);
   const nextPotential: PotentialTradeSetup = {
     ...potential,
     fulfilledConditions: [...potential.fulfilledConditions],
@@ -436,18 +431,7 @@ function refinePotentialTradeWithHigherTimeframes(
     nextPotential.activationProbability = Math.min(89, nextPotential.activationProbability - 4);
   }
 
-  if (alignedH4) {
-    nextPotential.fulfilledConditions.push(`H4 ${potential.direction === 'buy' ? 'bullish' : 'bearish'} bias aligns`);
-    nextPotential.contextLabels.push('H4 aligned');
-  } else if (opposedH4) {
-    nextPotential.requiredTriggers.unshift(`H4 bias realigns with the ${potential.direction.toUpperCase()} direction`);
-    nextPotential.activationProbability = Math.min(84, nextPotential.activationProbability - 14);
-  } else {
-    nextPotential.contextLabels.push('H4 neutral');
-    nextPotential.activationProbability = Math.min(88, nextPotential.activationProbability - 6);
-  }
-
-  if (!alignedH1 && !alignedH4 && (opposedH1 || opposedH4)) {
+  if (!alignedH1 && opposedH1) {
     return null;
   }
 
@@ -458,10 +442,7 @@ function refinePotentialTradeWithHigherTimeframes(
   const fallbackTakeProfit2 = nextPotential.direction === 'buy'
     ? nextPotential.entry + risk * 3
     : nextPotential.entry - risk * 3;
-  const higherTimeframeTargets = sortDirectionalTargets(nextPotential.direction, [
-    ...collectHigherTimeframeTargets(nextPotential.direction, higherTimeframes.h1Candles, nextPotential.entry),
-    ...collectHigherTimeframeTargets(nextPotential.direction, higherTimeframes.h4Candles, nextPotential.entry),
-  ]).filter((price, index, array) => array.indexOf(price) === index);
+  const higherTimeframeTargets = collectHigherTimeframeTargets(nextPotential.direction, h1Context.h1Candles, nextPotential.entry);
 
   nextPotential.takeProfit = selectDirectionalTarget(
     nextPotential.direction,
@@ -486,10 +467,28 @@ function refinePotentialTradeWithHigherTimeframes(
     nextPotential.takeProfit2 = Math.min(fallbackTakeProfit2, nextPotential.takeProfit - risk);
   }
 
-  nextPotential.fulfilledConditions.push('Higher-timeframe target map applied');
-  nextPotential.contextLabels.push('TP refined with H1/H4 structure');
+  nextPotential.fulfilledConditions.push('H1 target map applied');
+  nextPotential.contextLabels.push('TP refined with H1 structure');
 
   return nextPotential;
+}
+
+function promotePotentialToScanCycleResult(potential: PotentialTradeSetup): ScanCycleResult {
+  return {
+    symbol: potential.symbol,
+    direction: potential.direction,
+    entry: potential.entry,
+    stopLoss: potential.stopLoss,
+    takeProfit: potential.takeProfit,
+    takeProfit2: potential.takeProfit2,
+    confidenceScore: Math.max(HIGH_CONFIDENCE_POTENTIAL_THRESHOLD, Math.round(potential.activationProbability)),
+    strategy: potential.strategy.replace(/ Watchlist$/i, ''),
+    confirmations: [
+      ...potential.fulfilledConditions.slice(0, 4),
+      'H1 bias confirmation',
+    ].filter((label, index, array) => array.indexOf(label) === index),
+    score: 9,
+  };
 }
 
 async function loadLatestScannerPrice(symbol: string): Promise<number | null> {
@@ -983,25 +982,22 @@ async function buildPotentialForSymbol(symbol: string): Promise<PotentialTradeSe
       return potentials;
     }
 
-    const [h1Candles, h4Candles] = await Promise.all([
-      loadScannerCandles(symbol, 'H1', 320, 80),
-      loadScannerCandles(symbol, 'H4', 220, 60),
-    ]);
+    const h1Candles = await loadScannerCandles(symbol, 'H1', 320, 80);
 
-    if (h1Candles.length < 80 || h4Candles.length < 60) {
+    if (h1Candles.length < 80) {
       return potentials.map((potential) => potential.activationProbability >= HIGH_CONFIDENCE_POTENTIAL_THRESHOLD
         ? {
             ...potential,
             activationProbability: Math.min(89, potential.activationProbability - 5),
-            requiredTriggers: ['Need H1/H4 confluence before promoting this setup', ...potential.requiredTriggers],
-            contextLabels: [...potential.contextLabels, 'Waiting for H1/H4 confirmation'],
+            requiredTriggers: ['Need H1 confirmation before promoting this setup', ...potential.requiredTriggers],
+            contextLabels: [...potential.contextLabels, 'Waiting for H1 confirmation'],
           }
         : potential);
     }
 
     return potentials
       .map((potential) => potential.activationProbability >= HIGH_CONFIDENCE_POTENTIAL_THRESHOLD
-        ? refinePotentialTradeWithHigherTimeframes(potential, { h1Candles, h4Candles })
+        ? refinePotentialTradeWithH1(potential, { h1Candles })
         : potential)
       .filter((potential): potential is PotentialTradeSetup => potential !== null);
   } catch (err) {
@@ -1015,6 +1011,19 @@ async function scanSymbol(symbol: string): Promise<ScanCycleResult | null> {
     const candles = await loadScannerCandles(symbol, 'M15', 600);
     if (candles.length < 50) {
       return null;
+    }
+
+    const potentials = analyzePotentialTrades(symbol, candles);
+    const promotablePotential = potentials.find((potential) => potential.activationProbability >= HIGH_CONFIDENCE_POTENTIAL_THRESHOLD) ?? null;
+
+    if (promotablePotential) {
+      const h1Candles = await loadScannerCandles(symbol, 'H1', 320, 80);
+      if (h1Candles.length >= 80) {
+        const refinedPotential = refinePotentialTradeWithH1(promotablePotential, { h1Candles });
+        if (refinedPotential && refinedPotential.activationProbability >= HIGH_CONFIDENCE_POTENTIAL_THRESHOLD) {
+          return promotePotentialToScanCycleResult(refinedPotential);
+        }
+      }
     }
 
     const setup = analyzeMarket(symbol, candles);
