@@ -25,11 +25,6 @@ export const VOLATILITY_SCANNER_SYMBOL_IDS = [
   'R_50',
   'R_75',
   'R_100',
-  '1HZ10V',
-  '1HZ25V',
-  '1HZ50V',
-  '1HZ75V',
-  '1HZ100V',
 ] as const;
 
 export const DERIV_SCANNER_SYMBOL_IDS = [...SESSION_SCANNER_SYMBOL_IDS, ...VOLATILITY_SCANNER_SYMBOL_IDS];
