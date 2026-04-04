@@ -57,6 +57,7 @@ export interface PriceZone {
   top: number;
   bottom: number;
   distanceToPrice: number;
+  originIndex?: number;
 }
 
 export interface FairValueGap {
@@ -64,6 +65,7 @@ export interface FairValueGap {
   top: number;
   bottom: number;
   distanceToPrice: number;
+  originIndex?: number;
 }
 
 interface PriceArea {
@@ -495,6 +497,35 @@ function computeStopLoss(symbol: string, direction: 'buy' | 'sell', candles: Can
   const last = candles[candles.length - 1];
   const atr = computeAtr(candles, profile.atrPeriod);
   const averageRange = average(recent.map((c) => c.high - c.low));
+  const lookLeftCandles = candles.slice(-Math.min(500, candles.length));
+  const zones = buildZones(lookLeftCandles, last.close);
+  const gaps = buildFairValueGaps(lookLeftCandles, last.close);
+  const directionalZone = findDirectionalZone(direction, zones, last.close);
+  const directionalFvg = findDirectionalFvg(direction, gaps);
+
+  const zoneBuffer = (areaTop: number, areaBottom: number) => {
+    const areaHeight = Math.max(Math.abs(areaTop - areaBottom), 0.0001);
+    return Math.max(
+      atr * 0.18,
+      averageRange * 0.12,
+      areaHeight * 0.18,
+      last.close * Math.max(profile.bufferPriceRatio * 0.35, 0.00008),
+    );
+  };
+
+  if (directionalZone) {
+    const buffer = zoneBuffer(directionalZone.top, directionalZone.bottom);
+    return direction === 'buy'
+      ? directionalZone.bottom - buffer
+      : directionalZone.top + buffer;
+  }
+
+  if (directionalFvg) {
+    const buffer = zoneBuffer(directionalFvg.top, directionalFvg.bottom);
+    return direction === 'buy'
+      ? Math.min(directionalFvg.bottom, directionalFvg.top) - buffer
+      : Math.max(directionalFvg.top, directionalFvg.bottom) + buffer;
+  }
 
   if (direction === 'buy') {
     const swingLow = Math.min(...recent.map((c) => c.low));
@@ -643,6 +674,7 @@ export function buildZones(candles: Candle[], currentPrice: number): PriceZone[]
         top,
         bottom,
         distanceToPrice: Math.min(Math.abs(currentPrice - top), Math.abs(currentPrice - bottom)),
+        originIndex: swing.index,
       });
     }
 
@@ -654,6 +686,7 @@ export function buildZones(candles: Candle[], currentPrice: number): PriceZone[]
         top,
         bottom,
         distanceToPrice: Math.min(Math.abs(currentPrice - top), Math.abs(currentPrice - bottom)),
+        originIndex: swing.index,
       });
     }
   }
@@ -674,6 +707,7 @@ export function buildFairValueGaps(candles: Candle[], currentPrice: number): Fai
         top: right.low,
         bottom: left.high,
         distanceToPrice: Math.min(Math.abs(currentPrice - right.low), Math.abs(currentPrice - left.high)),
+        originIndex: index,
       });
     }
 
@@ -683,6 +717,7 @@ export function buildFairValueGaps(candles: Candle[], currentPrice: number): Fai
         top: left.low,
         bottom: right.high,
         distanceToPrice: Math.min(Math.abs(currentPrice - left.low), Math.abs(currentPrice - right.high)),
+        originIndex: index,
       });
     }
   }
@@ -699,11 +734,29 @@ function findDirectionalZone(direction: 'buy' | 'sell', zones: PriceZone[], curr
     return zone.type === 'supply' && zone.bottom >= currentPrice * 0.99;
   });
 
-  return matchingZones[0] ?? null;
+  return matchingZones.sort((left, right) => {
+    const rightIndex = right.originIndex ?? -1;
+    const leftIndex = left.originIndex ?? -1;
+    if (rightIndex !== leftIndex) {
+      return rightIndex - leftIndex;
+    }
+
+    return left.distanceToPrice - right.distanceToPrice;
+  })[0] ?? null;
 }
 
 function findDirectionalFvg(direction: 'buy' | 'sell', gaps: FairValueGap[]): FairValueGap | null {
-  return gaps.find((gap) => (direction === 'buy' ? gap.type === 'bullish' : gap.type === 'bearish')) ?? null;
+  return gaps
+    .filter((gap) => (direction === 'buy' ? gap.type === 'bullish' : gap.type === 'bearish'))
+    .sort((left, right) => {
+      const rightIndex = right.originIndex ?? -1;
+      const leftIndex = left.originIndex ?? -1;
+      if (rightIndex !== leftIndex) {
+        return rightIndex - leftIndex;
+      }
+
+      return left.distanceToPrice - right.distanceToPrice;
+    })[0] ?? null;
 }
 
 function buildPotentialNarrative(direction: 'buy' | 'sell', currentPrice: number, contextLabels: string[], requiredTriggers: string[]) {
