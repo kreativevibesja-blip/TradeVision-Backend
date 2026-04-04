@@ -2,7 +2,6 @@ import { saveClosedCandle } from '../db/saveClosedCandle';
 import { appendClosedCandle, getActiveCandle, setActiveCandle, type ActiveCandleState } from './activeCandles';
 
 const TIMEFRAME_LABELS: Record<number, string> = {
-  300: 'M5',
   900: 'M15',
 };
 
@@ -51,6 +50,5 @@ export async function updateCandle(symbol: string, price: number, epoch: number,
 }
 
 export async function updateCandlesForTick(symbol: string, price: number, epoch: number) {
-  await updateCandle(symbol, price, epoch, 300);
   await updateCandle(symbol, price, epoch, 900);
 }

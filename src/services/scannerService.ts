@@ -106,8 +106,7 @@ const SCANNER_SYMBOLS_BY_SESSION: Record<SessionType, readonly string[]> = {
 const SCANNER_TIMEFRAME = 'M15';
 const LIVE_RESULT_CACHE_SYNC_MS = 20_000;
 
-const TIMEFRAME_TO_GRANULARITY: Record<'M5' | 'M15', 300 | 900> = {
-  M5: 300,
+const TIMEFRAME_TO_GRANULARITY: Record<'M15', 900> = {
   M15: 900,
 };
 
@@ -226,7 +225,7 @@ function isDuplicatePotentialAlert(userId: string, potential: Pick<PotentialTrad
   return false;
 }
 
-async function loadScannerCandles(symbol: string, timeframe: 'M5' | 'M15', limit: number, minimum = 50): Promise<Candle[]> {
+async function loadScannerCandles(symbol: string, timeframe: 'M15', limit: number, minimum = 50): Promise<Candle[]> {
   const granularity = TIMEFRAME_TO_GRANULARITY[timeframe];
 
   try {
@@ -235,7 +234,7 @@ async function loadScannerCandles(symbol: string, timeframe: 'M5' | 'M15', limit
     console.error(`[Scanner] Failed to ensure Deriv subscription for ${symbol}:`, error);
   }
 
-  const runtimeCandles = getRuntimeCandles(symbol, granularity, limit, timeframe === 'M5');
+  const runtimeCandles = getRuntimeCandles(symbol, granularity, limit, true);
   if (runtimeCandles.length >= minimum) {
     return runtimeCandles.map((candle) => ({
       open: candle.open,
@@ -272,7 +271,7 @@ async function loadScannerCandles(symbol: string, timeframe: 'M5' | 'M15', limit
 }
 
 async function loadLatestScannerPrice(symbol: string): Promise<number | null> {
-  const candles = await loadScannerCandles(symbol, 'M5', 2, 1);
+  const candles = await loadScannerCandles(symbol, 'M15', 2, 1);
   return candles[candles.length - 1]?.close ?? null;
 }
 
