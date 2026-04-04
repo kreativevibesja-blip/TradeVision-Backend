@@ -1,3 +1,5 @@
+import { analyzeEmaTrend, isEmaDirectionAligned, type EmaTrendContext } from '../lib/indicators/ema';
+
 // ============================================================
 // Smart Session Scanner — Pure Logic Trade Detection Engine
 // No AI calls. Deterministic candle-based detection only.
@@ -842,6 +844,7 @@ interface PotentialCandidateInput {
   candles: Candle[];
   trend: TrendDirection;
   broaderTrend: TrendDirection;
+  emaTrend: EmaTrendContext;
   currentPrice: number;
   zones: PriceZone[];
   gaps: FairValueGap[];
@@ -859,6 +862,7 @@ function buildPotentialCandidate({
   candles,
   trend,
   broaderTrend,
+  emaTrend,
   currentPrice,
   zones,
   gaps,
@@ -892,6 +896,7 @@ function buildPotentialCandidate({
   const stretchedFromArea = isExtendedFromArea(direction, currentPrice, preferredArea, candles);
   const nearDirectionalZone = directionalZone ? isNearZone(currentPrice, [directionalZone], 0.0025) !== null : false;
   const isReversalSetup = direction === 'buy' ? bullishReversal : bearishReversal;
+  const emaAligned = isEmaDirectionAligned(direction, emaTrend);
   const counterPressureCount = [
     nearDirectionalZone,
     freshReaction,
@@ -920,6 +925,14 @@ function buildPotentialCandidate({
     return null;
   }
 
+  if (emaTrend.trend !== 'ranging' && mode === 'trend' && !emaAligned) {
+    return null;
+  }
+
+  if (emaTrend.trend !== 'ranging' && mode === 'counter' && !emaAligned && (!isReversalSetup || !poiReclaim || !alignedStructure)) {
+    return null;
+  }
+
   if (!directionalZone && !directionalFvg && !(mode === 'trend' && pullback)) {
     return null;
   }
@@ -944,7 +957,9 @@ function buildPotentialCandidate({
   if (alignedEngulfing) probability += 10;
   if (alignedStructure) probability += mode === 'counter' ? 10 : 5;
   if (alignedMomentum) probability += 5;
+  if (emaAligned) probability += 10;
   if (stretchedFromArea) probability -= 15;
+  if (emaTrend.trend !== 'ranging' && !emaAligned) probability -= mode === 'counter' ? 16 : 28;
 
   if (mode === 'counter' && !nearDirectionalZone && counterPressureCount < 2) {
     return null;
@@ -967,6 +982,16 @@ function buildPotentialCandidate({
   } else {
     fulfilledConditions.push(`Counter-trend idea against ${trend === 'ranging' ? 'a range' : trend} backdrop`);
     contextLabels.push('Aggressive one-tap style setup');
+  }
+
+  if (emaTrend.trend !== 'ranging') {
+    if (emaAligned) {
+      fulfilledConditions.push(direction === 'buy' ? 'EMA 50 and EMA 200 support bullish continuation' : 'EMA 50 and EMA 200 support bearish continuation');
+      contextLabels.push(emaTrend.trend === 'bullish' ? 'EMA bullish stack' : 'EMA bearish stack');
+    } else {
+      requiredTriggers.push(direction === 'buy' ? 'EMA 50/200 trend flip back bullish' : 'EMA 50/200 trend flip back bearish');
+      contextLabels.push(emaTrend.trend === 'bullish' ? 'EMA bearish trade is countertrend' : 'EMA bullish trade is countertrend');
+    }
   }
 
   if (directionalZone) {
@@ -1426,6 +1451,7 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
 
   const trend = detectTrend(candles);
   const broaderTrend = detectContextTrend(candles);
+  const emaTrend = analyzeEmaTrend(candles);
   const currentPrice = candles[candles.length - 1].close;
   const lookLeftCandles = candles.slice(-Math.min(500, candles.length));
   const zones = buildZones(lookLeftCandles, currentPrice);
@@ -1481,6 +1507,7 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   const poiReclaim = direction === 'buy' ? bullishPoiReclaim : bearishPoiReclaim;
   const freshDisplacement = hasFreshDisplacement(direction, candles);
   const stretchedFromArea = isExtendedFromArea(direction, currentPrice, preferredArea, candles);
+  const emaAligned = isEmaDirectionAligned(direction, emaTrend);
 
   if (direction === 'sell' && currentZone?.type === 'demand' && bullishPoiReclaim) return null;
   if (direction === 'buy' && currentZone?.type === 'supply' && bearishPoiReclaim) return null;
@@ -1495,6 +1522,12 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   const directionalConfirmationCount = [alignedSweep, alignedEngulfing, alignedRejection, alignedStructure, alignedMomentum, poiReclaim]
     .filter(Boolean)
     .length;
+
+  if (emaTrend.trend !== 'ranging' && !emaAligned) {
+    if (!isReversalSetup || !poiReclaim || !alignedStructure || directionalConfirmationCount < 3) {
+      return null;
+    }
+  }
 
   if (directionalConfirmationCount < 2 && !isReversalSetup) return null;
   if (!alignedEngulfing && !alignedRejection && !alignedStructure && !poiReclaim && !isReversalSetup) return null;
@@ -1553,6 +1586,9 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
       : deriveStrategy(direction, sweep),
     confirmations,
     confirmationLabels: [
+      ...(emaTrend.trend !== 'ranging' && emaAligned
+        ? [direction === 'buy' ? 'EMA 50 above EMA 200 and price holding above EMA 50' : 'EMA 50 below EMA 200 and price holding below EMA 50']
+        : []),
       ...(isReversalSetup ? [direction === 'buy' ? 'Double bottom at demand' : 'Double top at supply', direction === 'buy' ? 'Bullish closure confirmation' : 'Bearish closure confirmation'] : []),
       ...(poiReclaim && !isReversalSetup ? [direction === 'buy' ? 'POI reclaim from demand/support' : 'POI reclaim from supply/resistance'] : []),
       ...buildConfirmationLabels(confirmations),
@@ -1596,6 +1632,7 @@ export function analyzePotentialTrade(symbol: string, candles: Candle[]): Potent
 interface AnalyzePotentialTradeContext {
   trend: TrendDirection;
   broaderTrend?: TrendDirection;
+  emaTrend?: EmaTrendContext;
   currentPrice: number;
   zones: PriceZone[];
   gaps: FairValueGap[];
@@ -1615,6 +1652,7 @@ export function analyzePotentialTrades(
 
   const trend = context?.trend ?? detectTrend(candles);
   const broaderTrend = context?.broaderTrend ?? detectContextTrend(candles);
+  const emaTrend = context?.emaTrend ?? analyzeEmaTrend(candles);
   const currentPrice = context?.currentPrice ?? candles[candles.length - 1].close;
   const lookLeftCandles = candles.slice(-Math.min(500, candles.length));
   const zones = context?.zones ?? buildZones(lookLeftCandles, currentPrice);
@@ -1640,6 +1678,7 @@ export function analyzePotentialTrades(
       candles,
       trend,
       broaderTrend,
+      emaTrend,
       currentPrice,
       zones,
       gaps,
@@ -1660,6 +1699,7 @@ export function analyzePotentialTrades(
       candles,
       trend,
       broaderTrend,
+      emaTrend,
       currentPrice,
       zones,
       gaps,
@@ -1682,6 +1722,7 @@ export function analyzePotentialTrades(
         candles,
         trend,
         broaderTrend,
+        emaTrend,
         currentPrice,
         zones,
         gaps,
