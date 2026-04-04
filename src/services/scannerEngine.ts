@@ -767,6 +767,111 @@ function buildPotentialNarrative(direction: 'buy' | 'sell', currentPrice: number
   return `Market is showing ${side} potential around ${currentPrice.toFixed(currentPrice >= 100 ? 2 : 5)}. Current context: ${contextText}. The scanner is waiting for ${triggerText} before activating the trade.`;
 }
 
+function hasStrongClosure(direction: 'buy' | 'sell', candles: Candle[]): boolean {
+  if (candles.length < 2) {
+    return false;
+  }
+
+  const last = candles[candles.length - 1];
+  const prev = candles[candles.length - 2];
+  const range = Math.max(last.high - last.low, 0.0001);
+  const body = Math.abs(last.close - last.open);
+
+  if (body < range * 0.45) {
+    return false;
+  }
+
+  if (direction === 'buy') {
+    return last.close > last.open && last.close >= last.low + range * 0.7 && last.close > prev.high;
+  }
+
+  return last.close < last.open && last.close <= last.high - range * 0.3 && last.close < prev.low;
+}
+
+function detectDoubleBottom(candles: Candle[], zone: PriceZone | null): boolean {
+  if (!zone || zone.type !== 'demand' || candles.length < 8) {
+    return false;
+  }
+
+  const recent = candles.slice(-10);
+  const lows = recent
+    .map((candle, index) => ({ candle, index }))
+    .filter(({ candle }) => candle.low <= zone.top && candle.low >= zone.bottom * 0.995)
+    .sort((left, right) => left.candle.low - right.candle.low);
+
+  if (lows.length < 2) {
+    return false;
+  }
+
+  const first = lows[0];
+  const second = lows.find((item) => Math.abs(item.candle.low - first.candle.low) <= Math.max(Math.abs(zone.top - zone.bottom) * 0.35, first.candle.low * 0.0015) && Math.abs(item.index - first.index) >= 2);
+
+  return Boolean(second);
+}
+
+function detectDoubleTop(candles: Candle[], zone: PriceZone | null): boolean {
+  if (!zone || zone.type !== 'supply' || candles.length < 8) {
+    return false;
+  }
+
+  const recent = candles.slice(-10);
+  const highs = recent
+    .map((candle, index) => ({ candle, index }))
+    .filter(({ candle }) => candle.high >= zone.bottom && candle.high <= zone.top * 1.005)
+    .sort((left, right) => right.candle.high - left.candle.high);
+
+  if (highs.length < 2) {
+    return false;
+  }
+
+  const first = highs[0];
+  const second = highs.find((item) => Math.abs(item.candle.high - first.candle.high) <= Math.max(Math.abs(zone.top - zone.bottom) * 0.35, first.candle.high * 0.0015) && Math.abs(item.index - first.index) >= 2);
+
+  return Boolean(second);
+}
+
+function findRecentDirectionalTargets(direction: 'buy' | 'sell', candles: Candle[], entry: number): number[] {
+  const swings = findSwingHighsLows(candles.slice(-Math.min(120, candles.length)));
+  const sourceCandles = candles.slice(-Math.min(120, candles.length));
+
+  const prices = swings
+    .filter((swing) => (direction === 'buy' ? swing.type === 'high' && swing.price > entry : swing.type === 'low' && swing.price < entry))
+    .sort((left, right) => right.index - left.index)
+    .map((swing) => sourceCandles[swing.index]?.[swing.type] ?? swing.price)
+    .filter((price, index, array) => Number.isFinite(price) && array.indexOf(price) === index);
+
+  return prices;
+}
+
+function resolveTakeProfitTargets(direction: 'buy' | 'sell', entry: number, stopLoss: number, candles: Candle[]) {
+  const fallbackTp1 = computeTakeProfit(direction, entry, stopLoss);
+  const fallbackTp2 = computeSecondaryTakeProfit(direction, entry, stopLoss);
+  const targets = findRecentDirectionalTargets(direction, candles, entry);
+
+  const takeProfit = targets[0] ?? fallbackTp1;
+  let takeProfit2 = targets[1] ?? fallbackTp2;
+
+  if (direction === 'buy') {
+    if (takeProfit <= entry) {
+      return { takeProfit: fallbackTp1, takeProfit2: fallbackTp2 };
+    }
+
+    if (takeProfit2 <= takeProfit) {
+      takeProfit2 = Math.max(fallbackTp2, takeProfit + Math.abs(entry - stopLoss));
+    }
+  } else {
+    if (takeProfit >= entry) {
+      return { takeProfit: fallbackTp1, takeProfit2: fallbackTp2 };
+    }
+
+    if (takeProfit2 >= takeProfit) {
+      takeProfit2 = Math.min(fallbackTp2, takeProfit - Math.abs(entry - stopLoss));
+    }
+  }
+
+  return { takeProfit, takeProfit2 };
+}
+
 export function isNearZone(currentPrice: number, zones: PriceZone[], bufferRatio = 0.0015): PriceZone | null {
   for (const zone of zones) {
     const dynamicBuffer = Math.max(currentPrice * bufferRatio, Math.abs(zone.top - zone.bottom) * 0.2);
@@ -841,13 +946,25 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   if (candles.length < 30) return null;
 
   const trend = detectTrend(candles);
-  if (trend === 'ranging') return null;
-
-  const direction: 'buy' | 'sell' = trend === 'bullish' ? 'buy' : 'sell';
   const currentPrice = candles[candles.length - 1].close;
   const lookLeftCandles = candles.slice(-Math.min(500, candles.length));
   const zones = buildZones(lookLeftCandles, currentPrice);
   const gaps = buildFairValueGaps(lookLeftCandles, currentPrice);
+  const currentZone = isNearZone(currentPrice, zones, 0.0025);
+  const bullishReversal = detectDoubleBottom(candles, currentZone) && hasStrongClosure('buy', candles);
+  const bearishReversal = detectDoubleTop(candles, currentZone) && hasStrongClosure('sell', candles);
+
+  if (trend === 'ranging' && !bullishReversal && !bearishReversal) return null;
+
+  const direction: 'buy' | 'sell' = bullishReversal
+    ? 'buy'
+    : bearishReversal
+      ? 'sell'
+      : trend === 'bullish'
+        ? 'buy'
+        : 'sell';
+
+  const isReversalSetup = bullishReversal || bearishReversal;
   const directionalZone = findDirectionalZone(direction, zones, currentPrice);
   const directionalFvg = findDirectionalFvg(direction, gaps);
   const preferredArea = toPriceArea(directionalZone ?? directionalFvg);
@@ -887,23 +1004,22 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
     .filter(Boolean)
     .length;
 
-  if (directionalConfirmationCount < 2) return null;
-  if (!alignedEngulfing && !alignedRejection && !alignedStructure) return null;
+  if (directionalConfirmationCount < 2 && !isReversalSetup) return null;
+  if (!alignedEngulfing && !alignedRejection && !alignedStructure && !isReversalSetup) return null;
 
   // Liquidity sweeps need actual reversal confirmation before the scanner fires.
-  if (alignedSweep && !alignedEngulfing && !alignedStructure) return null;
+  if (alignedSweep && !alignedEngulfing && !alignedStructure && !isReversalSetup) return null;
 
   // If the local tape is still moving against the setup, do not force an entry from the higher-level trend.
-  if (!alignedMomentum && !alignedStructure && !alignedEngulfing) return null;
+  if (!alignedMomentum && !alignedStructure && !alignedEngulfing && !isReversalSetup) return null;
 
   // Favor the same setup family shown in the winning examples: reaction from a clean area, then displacement.
-  if (!freshReaction && !alignedSweep && !alignedRejection && !alignedEngulfing) return null;
-  if (!freshDisplacement && !alignedStructure && !alignedEngulfing) return null;
+  if (!freshReaction && !alignedSweep && !alignedRejection && !alignedEngulfing && !isReversalSetup) return null;
+  if (!freshDisplacement && !alignedStructure && !alignedEngulfing && !isReversalSetup) return null;
 
   const entry = last.close;
   const stopLoss = computeStopLoss(symbol, direction, candles);
-  const takeProfit = computeTakeProfit(direction, entry, stopLoss);
-  const takeProfit2 = computeSecondaryTakeProfit(direction, entry, stopLoss);
+  const { takeProfit, takeProfit2 } = resolveTakeProfitTargets(direction, entry, stopLoss, candles);
 
   // Sanity: TP must be in the right direction
   if (direction === 'buy' && takeProfit <= entry) return null;
@@ -925,10 +1041,17 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
     takeProfit,
     takeProfit2,
     score,
-    confidenceScore: scoreToConfidence(score),
-    strategy: deriveStrategy(direction, sweep),
+    confidenceScore: isReversalSetup ? Math.max(90, scoreToConfidence(Math.min(9, score + 2))) : scoreToConfidence(score),
+    strategy: isReversalSetup
+      ? direction === 'buy'
+        ? 'Demand Double Bottom Reversal'
+        : 'Supply Double Top Reversal'
+      : deriveStrategy(direction, sweep),
     confirmations,
-    confirmationLabels: buildConfirmationLabels(confirmations),
+    confirmationLabels: [
+      ...(isReversalSetup ? [direction === 'buy' ? 'Double bottom at demand' : 'Double top at supply', direction === 'buy' ? 'Bullish closure confirmation' : 'Bearish closure confirmation'] : []),
+      ...buildConfirmationLabels(confirmations),
+    ],
   };
 
   const zoneCheck = zoneFilter(candidateSetup, candles);
@@ -944,13 +1067,25 @@ export function analyzePotentialTrade(symbol: string, candles: Candle[]): Potent
   if (candles.length < 30) return null;
 
   const trend = detectTrend(candles);
-  if (trend === 'ranging') return null;
-
-  const direction: 'buy' | 'sell' = trend === 'bullish' ? 'buy' : 'sell';
   const currentPrice = candles[candles.length - 1].close;
   const lookLeftCandles = candles.slice(-Math.min(500, candles.length));
   const zones = buildZones(lookLeftCandles, currentPrice);
   const gaps = buildFairValueGaps(lookLeftCandles, currentPrice);
+  const currentZone = isNearZone(currentPrice, zones, 0.0025);
+  const bullishReversal = detectDoubleBottom(candles, currentZone) && hasStrongClosure('buy', candles);
+  const bearishReversal = detectDoubleTop(candles, currentZone) && hasStrongClosure('sell', candles);
+
+  if (trend === 'ranging' && !bullishReversal && !bearishReversal) return null;
+
+  const direction: 'buy' | 'sell' = bullishReversal
+    ? 'buy'
+    : bearishReversal
+      ? 'sell'
+      : trend === 'bullish'
+        ? 'buy'
+        : 'sell';
+
+  const isReversalSetup = bullishReversal || bearishReversal;
   const directionalZone = findDirectionalZone(direction, zones, currentPrice);
   const directionalFvg = findDirectionalFvg(direction, gaps);
   const preferredArea = toPriceArea(directionalZone ?? directionalFvg);
@@ -976,6 +1111,7 @@ export function analyzePotentialTrade(symbol: string, candles: Candle[]): Potent
   if (pullback) probability += 15;
   if (directionalZone) probability += 20;
   if (directionalFvg) probability += 10;
+  if (isReversalSetup) probability += 20;
   if (freshReaction) probability += 12;
   if (freshDisplacement) probability += 8;
   if (alignedSweep) probability += 10;
@@ -1062,8 +1198,7 @@ export function analyzePotentialTrade(symbol: string, candles: Candle[]): Potent
 
   const entry = currentPrice;
   const stopLoss = computeStopLoss(symbol, direction, candles);
-  const takeProfit = computeTakeProfit(direction, entry, stopLoss);
-  const takeProfit2 = computeSecondaryTakeProfit(direction, entry, stopLoss);
+  const { takeProfit, takeProfit2 } = resolveTakeProfitTargets(direction, entry, stopLoss, candles);
 
   return {
     symbol,
@@ -1074,7 +1209,11 @@ export function analyzePotentialTrade(symbol: string, candles: Candle[]): Potent
     takeProfit,
     takeProfit2,
     activationProbability: Math.min(95, probability),
-    strategy: `${deriveStrategy(direction, sweep)} Watchlist`,
+    strategy: `${isReversalSetup
+      ? direction === 'buy'
+        ? 'Demand Double Bottom Reversal'
+        : 'Supply Double Top Reversal'
+      : deriveStrategy(direction, sweep)} Watchlist`,
     narrative: buildPotentialNarrative(direction, currentPrice, contextLabels, requiredTriggers.slice(0, 3)),
     fulfilledConditions,
     requiredTriggers,
