@@ -77,6 +77,8 @@ interface LifecycleProcessingOptions {
   skipApproachAlerts?: boolean;
 }
 
+type OpenScanResult = Pick<ScanResult, 'id' | 'userId' | 'symbol' | 'status' | 'confidenceScore' | 'createdAt'>;
+
 // ── Table names ──
 
 const SCANNER_SESSION_TABLE = 'ScannerSession';
@@ -116,6 +118,78 @@ type ScanResultScope = 'all' | 'current' | 'history';
 const liveResultCache = new Map<string, Map<string, ScanResult>>();
 let liveResultCacheSyncedAt = 0;
 let liveResultCacheSyncPromise: Promise<void> | null = null;
+
+function compareOpenResultPriority(left: OpenScanResult, right: OpenScanResult): number {
+  const leftTriggered = left.status === 'triggered';
+  const rightTriggered = right.status === 'triggered';
+
+  if (leftTriggered !== rightTriggered) {
+    return leftTriggered ? -1 : 1;
+  }
+
+  if (left.confidenceScore !== right.confidenceScore) {
+    return right.confidenceScore - left.confidenceScore;
+  }
+
+  return new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime();
+}
+
+function dedupeOpenResultsBySymbol(results: ScanResult[]): ScanResult[] {
+  const openBySymbol = new Map<string, ScanResult>();
+  const nonOpenResults: ScanResult[] = [];
+
+  for (const result of results) {
+    if (result.status !== 'active' && result.status !== 'triggered') {
+      nonOpenResults.push(result);
+      continue;
+    }
+
+    const existing = openBySymbol.get(result.symbol);
+    if (!existing || compareOpenResultPriority(existing, result) > 0) {
+      openBySymbol.set(result.symbol, result);
+    }
+  }
+
+  return [...Array.from(openBySymbol.values()), ...nonOpenResults].sort(
+    (left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime(),
+  );
+}
+
+function getExistingOpenResultFromCache(userId: string, symbol: string): ScanResult | null {
+  const symbolBucket = liveResultCache.get(symbol);
+  if (!symbolBucket) {
+    return null;
+  }
+
+  const candidates = Array.from(symbolBucket.values()).filter(
+    (result) => result.userId === userId && (result.status === 'active' || result.status === 'triggered'),
+  );
+
+  return candidates.sort(compareOpenResultPriority)[0] ?? null;
+}
+
+async function getOpenResultForUserSymbol(userId: string, symbol: string): Promise<ScanResult | null> {
+  const cached = getExistingOpenResultFromCache(userId, symbol);
+  if (cached) {
+    return cached;
+  }
+
+  const { data, error } = await supabase
+    .from(SCAN_RESULT_TABLE)
+    .select('*')
+    .eq('userId', userId)
+    .eq('symbol', symbol)
+    .in('status', ['active', 'triggered'])
+    .order('createdAt', { ascending: false })
+    .limit(5);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  const candidates = (data ?? []) as ScanResult[];
+  return candidates.sort(compareOpenResultPriority)[0] ?? null;
+}
 
 // ── Helpers ──
 
@@ -370,7 +444,9 @@ export async function getScanResults(
 
   const { data, error } = await query;
   if (error) throw new Error(error.message);
-  return (data ?? []) as ScanResult[];
+
+  const results = (data ?? []) as ScanResult[];
+  return scope === 'current' ? dedupeOpenResultsBySymbol(results).slice(0, limit) : results;
 }
 
 export async function getAlertsForUser(
@@ -462,7 +538,12 @@ async function updateScanResult(
   }
 }
 
-async function insertScanResult(result: Omit<ScanResult, 'id' | 'createdAt'>): Promise<ScanResult> {
+async function insertScanResult(result: Omit<ScanResult, 'id' | 'createdAt'>): Promise<ScanResult | null> {
+  const existingOpenResult = await getOpenResultForUserSymbol(result.userId, result.symbol);
+  if (existingOpenResult) {
+    return null;
+  }
+
   const { data, error } = await supabase
     .from(SCAN_RESULT_TABLE)
     .insert(result)
@@ -480,6 +561,19 @@ function registerLiveResultInCache(result: ScanResult) {
   }
 
   const symbolBucket = liveResultCache.get(result.symbol) ?? new Map<string, ScanResult>();
+  for (const [existingId, existing] of symbolBucket) {
+    if (existing.userId !== result.userId) {
+      continue;
+    }
+
+    if (compareOpenResultPriority(existing, result) > 0) {
+      symbolBucket.delete(existingId);
+      continue;
+    }
+
+    return;
+  }
+
   symbolBucket.set(result.id, result);
   liveResultCache.set(result.symbol, symbolBucket);
 }
@@ -787,6 +881,7 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
 
   const savedResults: ScanResult[] = [];
   const savedAlerts: ScannerAlert[] = [];
+  const claimedSymbols = new Set<string>();
 
   for (const sessionType of relevantSessions) {
     const maxTradesForSession = MAX_TRADES_PER_DAY_BY_SESSION[sessionType];
@@ -812,7 +907,17 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
     for (let i = 0; i < validResults.length; i++) {
       const result = validResults[i];
 
+      if (claimedSymbols.has(result.symbol)) {
+        continue;
+      }
+
       if (isDuplicate(userId, result.symbol, result.direction)) {
+        continue;
+      }
+
+      const existingOpenResult = await getOpenResultForUserSymbol(userId, result.symbol);
+      if (existingOpenResult) {
+        claimedSymbols.add(result.symbol);
         continue;
       }
 
@@ -835,6 +940,16 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
         closedAt: null,
         rank: i + 1,
       });
+
+      claimedSymbols.add(result.symbol);
+
+      if (!scanResult) {
+        continue;
+      }
+
+      if (savedResults.some((item) => item.id === scanResult.id)) {
+        continue;
+      }
 
       savedResults.push(scanResult);
       dailyCount += 1;
