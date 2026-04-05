@@ -85,6 +85,7 @@ interface LivePriceWindow {
 }
 
 type OpenScanResult = Pick<ScanResult, 'id' | 'userId' | 'symbol' | 'status' | 'confidenceScore' | 'createdAt'>;
+type RecentScannerActivity = Pick<ScanResult, 'symbol' | 'sessionType' | 'status' | 'createdAt' | 'closedAt'>;
 
 // ── Table names ──
 
@@ -870,7 +871,10 @@ async function processResultLifecycle(
       : highPrice >= result.stopLoss;
 
     if (isInvalidated) {
-      await updateScanResult(result.id, { status: 'invalidated' });
+      await updateScanResult(result.id, {
+        status: 'invalidated',
+        closedAt: new Date().toISOString(),
+      });
 
       const alert = await insertAlert({
         userId: result.userId,
@@ -994,6 +998,10 @@ const MAX_TRADES_PER_DAY_BY_SESSION: Record<SessionType, number> = {
   newyork: 3,
   volatility: 5,
 };
+const SESSION_REASSESS_COOLDOWN_MS = 90 * 60_000;
+const SESSION_ENTRY_SPACING_MS = 60 * 60_000;
+const SYMBOL_REENTRY_COOLDOWN_MS = 120 * 60_000;
+const SCANNER_ACTIVITY_LOOKBACK_MS = 24 * 60 * 60_000;
 
 async function getTodayTradeCount(userId: string, sessionType?: SessionType): Promise<number> {
   const dayStart = getStartOfNewYorkDay();
@@ -1011,6 +1019,72 @@ async function getTodayTradeCount(userId: string, sessionType?: SessionType): Pr
   const { count, error } = await query;
   if (error) throw new Error(error.message);
   return count ?? 0;
+}
+
+async function getRecentScannerActivity(userId: string): Promise<RecentScannerActivity[]> {
+  const sinceIso = new Date(Date.now() - SCANNER_ACTIVITY_LOOKBACK_MS).toISOString();
+
+  const { data, error } = await supabase
+    .from(SCAN_RESULT_TABLE)
+    .select('symbol, sessionType, status, createdAt, closedAt')
+    .eq('userId', userId)
+    .gte('createdAt', sinceIso)
+    .in('status', ['active', 'triggered', 'closed', 'invalidated'])
+    .order('createdAt', { ascending: false })
+    .limit(100);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return (data ?? []) as RecentScannerActivity[];
+}
+
+function isSessionInReassessmentCooldown(activities: RecentScannerActivity[], sessionType: SessionType): boolean {
+  const now = Date.now();
+
+  return activities.some((activity) => {
+    if (activity.sessionType !== sessionType) {
+      return false;
+    }
+
+    if (activity.status !== 'closed' && activity.status !== 'invalidated') {
+      return false;
+    }
+
+    const closedAtMs = activity.closedAt ? new Date(activity.closedAt).getTime() : 0;
+    return closedAtMs > 0 && now - closedAtMs < SESSION_REASSESS_COOLDOWN_MS;
+  });
+}
+
+function isSessionEntrySpacingActive(activities: RecentScannerActivity[], sessionType: SessionType): boolean {
+  const now = Date.now();
+
+  return activities.some((activity) => {
+    if (activity.sessionType !== sessionType) {
+      return false;
+    }
+
+    const createdAtMs = new Date(activity.createdAt).getTime();
+    return createdAtMs > 0 && now - createdAtMs < SESSION_ENTRY_SPACING_MS;
+  });
+}
+
+function isSymbolInReentryCooldown(activities: RecentScannerActivity[], symbol: string): boolean {
+  const now = Date.now();
+
+  return activities.some((activity) => {
+    if (activity.symbol !== symbol) {
+      return false;
+    }
+
+    if (activity.status !== 'closed' && activity.status !== 'invalidated') {
+      return false;
+    }
+
+    const closedAtMs = activity.closedAt ? new Date(activity.closedAt).getTime() : 0;
+    return closedAtMs > 0 && now - closedAtMs < SYMBOL_REENTRY_COOLDOWN_MS;
+  });
 }
 
 // ── Core scanner logic ──
@@ -1118,6 +1192,7 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
   }
 
   let dailyCount = await getTodayTradeCount(userId);
+  const recentActivity = await getRecentScannerActivity(userId);
 
   if (dailyCount >= MAX_TRADES_PER_DAY) {
     console.log(`[Scanner] Daily limit reached for user ${userId} (${dailyCount}/${MAX_TRADES_PER_DAY})`);
@@ -1129,6 +1204,10 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
   const claimedSymbols = new Set<string>();
 
   for (const sessionType of relevantSessions) {
+    if (isSessionInReassessmentCooldown(recentActivity, sessionType)) {
+      continue;
+    }
+
     const maxTradesForSession = MAX_TRADES_PER_DAY_BY_SESSION[sessionType];
     const sessionCount = await getTodayTradeCount(userId, sessionType);
     if (sessionCount >= maxTradesForSession) {
@@ -1152,7 +1231,15 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
     for (let i = 0; i < validResults.length; i++) {
       const result = validResults[i];
 
+      if (isSessionEntrySpacingActive(recentActivity, sessionType)) {
+        break;
+      }
+
       if (claimedSymbols.has(result.symbol)) {
+        continue;
+      }
+
+      if (isSymbolInReentryCooldown(recentActivity, result.symbol)) {
         continue;
       }
 
@@ -1197,6 +1284,13 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
       }
 
       savedResults.push(scanResult);
+      recentActivity.unshift({
+        symbol: scanResult.symbol,
+        sessionType: scanResult.sessionType,
+        status: scanResult.status,
+        createdAt: scanResult.createdAt,
+        closedAt: scanResult.closedAt,
+      });
       dailyCount += 1;
 
       const directionLabel = result.direction.toUpperCase();

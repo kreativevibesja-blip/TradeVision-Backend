@@ -329,6 +329,12 @@ interface SymbolRiskProfile {
   bufferAtrMultiplier: number;
   bufferRangeMultiplier: number;
   bufferPriceRatio: number;
+  minStructuralOriginAge: number;
+  minZoneHeightAtrMultiplier: number;
+  minZoneHeightRangeMultiplier: number;
+  minZoneHeightPriceRatio: number;
+  minTargetOriginAge: number;
+  minTargetRiskMultiple: number;
 }
 
 function isVolatilitySymbol(symbol: string): boolean {
@@ -508,6 +514,12 @@ function getSymbolRiskProfile(symbol: string): SymbolRiskProfile {
       bufferAtrMultiplier: 0.7,
       bufferRangeMultiplier: 1.1,
       bufferPriceRatio: 0.0015,
+      minStructuralOriginAge: 8,
+      minZoneHeightAtrMultiplier: 0.6,
+      minZoneHeightRangeMultiplier: 1.2,
+      minZoneHeightPriceRatio: 0.0018,
+      minTargetOriginAge: 10,
+      minTargetRiskMultiple: 1.8,
     };
   }
 
@@ -521,6 +533,12 @@ function getSymbolRiskProfile(symbol: string): SymbolRiskProfile {
       bufferAtrMultiplier: 0.25,
       bufferRangeMultiplier: 0.35,
       bufferPriceRatio: 0.0002,
+      minStructuralOriginAge: 4,
+      minZoneHeightAtrMultiplier: 0.22,
+      minZoneHeightRangeMultiplier: 0.45,
+      minZoneHeightPriceRatio: 0.0002,
+      minTargetOriginAge: 4,
+      minTargetRiskMultiple: 1.35,
     };
   }
 
@@ -533,7 +551,51 @@ function getSymbolRiskProfile(symbol: string): SymbolRiskProfile {
     bufferAtrMultiplier: 0.35,
     bufferRangeMultiplier: 0.5,
     bufferPriceRatio: 0.0004,
+    minStructuralOriginAge: 5,
+    minZoneHeightAtrMultiplier: 0.3,
+    minZoneHeightRangeMultiplier: 0.65,
+    minZoneHeightPriceRatio: 0.00045,
+    minTargetOriginAge: 5,
+    minTargetRiskMultiple: 1.5,
   };
+}
+
+function getOriginAge(totalCandles: number, originIndex?: number): number {
+  if (originIndex == null || originIndex < 0) {
+    return 0;
+  }
+
+  return Math.max(0, totalCandles - 1 - originIndex);
+}
+
+function isMeaningfulZone(symbol: string, zone: PriceZone, candles: Candle[], currentPrice: number): boolean {
+  const profile = getSymbolRiskProfile(symbol);
+  const atr = computeAtr(candles, profile.atrPeriod);
+  const baselineRange = Math.max(averageRange(candles, 14), currentPrice * profile.minZoneHeightPriceRatio);
+  const zoneHeight = Math.max(Math.abs(zone.top - zone.bottom), 0.0001);
+  const originAge = getOriginAge(candles.length, zone.originIndex);
+  const minZoneHeight = Math.max(
+    atr * profile.minZoneHeightAtrMultiplier,
+    baselineRange * profile.minZoneHeightRangeMultiplier,
+    currentPrice * profile.minZoneHeightPriceRatio,
+  );
+
+  return originAge >= profile.minStructuralOriginAge && zoneHeight >= minZoneHeight;
+}
+
+function isMeaningfulGap(symbol: string, gap: FairValueGap, candles: Candle[], currentPrice: number): boolean {
+  const profile = getSymbolRiskProfile(symbol);
+  const atr = computeAtr(candles, profile.atrPeriod);
+  const baselineRange = Math.max(averageRange(candles, 14), currentPrice * profile.minZoneHeightPriceRatio);
+  const gapHeight = Math.max(Math.abs(gap.top - gap.bottom), 0.0001);
+  const originAge = getOriginAge(candles.length, gap.originIndex);
+  const minGapHeight = Math.max(
+    atr * profile.minZoneHeightAtrMultiplier * 0.55,
+    baselineRange * profile.minZoneHeightRangeMultiplier * 0.6,
+    currentPrice * profile.minZoneHeightPriceRatio * 0.65,
+  );
+
+  return originAge >= Math.max(2, profile.minStructuralOriginAge - 2) && gapHeight >= minGapHeight;
 }
 
 function computeStopLoss(symbol: string, direction: 'buy' | 'sell', candles: Candle[]): number {
@@ -545,8 +607,8 @@ function computeStopLoss(symbol: string, direction: 'buy' | 'sell', candles: Can
   const lookLeftCandles = candles.slice(-Math.min(500, candles.length));
   const zones = buildZones(lookLeftCandles, last.close);
   const gaps = buildFairValueGaps(lookLeftCandles, last.close);
-  const directionalZone = findDirectionalZone(direction, zones, last.close);
-  const directionalFvg = findDirectionalFvg(direction, gaps);
+  const directionalZone = findDirectionalZone(direction, zones, last.close, lookLeftCandles, symbol);
+  const directionalFvg = findDirectionalFvg(direction, gaps, lookLeftCandles, symbol);
 
   const zoneBuffer = (areaTop: number, areaBottom: number) => {
     const areaHeight = Math.max(Math.abs(areaTop - areaBottom), 0.0001);
@@ -770,7 +832,13 @@ export function buildFairValueGaps(candles: Candle[], currentPrice: number): Fai
   return gaps.sort((left, right) => left.distanceToPrice - right.distanceToPrice);
 }
 
-function findDirectionalZone(direction: 'buy' | 'sell', zones: PriceZone[], currentPrice: number): PriceZone | null {
+function findDirectionalZone(
+  direction: 'buy' | 'sell',
+  zones: PriceZone[],
+  currentPrice: number,
+  candles?: Candle[],
+  symbol?: string,
+): PriceZone | null {
   const matchingZones = zones.filter((zone) => {
     if (direction === 'buy') {
       return zone.type === 'demand' && zone.top <= currentPrice * 1.01;
@@ -779,29 +847,63 @@ function findDirectionalZone(direction: 'buy' | 'sell', zones: PriceZone[], curr
     return zone.type === 'supply' && zone.bottom >= currentPrice * 0.99;
   });
 
-  return matchingZones.sort((left, right) => {
-    const rightIndex = right.originIndex ?? -1;
-    const leftIndex = left.originIndex ?? -1;
-    if (rightIndex !== leftIndex) {
-      return rightIndex - leftIndex;
+  const preferredZones = candles && symbol
+    ? matchingZones.filter((zone) => isMeaningfulZone(symbol, zone, candles, currentPrice))
+    : matchingZones;
+  const zonePool = preferredZones.length > 0
+    ? preferredZones
+    : symbol && isVolatilitySymbol(symbol)
+      ? []
+      : matchingZones;
+
+  return zonePool.sort((left, right) => {
+    const rightAge = candles ? getOriginAge(candles.length, right.originIndex) : 0;
+    const leftAge = candles ? getOriginAge(candles.length, left.originIndex) : 0;
+    if (rightAge !== leftAge) {
+      return rightAge - leftAge;
+    }
+
+    const rightHeight = Math.abs(right.top - right.bottom);
+    const leftHeight = Math.abs(left.top - left.bottom);
+    if (rightHeight !== leftHeight) {
+      return rightHeight - leftHeight;
     }
 
     return left.distanceToPrice - right.distanceToPrice;
   })[0] ?? null;
 }
 
-function findDirectionalFvg(direction: 'buy' | 'sell', gaps: FairValueGap[]): FairValueGap | null {
-  return gaps
-    .filter((gap) => (direction === 'buy' ? gap.type === 'bullish' : gap.type === 'bearish'))
-    .sort((left, right) => {
-      const rightIndex = right.originIndex ?? -1;
-      const leftIndex = left.originIndex ?? -1;
-      if (rightIndex !== leftIndex) {
-        return rightIndex - leftIndex;
-      }
+function findDirectionalFvg(
+  direction: 'buy' | 'sell',
+  gaps: FairValueGap[],
+  candles?: Candle[],
+  symbol?: string,
+): FairValueGap | null {
+  const matchingGaps = gaps.filter((gap) => (direction === 'buy' ? gap.type === 'bullish' : gap.type === 'bearish'));
+  const preferredGaps = candles && symbol
+    ? matchingGaps.filter((gap) => isMeaningfulGap(symbol, gap, candles, candles[candles.length - 1]?.close ?? 0))
+    : matchingGaps;
+  const gapPool = preferredGaps.length > 0
+    ? preferredGaps
+    : symbol && isVolatilitySymbol(symbol)
+      ? []
+      : matchingGaps;
 
-      return left.distanceToPrice - right.distanceToPrice;
-    })[0] ?? null;
+  return gapPool.sort((left, right) => {
+    const rightAge = candles ? getOriginAge(candles.length, right.originIndex) : 0;
+    const leftAge = candles ? getOriginAge(candles.length, left.originIndex) : 0;
+    if (rightAge !== leftAge) {
+      return rightAge - leftAge;
+    }
+
+    const rightHeight = Math.abs(right.top - right.bottom);
+    const leftHeight = Math.abs(left.top - left.bottom);
+    if (rightHeight !== leftHeight) {
+      return rightHeight - leftHeight;
+    }
+
+    return left.distanceToPrice - right.distanceToPrice;
+  })[0] ?? null;
 }
 
 function buildPotentialNarrative(direction: 'buy' | 'sell', currentPrice: number, contextLabels: string[], requiredTriggers: string[]) {
@@ -874,8 +976,8 @@ function buildPotentialCandidate({
   bullishPoiReclaim,
   bearishPoiReclaim,
 }: PotentialCandidateInput): PotentialTradeSetup | null {
-  const directionalZone = findDirectionalZone(direction, zones, currentPrice);
-  const directionalFvg = findDirectionalFvg(direction, gaps);
+  const directionalZone = findDirectionalZone(direction, zones, currentPrice, candles, symbol);
+  const directionalFvg = findDirectionalFvg(direction, gaps, candles, symbol);
   const preferredArea = toPriceArea(directionalZone ?? directionalFvg);
   const pullback = detectPullback(trend, candles);
   const sweep = detectLiquiditySweep(candles);
@@ -938,6 +1040,10 @@ function buildPotentialCandidate({
   }
 
   if (mode === 'counter' && !directionalZone) {
+    return null;
+  }
+
+  if (isVolatilitySymbol(symbol) && !directionalZone) {
     return null;
   }
 
@@ -1102,7 +1208,11 @@ function buildPotentialCandidate({
 
   const entry = currentPrice;
   const stopLoss = computeStopLoss(symbol, direction, candles);
-  const { takeProfit, takeProfit2 } = resolveTakeProfitTargets(direction, entry, stopLoss, candles);
+  const { takeProfit, takeProfit2, structuralTargets } = resolveTakeProfitTargets(symbol, direction, entry, stopLoss, candles);
+
+  if (isVolatilitySymbol(symbol) && structuralTargets.length === 0) {
+    return null;
+  }
 
   const strategy = mode === 'counter'
     ? `${poiReclaim
@@ -1334,30 +1444,59 @@ function detectDoubleTop(candles: Candle[], zone: PriceZone | null): boolean {
   return last.close <= neckline + baselineRange * 0.15;
 }
 
-function findRecentDirectionalTargets(direction: 'buy' | 'sell', candles: Candle[], entry: number): number[] {
+function findRecentDirectionalTargets(
+  symbol: string,
+  direction: 'buy' | 'sell',
+  candles: Candle[],
+  entry: number,
+  stopLoss: number,
+): number[] {
+  const profile = getSymbolRiskProfile(symbol);
   const swings = findSwingHighsLows(candles.slice(-Math.min(120, candles.length)));
   const sourceCandles = candles.slice(-Math.min(120, candles.length));
+  const risk = Math.abs(entry - stopLoss);
+  const baselineRange = Math.max(averageRange(sourceCandles, 14), entry * profile.minZoneHeightPriceRatio);
+  const minTargetDistance = Math.max(risk * profile.minTargetRiskMultiple, baselineRange * 2);
 
   const prices = swings
-    .filter((swing) => (direction === 'buy' ? swing.type === 'high' && swing.price > entry : swing.type === 'low' && swing.price < entry))
-    .sort((left, right) => right.index - left.index)
+    .filter((swing) => {
+      if (direction === 'buy' && (swing.type !== 'high' || swing.price <= entry)) {
+        return false;
+      }
+
+      if (direction === 'sell' && (swing.type !== 'low' || swing.price >= entry)) {
+        return false;
+      }
+
+      return getOriginAge(sourceCandles.length, swing.index) >= profile.minTargetOriginAge;
+    })
     .map((swing) => sourceCandles[swing.index]?.[swing.type] ?? swing.price)
-    .filter((price, index, array) => Number.isFinite(price) && array.indexOf(price) === index);
+    .filter((price) => {
+      if (!Number.isFinite(price)) {
+        return false;
+      }
+
+      return direction === 'buy'
+        ? price - entry >= minTargetDistance
+        : entry - price >= minTargetDistance;
+    })
+    .sort((left, right) => direction === 'buy' ? left - right : right - left)
+    .filter((price, index, array) => array.indexOf(price) === index);
 
   return prices;
 }
 
-function resolveTakeProfitTargets(direction: 'buy' | 'sell', entry: number, stopLoss: number, candles: Candle[]) {
+function resolveTakeProfitTargets(symbol: string, direction: 'buy' | 'sell', entry: number, stopLoss: number, candles: Candle[]) {
   const fallbackTp1 = computeTakeProfit(direction, entry, stopLoss);
   const fallbackTp2 = computeSecondaryTakeProfit(direction, entry, stopLoss);
-  const targets = findRecentDirectionalTargets(direction, candles, entry);
+  const targets = findRecentDirectionalTargets(symbol, direction, candles, entry, stopLoss);
 
   const takeProfit = targets[0] ?? fallbackTp1;
   let takeProfit2 = targets[1] ?? fallbackTp2;
 
   if (direction === 'buy') {
     if (takeProfit <= entry) {
-      return { takeProfit: fallbackTp1, takeProfit2: fallbackTp2 };
+      return { takeProfit: fallbackTp1, takeProfit2: fallbackTp2, structuralTargets: targets };
     }
 
     if (takeProfit2 <= takeProfit) {
@@ -1365,7 +1504,7 @@ function resolveTakeProfitTargets(direction: 'buy' | 'sell', entry: number, stop
     }
   } else {
     if (takeProfit >= entry) {
-      return { takeProfit: fallbackTp1, takeProfit2: fallbackTp2 };
+      return { takeProfit: fallbackTp1, takeProfit2: fallbackTp2, structuralTargets: targets };
     }
 
     if (takeProfit2 >= takeProfit) {
@@ -1373,7 +1512,7 @@ function resolveTakeProfitTargets(direction: 'buy' | 'sell', entry: number, stop
     }
   }
 
-  return { takeProfit, takeProfit2 };
+  return { takeProfit, takeProfit2, structuralTargets: targets };
 }
 
 export function isNearZone(currentPrice: number, zones: PriceZone[], bufferRatio = 0.0015): PriceZone | null {
@@ -1459,8 +1598,8 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   const currentZone = findActiveReversalZone(currentPrice, zones, candles);
   const bullishReversal = Boolean(currentZone && isZoneRetestStillTradable(currentPrice, currentZone, candles) && detectDoubleBottom(candles, currentZone) && hasStrongClosure('buy', candles));
   const bearishReversal = Boolean(currentZone && isZoneRetestStillTradable(currentPrice, currentZone, candles) && detectDoubleTop(candles, currentZone) && hasStrongClosure('sell', candles));
-  const bullishArea = toPriceArea(findDirectionalZone('buy', zones, currentPrice) ?? findDirectionalFvg('buy', gaps));
-  const bearishArea = toPriceArea(findDirectionalZone('sell', zones, currentPrice) ?? findDirectionalFvg('sell', gaps));
+  const bullishArea = toPriceArea(findDirectionalZone('buy', zones, currentPrice, candles, symbol) ?? findDirectionalFvg('buy', gaps, candles, symbol));
+  const bearishArea = toPriceArea(findDirectionalZone('sell', zones, currentPrice, candles, symbol) ?? findDirectionalFvg('sell', gaps, candles, symbol));
   const bullishPoiReclaim = hasPoiReclaim('buy', bullishArea, candles);
   const bearishPoiReclaim = hasPoiReclaim('sell', bearishArea, candles);
 
@@ -1479,8 +1618,8 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
         : 'sell';
 
   const isReversalSetup = bullishReversal || bearishReversal;
-  const directionalZone = findDirectionalZone(direction, zones, currentPrice);
-  const directionalFvg = findDirectionalFvg(direction, gaps);
+  const directionalZone = findDirectionalZone(direction, zones, currentPrice, candles, symbol);
+  const directionalFvg = findDirectionalFvg(direction, gaps, candles, symbol);
   const preferredArea = toPriceArea(directionalZone ?? directionalFvg);
 
   const sweep = detectLiquiditySweep(candles);
@@ -1517,6 +1656,7 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   if (rejection && !alignedRejection) return null;
   if (structure && !alignedStructure) return null;
   if (!directionalZone && !directionalFvg) return null;
+  if (isVolatilitySymbol(symbol) && !directionalZone) return null;
   if (stretchedFromArea && !freshDisplacement) return null;
 
   const directionalConfirmationCount = [alignedSweep, alignedEngulfing, alignedRejection, alignedStructure, alignedMomentum, poiReclaim]
@@ -1544,7 +1684,9 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
 
   const entry = last.close;
   const stopLoss = computeStopLoss(symbol, direction, candles);
-  const { takeProfit, takeProfit2 } = resolveTakeProfitTargets(direction, entry, stopLoss, candles);
+  const { takeProfit, takeProfit2, structuralTargets } = resolveTakeProfitTargets(symbol, direction, entry, stopLoss, candles);
+
+  if (isVolatilitySymbol(symbol) && structuralTargets.length === 0) return null;
 
   // Sanity: TP must be in the right direction
   if (direction === 'buy' && takeProfit <= entry) return null;
@@ -1660,8 +1802,8 @@ export function analyzePotentialTrades(
   const currentZone = context?.currentZone ?? findActiveReversalZone(currentPrice, zones, candles);
   const bullishReversal = context?.bullishReversal ?? Boolean(currentZone && isZoneRetestStillTradable(currentPrice, currentZone, candles) && detectDoubleBottom(candles, currentZone) && hasStrongClosure('buy', candles));
   const bearishReversal = context?.bearishReversal ?? Boolean(currentZone && isZoneRetestStillTradable(currentPrice, currentZone, candles) && detectDoubleTop(candles, currentZone) && hasStrongClosure('sell', candles));
-  const bullishArea = toPriceArea(findDirectionalZone('buy', zones, currentPrice) ?? findDirectionalFvg('buy', gaps));
-  const bearishArea = toPriceArea(findDirectionalZone('sell', zones, currentPrice) ?? findDirectionalFvg('sell', gaps));
+  const bullishArea = toPriceArea(findDirectionalZone('buy', zones, currentPrice, candles, symbol) ?? findDirectionalFvg('buy', gaps, candles, symbol));
+  const bearishArea = toPriceArea(findDirectionalZone('sell', zones, currentPrice, candles, symbol) ?? findDirectionalFvg('sell', gaps, candles, symbol));
   const bullishPoiReclaim = context?.bullishPoiReclaim ?? hasPoiReclaim('buy', bullishArea, candles);
   const bearishPoiReclaim = context?.bearishPoiReclaim ?? hasPoiReclaim('sell', bearishArea, candles);
 
