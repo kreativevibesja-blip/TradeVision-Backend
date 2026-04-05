@@ -146,6 +146,58 @@ const liveResultCache = new Map<string, Map<string, ScanResult>>();
 let liveResultCacheSyncedAt = 0;
 let liveResultCacheSyncPromise: Promise<void> | null = null;
 
+// ── Potential trade cache ──
+// Potential trades are expensive to recompute every tick.  We cache
+// them per-symbol and only refresh when the structural fingerprint
+// changes (direction, strategy, or confirmation count) or a TTL expires.
+
+const POTENTIAL_CACHE_TTL_MS = 5 * 60_000; // 5 minutes hard TTL
+
+interface CachedPotential {
+  potentials: PotentialTradeSetup[];
+  fingerprint: string;
+  cachedAt: number;
+}
+
+const potentialCache = new Map<string, CachedPotential>();
+
+function buildPotentialFingerprint(potentials: PotentialTradeSetup[]): string {
+  if (potentials.length === 0) return 'empty';
+  return potentials
+    .map((p) => `${p.direction}:${p.strategy}:${p.confidenceScore}:${Math.round(p.activationProbability)}`)
+    .join('|');
+}
+
+function getCachedPotentials(symbol: string, freshPotentials: PotentialTradeSetup[]): PotentialTradeSetup[] | null {
+  const cached = potentialCache.get(symbol);
+  if (!cached) return null;
+
+  const now = Date.now();
+  // Hard TTL expired — force refresh
+  if (now - cached.cachedAt > POTENTIAL_CACHE_TTL_MS) return null;
+
+  // Check if the structural fingerprint changed (direction flip, strategy change, score change)
+  const freshFingerprint = buildPotentialFingerprint(freshPotentials);
+  if (cached.fingerprint !== freshFingerprint) return null;
+
+  // Structure is the same — return cached version (locked entry/SL/TP)
+  // but update the currentPrice to reflect the live price.
+  const latestPrice = freshPotentials.length > 0 ? freshPotentials[0].currentPrice : null;
+  if (latestPrice !== null) {
+    return cached.potentials.map((p) => ({ ...p, currentPrice: latestPrice }));
+  }
+
+  return cached.potentials;
+}
+
+function setCachedPotentials(symbol: string, potentials: PotentialTradeSetup[]): void {
+  potentialCache.set(symbol, {
+    potentials,
+    fingerprint: buildPotentialFingerprint(potentials),
+    cachedAt: Date.now(),
+  });
+}
+
 function compareOpenResultPriority(left: OpenScanResult, right: OpenScanResult): number {
   const leftTriggered = left.status === 'triggered';
   const rightTriggered = right.status === 'triggered';
@@ -1190,15 +1242,26 @@ async function buildPotentialForSymbol(symbol: string): Promise<PotentialTradeSe
       return [];
     }
 
-    const potentials = analyzePotentialTrades(symbol, candles);
+    const freshPotentials = analyzePotentialTrades(symbol, candles);
+
+    // Check cache — if the setup fingerprint hasn't changed, return
+    // the locked version (preserves entry, SL, TP) with updated currentPrice.
+    const cached = getCachedPotentials(symbol, freshPotentials);
+    if (cached) {
+      return cached;
+    }
+
+    let potentials = freshPotentials;
+
     if (!potentials.some((potential) => potential.activationProbability >= HIGH_CONFIDENCE_POTENTIAL_THRESHOLD)) {
+      setCachedPotentials(symbol, potentials);
       return potentials;
     }
 
     const h1Candles = await loadScannerCandles(symbol, 'H1', 320, 80);
 
     if (h1Candles.length < 80) {
-      return potentials.map((potential) => potential.activationProbability >= HIGH_CONFIDENCE_POTENTIAL_THRESHOLD
+      potentials = potentials.map((potential) => potential.activationProbability >= HIGH_CONFIDENCE_POTENTIAL_THRESHOLD
         ? {
             ...potential,
             activationProbability: Math.min(89, potential.activationProbability - 5),
@@ -1206,13 +1269,18 @@ async function buildPotentialForSymbol(symbol: string): Promise<PotentialTradeSe
             contextLabels: [...potential.contextLabels, 'Waiting for H1 confirmation'],
           }
         : potential);
+      setCachedPotentials(symbol, potentials);
+      return potentials;
     }
 
-    return potentials
+    potentials = potentials
       .map((potential) => potential.activationProbability >= HIGH_CONFIDENCE_POTENTIAL_THRESHOLD
         ? refinePotentialTradeWithH1(potential, { h1Candles })
         : potential)
       .filter((potential): potential is PotentialTradeSetup => potential !== null);
+
+    setCachedPotentials(symbol, potentials);
+    return potentials;
   } catch (err) {
     console.error(`[Scanner] Failed to build potential trade for ${symbol}:`, err);
     return [];

@@ -1956,6 +1956,75 @@ function toTradeDirection(trend: TrendDirection): 'buy' | 'sell' | null {
   return null;
 }
 
+// ── Ideal structural entry for potential trades ──
+// Instead of using the live current price (which moves every tick),
+// lock the entry to the nearest structural level:
+//   Priority 1: OTE zone midpoint (62–79% fib) — highest-conviction retracement
+//   Priority 2: FVG midpoint (if an active FVG reaction was detected)
+//   Priority 3: Breaker block zone edge (retest level of the flipped zone)
+//   Priority 4: Directional zone edge (demand top for buys, supply bottom for sells)
+//   Priority 5: Directional FVG edge
+//   Fallback: current price (only when no structural level exists)
+
+function computeIdealPotentialEntry(
+  direction: 'buy' | 'sell',
+  currentPrice: number,
+  candles: Candle[],
+  areas: {
+    directionalZone: PriceZone | null;
+    directionalFvg: FairValueGap | null;
+    activeBreaker: BreakerBlock | null;
+    ote: OteResult | null;
+    fvgReaction: FvgReaction | null;
+  },
+): number {
+  const candidates: number[] = [];
+
+  // OTE zone midpoint — the golden pocket
+  if (areas.ote && areas.ote.inOteZone) {
+    candidates.push((areas.ote.oteTop + areas.ote.oteBottom) / 2);
+  }
+
+  // FVG that price is reacting from — use the gap edge
+  if (areas.fvgReaction) {
+    const gap = areas.fvgReaction.gap;
+    candidates.push(direction === 'buy' ? gap.bottom : gap.top);
+  }
+
+  // Breaker block zone — retest level
+  if (areas.activeBreaker) {
+    candidates.push(direction === 'buy' ? areas.activeBreaker.bottom : areas.activeBreaker.top);
+  }
+
+  // Directional zone — demand top (buy) or supply bottom (sell)
+  if (areas.directionalZone) {
+    candidates.push(direction === 'buy' ? areas.directionalZone.top : areas.directionalZone.bottom);
+  }
+
+  // Directional FVG edge
+  if (areas.directionalFvg) {
+    candidates.push(direction === 'buy' ? areas.directionalFvg.bottom : areas.directionalFvg.top);
+  }
+
+  if (candidates.length === 0) {
+    return currentPrice;
+  }
+
+  // Pick the candidate closest to current price — this is the most
+  // immediately-relevant structural level.
+  candidates.sort((a, b) => Math.abs(a - currentPrice) - Math.abs(b - currentPrice));
+
+  const best = candidates[0];
+
+  // Sanity: the ideal entry must be on the correct side of the trade
+  // (below current price for buys = discount entry, above for sells = premium entry).
+  // If the best structural level is wrong-side, fall back to current price.
+  if (direction === 'buy' && best > currentPrice * 1.005) return currentPrice;
+  if (direction === 'sell' && best < currentPrice * 0.995) return currentPrice;
+
+  return best;
+}
+
 interface PotentialCandidateInput {
   symbol: string;
   candles: Candle[];
@@ -2310,7 +2379,16 @@ function buildPotentialCandidate({
     fulfilledConditions.push(direction === 'buy' ? 'Bullish momentum is aligned' : 'Bearish momentum is aligned');
   }
 
-  const entry = currentPrice;
+  // Compute the ideal entry from the strongest structural level rather than
+  // using the live current price.  This lets the potential card stay locked
+  // until the market structure genuinely changes.
+  const entry = computeIdealPotentialEntry(direction, currentPrice, candles, {
+    directionalZone,
+    directionalFvg,
+    activeBreaker,
+    ote,
+    fvgReaction,
+  });
   const stopLoss = computeStopLoss(symbol, direction, candles);
   const { takeProfit, takeProfit2, structuralTargets } = resolveTakeProfitTargets(symbol, direction, entry, stopLoss, candles);
 

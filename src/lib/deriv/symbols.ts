@@ -48,6 +48,8 @@ export const DERIV_SCANNER_SYMBOLS: DerivScannerSymbolConfig[] = [
   { symbol: 'XRPUSD', aliases: buildAliases('XRPUSD', ['cryxrpusd', 'ripple']) },
   { symbol: 'ADAUSD', aliases: buildAliases('ADAUSD', ['cryadausd', 'cardano']) },
   { symbol: 'LTCUSD', aliases: buildAliases('LTCUSD', ['cryltcusd', 'litecoin']) },
+  { symbol: '1HZ10V', aliases: ['1hz10v', 'volatility 10 (1s)', 'vol10 1s'] },
+  { symbol: '1HZ75V', aliases: ['1hz75v', 'volatility 75 (1s)', 'vol75 1s'] },
 ];
 
 export const SESSION_SCANNER_SYMBOL_IDS = [
@@ -69,6 +71,8 @@ export const VOLATILITY_SCANNER_SYMBOL_IDS = [
   'R_50',
   'R_75',
   'R_100',
+  '1HZ10V',
+  '1HZ75V',
 ] as const;
 
 export const DERIV_SCANNER_SYMBOL_IDS = [...SESSION_SCANNER_SYMBOL_IDS, ...VOLATILITY_SCANNER_SYMBOL_IDS];
