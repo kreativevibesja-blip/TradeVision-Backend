@@ -85,7 +85,7 @@ interface LivePriceWindow {
 }
 
 type OpenScanResult = Pick<ScanResult, 'id' | 'userId' | 'symbol' | 'status' | 'confidenceScore' | 'createdAt'>;
-type RecentScannerActivity = Pick<ScanResult, 'symbol' | 'sessionType' | 'status' | 'createdAt' | 'closedAt'>;
+type RecentScannerActivity = Pick<ScanResult, 'symbol' | 'sessionType' | 'status' | 'createdAt' | 'closedAt' | 'closeReason'>;
 
 // ── Table names ──
 
@@ -1038,7 +1038,7 @@ async function getRecentScannerActivity(userId: string): Promise<RecentScannerAc
 
   const { data, error } = await supabase
     .from(SCAN_RESULT_TABLE)
-    .select('symbol, sessionType, status, createdAt, closedAt')
+    .select('symbol, sessionType, status, createdAt, closedAt, closeReason')
     .eq('userId', userId)
     .gte('createdAt', sinceIso)
     .in('status', ['active', 'triggered', 'closed', 'invalidated'])
@@ -1096,6 +1096,23 @@ function isSymbolInReentryCooldown(activities: RecentScannerActivity[], symbol: 
 
     const closedAtMs = activity.closedAt ? new Date(activity.closedAt).getTime() : 0;
     return closedAtMs > 0 && now - closedAtMs < SYMBOL_REENTRY_COOLDOWN_MS;
+  });
+}
+
+function isSymbolLockedUntilNextNewYorkDay(activities: RecentScannerActivity[], symbol: string): boolean {
+  const dayStartMs = new Date(getStartOfNewYorkDay()).getTime();
+
+  return activities.some((activity) => {
+    if (activity.symbol !== symbol) {
+      return false;
+    }
+
+    if (activity.status !== 'closed' || (activity.closeReason !== 'sl' && activity.closeReason !== 'tp')) {
+      return false;
+    }
+
+    const closedAtMs = activity.closedAt ? new Date(activity.closedAt).getTime() : 0;
+    return closedAtMs >= dayStartMs;
   });
 }
 
@@ -1255,6 +1272,10 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
         continue;
       }
 
+      if (isSymbolLockedUntilNextNewYorkDay(recentActivity, result.symbol)) {
+        continue;
+      }
+
       if (isDuplicate(userId, result.symbol, result.direction)) {
         continue;
       }
@@ -1302,6 +1323,7 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
         status: scanResult.status,
         createdAt: scanResult.createdAt,
         closedAt: scanResult.closedAt,
+        closeReason: scanResult.closeReason,
       });
       dailyCount += 1;
 
