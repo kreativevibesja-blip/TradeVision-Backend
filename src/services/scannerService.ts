@@ -11,6 +11,7 @@ import { sendPushToUser } from './pushService';
 
 export type SessionType = 'london' | 'newyork' | 'volatility';
 type ForexSessionType = Extract<SessionType, 'london' | 'newyork'>;
+type VolatilitySessionBucket = 'asian' | 'london' | 'newyork';
 export type ScanResultStatus = 'active' | 'triggered' | 'closed' | 'invalidated' | 'expired';
 export type AlertType = 'info' | 'trade' | 'warning';
 export type ScanCloseReason = 'tp' | 'sl' | null;
@@ -114,6 +115,11 @@ const SESSION_WINDOWS: Record<ForexSessionType, SessionWindow> = {
 const VOLATILITY_SESSION_WINDOW: DailySessionWindow = {
   startHour: SESSION_WINDOWS.london.startHour,
   endHour: SESSION_WINDOWS.newyork.endHour,
+};
+const VOLATILITY_BUCKET_LIMITS: Record<VolatilitySessionBucket, number> = {
+  asian: 1,
+  london: 2,
+  newyork: 2,
 };
 
 // ── Scanner symbols and timeframe ──
@@ -221,6 +227,11 @@ function getCurrentEstHour(): number {
   return hour;
 }
 
+function getEstHourForDate(date: Date): number {
+  const estString = date.toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false });
+  return parseInt(estString.split(',')[1]?.trim().split(':')[0] ?? '0', 10);
+}
+
 function getCurrentEstWeekday(): number {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York',
@@ -246,7 +257,7 @@ export function isSessionActive(sessionType: SessionType): boolean {
   const hour = getCurrentEstHour();
 
   if (sessionType === 'volatility') {
-    return hour >= VOLATILITY_SESSION_WINDOW.startHour && hour < VOLATILITY_SESSION_WINDOW.endHour;
+    return true;
   }
 
   if (weekday === 0 || weekday === 6) {
@@ -255,6 +266,26 @@ export function isSessionActive(sessionType: SessionType): boolean {
 
   const window = SESSION_WINDOWS[sessionType];
   return hour >= window.startHour && hour < window.endHour;
+}
+
+function getVolatilitySessionBucket(hour: number): VolatilitySessionBucket {
+  if (hour >= SESSION_WINDOWS.newyork.endHour || hour < SESSION_WINDOWS.london.startHour) {
+    return 'asian';
+  }
+
+  if (hour < SESSION_WINDOWS.newyork.startHour) {
+    return 'london';
+  }
+
+  return 'newyork';
+}
+
+function getCurrentVolatilitySessionBucket(): VolatilitySessionBucket {
+  return getVolatilitySessionBucket(getCurrentEstHour());
+}
+
+function getVolatilitySessionBucketForTimestamp(iso: string): VolatilitySessionBucket {
+  return getVolatilitySessionBucket(getEstHourForDate(new Date(iso)));
 }
 
 export function getCurrentSessionTypes(): SessionType[] {
@@ -1116,6 +1147,26 @@ function isSymbolLockedUntilNextNewYorkDay(activities: RecentScannerActivity[], 
   });
 }
 
+function getVolatilityBucketTradeCount(
+  activities: RecentScannerActivity[],
+  bucket: VolatilitySessionBucket,
+): number {
+  const dayStartMs = new Date(getStartOfNewYorkDay()).getTime();
+
+  return activities.filter((activity) => {
+    if (activity.sessionType !== 'volatility') {
+      return false;
+    }
+
+    const createdAtMs = new Date(activity.createdAt).getTime();
+    if (createdAtMs < dayStartMs) {
+      return false;
+    }
+
+    return getVolatilitySessionBucketForTimestamp(activity.createdAt) === bucket;
+  }).length;
+}
+
 // ── Core scanner logic ──
 
 interface ScanCycleResult {
@@ -1248,7 +1299,21 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
 
     const remainingDaily = MAX_TRADES_PER_DAY - dailyCount;
     const remainingSession = maxTradesForSession - sessionCount;
-    const slotsAvailable = Math.min(remainingDaily, remainingSession);
+    let slotsAvailable = Math.min(remainingDaily, remainingSession);
+
+    if (sessionType === 'volatility') {
+      const bucket = getCurrentVolatilitySessionBucket();
+      const bucketLimit = VOLATILITY_BUCKET_LIMITS[bucket];
+      const bucketCount = getVolatilityBucketTradeCount(recentActivity, bucket);
+      const remainingBucket = bucketLimit - bucketCount;
+
+      if (remainingBucket <= 0) {
+        continue;
+      }
+
+      slotsAvailable = Math.min(slotsAvailable, remainingBucket);
+    }
+
     if (slotsAvailable <= 0) {
       break;
     }
