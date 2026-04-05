@@ -46,6 +46,8 @@ export interface TradeConfirmations {
   momentum: boolean;
 }
 
+export type MarketRegime = 'range' | 'trend' | 'reversal';
+
 export interface TradeSetup {
   symbol: string;
   direction: 'buy' | 'sell';
@@ -55,6 +57,7 @@ export interface TradeSetup {
   takeProfit2: number;
   score: number;
   confidenceScore: number;
+  marketRegime: MarketRegime;
   strategy: string;
   confirmations: TradeConfirmations;
   confirmationLabels: string[];
@@ -97,6 +100,7 @@ export interface PotentialTradeSetup {
   takeProfit2: number;
   activationProbability: number;
   confidenceScore: number;
+  marketRegime: MarketRegime;
   confirmations: TradeConfirmations;
   strategy: string;
   narrative: string;
@@ -850,6 +854,52 @@ function detectSupportResistanceRange(candles: Candle[]): SupportResistanceRange
   };
 }
 
+function isPriceNearRangeEdge(currentPrice: number, range: SupportResistanceRange | null): boolean {
+  if (!range) {
+    return false;
+  }
+
+  const edgeBuffer = Math.max(range.rangeHeight * 0.2, range.baselineRange * 1.35);
+  return currentPrice >= range.resistance - edgeBuffer || currentPrice <= range.support + edgeBuffer;
+}
+
+function resolveMarketRegime(input: {
+  trend: TrendDirection;
+  broaderTrend: TrendDirection;
+  currentPrice: number;
+  range: SupportResistanceRange | null;
+  bullishReversal: boolean;
+  bearishReversal: boolean;
+}): MarketRegime {
+  if (input.bullishReversal || input.bearishReversal) {
+    return 'reversal';
+  }
+
+  if (input.range && (input.trend === 'ranging' || input.broaderTrend === 'ranging' || isPriceNearRangeEdge(input.currentPrice, input.range))) {
+    return 'range';
+  }
+
+  if (input.trend === 'bullish' || input.trend === 'bearish') {
+    return 'trend';
+  }
+
+  return input.range ? 'range' : 'reversal';
+}
+
+function candidateMatchesRegime(candidate: PotentialTradeSetup, regime: MarketRegime): boolean {
+  const strategy = candidate.strategy.toLowerCase();
+
+  if (regime === 'range') {
+    return strategy.includes('range');
+  }
+
+  if (regime === 'trend') {
+    return !strategy.includes('range') && !strategy.includes('reversal') && !strategy.includes('countertrend');
+  }
+
+  return strategy.includes('reversal') || strategy.includes('countertrend');
+}
+
 function buildSupportResistanceTradeSetup(
   symbol: string,
   candles: Candle[],
@@ -962,6 +1012,7 @@ function buildSupportResistanceTradeSetup(
     takeProfit2,
     score: Math.min(9, 4 + confirmationCount),
     confidenceScore,
+    marketRegime: 'range',
     strategy: direction === 'sell' ? 'Resistance Rejection Range Short' : 'Support Rejection Range Long',
     confirmations: tradeConfirmations,
     confirmationLabels,
@@ -1145,6 +1196,7 @@ function buildSupportResistanceRangePotential(
     takeProfit2,
     activationProbability: Math.min(95, activationProbability),
     confidenceScore,
+    marketRegime: 'range',
     confirmations: tradeConfirmations,
     strategy,
     narrative,
@@ -1722,6 +1774,7 @@ function buildPotentialCandidate({
     takeProfit2,
     activationProbability: Math.min(95, probability),
     confidenceScore: confirmationScore,
+    marketRegime: mode === 'trend' ? 'trend' : 'reversal',
     confirmations: tradeConfirmations,
     strategy,
     narrative,
@@ -2210,11 +2263,8 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   const trend = detectTrend(candles);
   const broaderTrend = detectContextTrend(candles);
   const emaTrend = analyzeEmaTrend(candles);
-  const rangeTradeSetup = buildSupportResistanceTradeSetup(symbol, candles, broaderTrend, emaTrend);
-  if (rangeTradeSetup) {
-    return rangeTradeSetup;
-  }
   const currentPrice = candles[candles.length - 1].close;
+  const range = detectSupportResistanceRange(candles);
   const lookLeftCandles = candles.slice(-Math.min(500, candles.length));
   const zones = buildZones(lookLeftCandles, currentPrice);
   const gaps = buildFairValueGaps(lookLeftCandles, currentPrice);
@@ -2223,6 +2273,20 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   const bearishReversalPattern = resolveBearishReversalPattern(currentPrice, currentZone, candles);
   const bullishReversal = bullishReversalPattern.matched;
   const bearishReversal = bearishReversalPattern.matched;
+  const marketRegime = resolveMarketRegime({
+    trend,
+    broaderTrend,
+    currentPrice,
+    range,
+    bullishReversal,
+    bearishReversal,
+  });
+  const rangeTradeSetup = marketRegime === 'range'
+    ? buildSupportResistanceTradeSetup(symbol, candles, broaderTrend, emaTrend)
+    : null;
+  if (rangeTradeSetup) {
+    return rangeTradeSetup;
+  }
   const bullishArea = toPriceArea(findDirectionalZone('buy', zones, currentPrice, candles, symbol) ?? findDirectionalFvg('buy', gaps, candles, symbol));
   const bearishArea = toPriceArea(findDirectionalZone('sell', zones, currentPrice, candles, symbol) ?? findDirectionalFvg('sell', gaps, candles, symbol));
   const bullishPoiReclaim = hasPoiReclaim('buy', bullishArea, candles);
@@ -2360,6 +2424,7 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
     takeProfit2,
     score,
     confidenceScore: confirmationScore,
+    marketRegime: isReversalSetup ? 'reversal' : 'trend',
     strategy: isReversalSetup
       ? direction === 'buy'
         ? broaderTrend === 'bearish'
@@ -2448,14 +2513,23 @@ export function analyzePotentialTrades(
   const trend = context?.trend ?? detectTrend(candles);
   const broaderTrend = context?.broaderTrend ?? detectContextTrend(candles);
   const emaTrend = context?.emaTrend ?? analyzeEmaTrend(candles);
-  const rangeCandidate = buildSupportResistanceRangePotential(symbol, candles, broaderTrend, emaTrend);
   const currentPrice = context?.currentPrice ?? candles[candles.length - 1].close;
+  const range = detectSupportResistanceRange(candles);
   const lookLeftCandles = candles.slice(-Math.min(500, candles.length));
   const zones = context?.zones ?? buildZones(lookLeftCandles, currentPrice);
   const gaps = context?.gaps ?? buildFairValueGaps(lookLeftCandles, currentPrice);
   const currentZone = context?.currentZone ?? findActiveReversalZone(currentPrice, zones, candles);
   const bullishReversal = context?.bullishReversal ?? resolveBullishReversalPattern(currentPrice, currentZone, candles).matched;
   const bearishReversal = context?.bearishReversal ?? resolveBearishReversalPattern(currentPrice, currentZone, candles).matched;
+  const marketRegime = resolveMarketRegime({
+    trend,
+    broaderTrend,
+    currentPrice,
+    range,
+    bullishReversal,
+    bearishReversal,
+  });
+  const rangeCandidate = buildSupportResistanceRangePotential(symbol, candles, broaderTrend, emaTrend);
   const bullishArea = toPriceArea(findDirectionalZone('buy', zones, currentPrice, candles, symbol) ?? findDirectionalFvg('buy', gaps, candles, symbol));
   const bearishArea = toPriceArea(findDirectionalZone('sell', zones, currentPrice, candles, symbol) ?? findDirectionalFvg('sell', gaps, candles, symbol));
   const bullishPoiReclaim = context?.bullishPoiReclaim ?? hasPoiReclaim('buy', bullishArea, candles);
@@ -2552,5 +2626,13 @@ export function analyzePotentialTrades(
 
   return candidates
     .filter((candidate, index, array) => array.findIndex((item) => item.direction === candidate.direction && item.strategy === candidate.strategy) === index)
-    .sort((left, right) => right.activationProbability - left.activationProbability);
+    .sort((left, right) => {
+      const leftMatchesRegime = candidateMatchesRegime(left, marketRegime);
+      const rightMatchesRegime = candidateMatchesRegime(right, marketRegime);
+      if (leftMatchesRegime !== rightMatchesRegime) {
+        return rightMatchesRegime ? 1 : -1;
+      }
+
+      return right.activationProbability - left.activationProbability;
+    });
 }

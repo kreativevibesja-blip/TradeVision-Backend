@@ -4,7 +4,7 @@ import { getRuntimeCandles } from '../lib/deriv/activeCandles';
 import { ensureDerivSubscription, getDerivHistoryCandles } from '../lib/deriv/ws';
 import { DERIV_SCANNER_SYMBOL_IDS, SESSION_SCANNER_SYMBOL_IDS, VOLATILITY_SCANNER_SYMBOL_IDS } from '../lib/deriv/symbols';
 import { scheduleScannerPanelRefreshForAllUsers, scheduleScannerPanelRefreshForUser } from '../lib/scanner/panelStream';
-import { analyzeMarket, analyzePotentialTrades, detectTrend, findSwingHighsLows, type Candle, type PotentialTradeSetup, type TradeConfirmations, type TrendDirection } from './scannerEngine';
+import { analyzeMarket, analyzePotentialTrades, detectTrend, findSwingHighsLows, type Candle, type MarketRegime, type PotentialTradeSetup, type TradeConfirmations, type TrendDirection } from './scannerEngine';
 import { sendPushToUser } from './pushService';
 
 // ── Types ──
@@ -35,6 +35,7 @@ export interface ScanResult {
   takeProfit: number;
   takeProfit2: number | null;
   confidenceScore: number;
+  marketRegime: MarketRegime;
   strategy: string | null;
   confirmations: TradeConfirmations | string[];
   sessionType: SessionType;
@@ -67,6 +68,7 @@ export interface PotentialTrade {
   takeProfit: number;
   takeProfit2: number | null;
   activationProbability: number;
+  marketRegime: MarketRegime;
   strategy: string;
   narrative: string;
   fulfilledConditions: string[];
@@ -477,6 +479,7 @@ function promotePotentialToScanCycleResult(potential: PotentialTradeSetup): Scan
     takeProfit: potential.takeProfit,
     takeProfit2: null,
     confidenceScore: potential.confidenceScore,
+    marketRegime: potential.marketRegime,
     strategy: potential.strategy.replace(/ Watchlist$/i, ''),
     confirmations: potential.confirmations,
     score: 9,
@@ -1123,6 +1126,7 @@ interface ScanCycleResult {
   takeProfit: number;
   takeProfit2: number | null;
   confidenceScore: number;
+  marketRegime: MarketRegime;
   strategy: string;
   confirmations: TradeConfirmations;
   score: number;
@@ -1195,6 +1199,7 @@ async function scanSymbol(symbol: string): Promise<ScanCycleResult | null> {
       takeProfit: setup.takeProfit,
       takeProfit2: null,
       confidenceScore: setup.confidenceScore,
+      marketRegime: setup.marketRegime,
       strategy: setup.strategy,
       confirmations: setup.confirmations,
       score: setup.score,
@@ -1293,6 +1298,7 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
         takeProfit: result.takeProfit,
         takeProfit2: null,
         confidenceScore: result.confidenceScore,
+        marketRegime: result.marketRegime,
         strategy: result.strategy,
         confirmations: result.confirmations,
         sessionType,
