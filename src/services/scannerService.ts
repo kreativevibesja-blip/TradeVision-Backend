@@ -320,7 +320,7 @@ function isDuplicatePotentialAlert(userId: string, potential: Pick<PotentialTrad
   return false;
 }
 
-async function loadScannerCandles(symbol: string, timeframe: 'M15' | 'H1', limit: number, minimum = 50): Promise<Candle[]> {
+async function loadScannerCandles(symbol: string, timeframe: 'M15' | 'H1', limit: number, minimum = 200): Promise<Candle[]> {
   const granularity = TIMEFRAME_TO_GRANULARITY[timeframe];
 
   try {
@@ -1131,7 +1131,7 @@ interface ScanCycleResult {
 async function buildPotentialForSymbol(symbol: string): Promise<PotentialTradeSetup[]> {
   try {
     const candles = await loadScannerCandles(symbol, 'M15', 600);
-    if (candles.length < 50) {
+    if (candles.length < 200) {
       return [];
     }
 
@@ -1167,7 +1167,7 @@ async function buildPotentialForSymbol(symbol: string): Promise<PotentialTradeSe
 async function scanSymbol(symbol: string): Promise<ScanCycleResult | null> {
   try {
     const candles = await loadScannerCandles(symbol, 'M15', 600);
-    if (candles.length < 50) {
+    if (candles.length < 200) {
       return null;
     }
 

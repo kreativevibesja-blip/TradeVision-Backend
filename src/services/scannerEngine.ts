@@ -107,6 +107,10 @@ export interface PotentialTradeSetup {
 
 type PotentialSetupMode = 'trend' | 'counter';
 
+const MIN_SCANNER_ANALYSIS_CANDLES = 200;
+const DOUBLE_REVERSAL_PATTERN_LOOKBACK = 100;
+const HEAD_SHOULDERS_PATTERN_LOOKBACK = 120;
+
 // ── 1. Trend Detection ──
 // Counts higher-highs/higher-lows vs lower-highs/lower-lows
 // over the last 20 candles to classify the trend.
