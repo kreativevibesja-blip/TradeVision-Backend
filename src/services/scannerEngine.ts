@@ -110,6 +110,7 @@ type PotentialSetupMode = 'trend' | 'counter';
 const MIN_SCANNER_ANALYSIS_CANDLES = 200;
 const DOUBLE_REVERSAL_PATTERN_LOOKBACK = 100;
 const HEAD_SHOULDERS_PATTERN_LOOKBACK = 120;
+const SUPPORT_RESISTANCE_RANGE_LOOKBACK = 120;
 
 // ── 1. Trend Detection ──
 // Counts higher-highs/higher-lows vs lower-highs/lower-lows
@@ -780,6 +781,377 @@ function detectRecentMomentum(candles: Candle[]): TrendDirection {
   if (upCloses >= 2 && higherLows >= 2) return 'bullish';
   if (downCloses >= 2 && lowerHighs >= 2) return 'bearish';
   return 'ranging';
+}
+
+interface SupportResistanceRange {
+  support: number;
+  resistance: number;
+  supportExtreme: number;
+  resistanceExtreme: number;
+  supportTouches: number;
+  resistanceTouches: number;
+  rangeHeight: number;
+  baselineRange: number;
+}
+
+function detectSupportResistanceRange(candles: Candle[]): SupportResistanceRange | null {
+  if (candles.length < SUPPORT_RESISTANCE_RANGE_LOOKBACK) {
+    return null;
+  }
+
+  const recent = candles.slice(-SUPPORT_RESISTANCE_RANGE_LOOKBACK);
+  const baselineRange = Math.max(averageRange(recent, 14), 0.0001);
+  const swings = findSwingHighsLows(recent);
+  const highs = swings.filter((swing) => swing.type === 'high');
+  const lows = swings.filter((swing) => swing.type === 'low');
+
+  if (highs.length < 2 || lows.length < 2) {
+    return null;
+  }
+
+  const recentHigh = Math.max(...highs.map((point) => point.price));
+  const recentLow = Math.min(...lows.map((point) => point.price));
+  const rangeHeight = recentHigh - recentLow;
+
+  if (!Number.isFinite(rangeHeight) || rangeHeight < baselineRange * 8) {
+    return null;
+  }
+
+  const touchTolerance = Math.max(rangeHeight * 0.16, baselineRange * 1.2);
+  const upperTouches = highs.filter((point) => point.price >= recentHigh - touchTolerance);
+  const lowerTouches = lows.filter((point) => point.price <= recentLow + touchTolerance);
+
+  if (upperTouches.length < 2 || lowerTouches.length < 2) {
+    return null;
+  }
+
+  const upperSpan = Math.max(...upperTouches.map((point) => point.index)) - Math.min(...upperTouches.map((point) => point.index));
+  const lowerSpan = Math.max(...lowerTouches.map((point) => point.index)) - Math.min(...lowerTouches.map((point) => point.index));
+  if (upperSpan < 6 || lowerSpan < 6) {
+    return null;
+  }
+
+  const resistance = average(upperTouches.map((point) => point.price));
+  const support = average(lowerTouches.map((point) => point.price));
+
+  if (!Number.isFinite(resistance) || !Number.isFinite(support) || resistance <= support) {
+    return null;
+  }
+
+  return {
+    support,
+    resistance,
+    supportExtreme: Math.min(...lowerTouches.map((point) => point.price)),
+    resistanceExtreme: Math.max(...upperTouches.map((point) => point.price)),
+    supportTouches: lowerTouches.length,
+    resistanceTouches: upperTouches.length,
+    rangeHeight,
+    baselineRange,
+  };
+}
+
+function buildSupportResistanceTradeSetup(
+  symbol: string,
+  candles: Candle[],
+  broaderTrend: TrendDirection,
+  emaTrend: EmaTrendContext,
+): TradeSetup | null {
+  const range = detectSupportResistanceRange(candles);
+  if (!range) {
+    return null;
+  }
+
+  const currentPrice = candles[candles.length - 1].close;
+  const last = candles[candles.length - 1];
+  const prev = candles[candles.length - 2];
+  const edgeBuffer = Math.max(range.rangeHeight * 0.18, range.baselineRange * 1.2);
+  const bearishAtResistance = last.high >= range.resistance - edgeBuffer && currentPrice >= range.resistance - edgeBuffer;
+  const bullishAtSupport = last.low <= range.support + edgeBuffer && currentPrice <= range.support + edgeBuffer;
+
+  const sweep = detectLiquiditySweep(candles);
+  const rejection = detectRejection(last);
+  const engulfing = detectEngulfing(prev, last);
+  const structure = detectStructureBreak(candles);
+  const momentum = detectRecentMomentum(candles);
+
+  if (!bearishAtResistance && !bullishAtSupport) {
+    return null;
+  }
+
+  const direction: 'buy' | 'sell' = bearishAtResistance ? 'sell' : 'buy';
+  const alignedSweep = isSweepAligned(direction, sweep);
+  const alignedRejection = isRejectionAligned(direction, rejection);
+  const alignedEngulfing = isEngulfingAligned(direction, engulfing);
+  const alignedStructure = isStructureAligned(direction, structure);
+  const alignedMomentum = (direction === 'buy' && momentum === 'bullish') || (direction === 'sell' && momentum === 'bearish');
+  const zoneReaction = direction === 'sell'
+    ? last.high >= range.resistance - edgeBuffer && last.close < range.resistance
+    : last.low <= range.support + edgeBuffer && last.close > range.support;
+  const freshDisplacement = hasFreshDisplacement(direction, candles);
+  const emaAligned = isEmaDirectionAligned(direction, emaTrend);
+
+  const confirmationCount = [
+    zoneReaction,
+    alignedSweep,
+    alignedRejection,
+    alignedEngulfing,
+    alignedStructure,
+    alignedMomentum,
+    freshDisplacement,
+  ].filter(Boolean).length;
+
+  if (!zoneReaction) {
+    return null;
+  }
+
+  if (!alignedRejection && !alignedEngulfing && !alignedStructure) {
+    return null;
+  }
+
+  if (confirmationCount < 3) {
+    return null;
+  }
+
+  const buffer = Math.max(range.baselineRange * 0.65, range.rangeHeight * 0.08, currentPrice * 0.0006);
+  const entry = currentPrice;
+  const stopLoss = direction === 'sell'
+    ? range.resistanceExtreme + buffer
+    : range.supportExtreme - buffer;
+  const takeProfit = direction === 'sell' ? range.support : range.resistance;
+  const risk = Math.abs(entry - stopLoss);
+  const reward = Math.abs(takeProfit - entry);
+
+  if (!Number.isFinite(risk) || risk <= 0 || !Number.isFinite(reward) || reward < risk * 1.1) {
+    return null;
+  }
+
+  const takeProfit2 = direction === 'sell'
+    ? Math.min(takeProfit - risk, entry - risk * 3)
+    : Math.max(takeProfit + risk, entry + risk * 3);
+
+  const tradeConfirmations = buildTradeConfirmations({
+    alignedSweep,
+    alignedEngulfing,
+    alignedRejection,
+    alignedStructure,
+    poiReclaim: false,
+    emaAligned,
+    zoneReaction,
+    freshDisplacement,
+    alignedMomentum,
+  });
+  const confidenceScore = countTradeConfirmations(tradeConfirmations);
+
+  const confirmationLabels = [
+    direction === 'sell' ? 'Range resistance rejection' : 'Range support rejection',
+    direction === 'sell' ? 'Price tapped resistance band' : 'Price tapped support band',
+    direction === 'sell' ? 'Target mapped to range support' : 'Target mapped to range resistance',
+    ...(alignedRejection ? [direction === 'sell' ? 'Bearish rejection at resistance' : 'Bullish rejection at support'] : []),
+    ...(alignedEngulfing ? [direction === 'sell' ? 'Bearish engulfing from resistance' : 'Bullish engulfing from support'] : []),
+    ...(alignedStructure ? [direction === 'sell' ? 'Bearish neckline / structure break' : 'Bullish neckline / structure break'] : []),
+    ...(alignedSweep ? [direction === 'sell' ? 'Buy-side liquidity sweep into resistance' : 'Sell-side liquidity sweep into support'] : []),
+    ...(alignedMomentum ? [direction === 'sell' ? 'Bearish rotation confirmed' : 'Bullish rotation confirmed'] : []),
+  ];
+
+  const setup: TradeSetup = {
+    symbol,
+    direction,
+    entry,
+    stopLoss,
+    takeProfit,
+    takeProfit2,
+    score: Math.min(9, 4 + confirmationCount),
+    confidenceScore,
+    strategy: direction === 'sell' ? 'Resistance Rejection Range Short' : 'Support Rejection Range Long',
+    confirmations: tradeConfirmations,
+    confirmationLabels,
+  };
+
+  const zoneCheck = zoneFilter(setup, candles);
+  if (!zoneCheck.valid) {
+    return null;
+  }
+
+  if (isVolatilitySymbol(symbol) && broaderTrend !== 'ranging' && !emaAligned && confidenceScore < 5) {
+    return null;
+  }
+
+  return setup;
+}
+
+function buildSupportResistanceRangePotential(
+  symbol: string,
+  candles: Candle[],
+  broaderTrend: TrendDirection,
+  emaTrend: EmaTrendContext,
+): PotentialTradeSetup | null {
+  const range = detectSupportResistanceRange(candles);
+  if (!range) {
+    return null;
+  }
+
+  const currentPrice = candles[candles.length - 1].close;
+  const last = candles[candles.length - 1];
+  const prev = candles[candles.length - 2];
+  const edgeBuffer = Math.max(range.rangeHeight * 0.24, range.baselineRange * 1.5);
+  const distanceToResistance = Math.max(0, range.resistance - currentPrice);
+  const distanceToSupport = Math.max(0, currentPrice - range.support);
+  const nearResistance = currentPrice >= range.resistance - edgeBuffer || last.high >= range.resistance - edgeBuffer;
+  const nearSupport = currentPrice <= range.support + edgeBuffer || last.low <= range.support + edgeBuffer;
+
+  if (!nearResistance && !nearSupport) {
+    return null;
+  }
+
+  const direction: 'buy' | 'sell' = nearResistance && !nearSupport
+    ? 'sell'
+    : nearSupport && !nearResistance
+      ? 'buy'
+      : distanceToResistance <= distanceToSupport
+        ? 'sell'
+        : 'buy';
+
+  const sweep = detectLiquiditySweep(candles);
+  const rejection = detectRejection(last);
+  const engulfing = detectEngulfing(prev, last);
+  const structure = detectStructureBreak(candles);
+  const momentum = detectRecentMomentum(candles);
+  const alignedSweep = isSweepAligned(direction, sweep);
+  const alignedRejection = isRejectionAligned(direction, rejection);
+  const alignedEngulfing = isEngulfingAligned(direction, engulfing);
+  const alignedStructure = isStructureAligned(direction, structure);
+  const alignedMomentum = (direction === 'buy' && momentum === 'bullish') || (direction === 'sell' && momentum === 'bearish');
+  const zoneReaction = direction === 'sell'
+    ? last.high >= range.resistance - edgeBuffer && last.close < range.resistance
+    : last.low <= range.support + edgeBuffer && last.close > range.support;
+  const freshDisplacement = hasFreshDisplacement(direction, candles);
+  const emaAligned = isEmaDirectionAligned(direction, emaTrend);
+  const tradeConfirmations = buildTradeConfirmations({
+    alignedSweep,
+    alignedEngulfing,
+    alignedRejection,
+    alignedStructure,
+    poiReclaim: false,
+    emaAligned,
+    zoneReaction,
+    freshDisplacement,
+    alignedMomentum,
+  });
+  const confidenceScore = countTradeConfirmations(tradeConfirmations);
+  const boundaryTouches = direction === 'sell' ? range.resistanceTouches : range.supportTouches;
+  const boundaryLabel = direction === 'sell' ? 'range resistance' : 'range support';
+  const oppositeBoundaryLabel = direction === 'sell' ? 'range support' : 'range resistance';
+  const entry = currentPrice;
+  const buffer = Math.max(range.baselineRange * 0.65, range.rangeHeight * 0.08, currentPrice * 0.0006);
+  const stopLoss = direction === 'sell'
+    ? range.resistanceExtreme + buffer
+    : range.supportExtreme - buffer;
+  const takeProfit = direction === 'sell' ? range.support : range.resistance;
+  const risk = Math.abs(entry - stopLoss);
+  const reward = Math.abs(takeProfit - entry);
+
+  if (!Number.isFinite(risk) || risk <= 0 || !Number.isFinite(reward) || reward < risk) {
+    return null;
+  }
+
+  const takeProfit2 = direction === 'sell'
+    ? Math.min(takeProfit - risk, entry - risk * 3)
+    : Math.max(takeProfit + risk, entry + risk * 3);
+
+  let activationProbability = 34;
+  activationProbability += boundaryTouches >= 3 ? 14 : 8;
+  activationProbability += zoneReaction ? 16 : 6;
+  activationProbability += alignedRejection ? 12 : 0;
+  activationProbability += alignedEngulfing ? 12 : 0;
+  activationProbability += alignedStructure ? 10 : 0;
+  activationProbability += alignedSweep ? 8 : 0;
+  activationProbability += freshDisplacement ? 8 : 0;
+  activationProbability += alignedMomentum ? 6 : 0;
+  activationProbability += emaAligned ? 4 : 0;
+  activationProbability += reward >= risk * 1.5 ? 6 : 0;
+  activationProbability -= broaderTrend === 'ranging' ? 0 : emaAligned ? 0 : 6;
+
+  const fulfilledConditions: string[] = [
+    direction === 'sell' ? 'Price is testing a repeated resistance boundary' : 'Price is testing a repeated support boundary',
+    `Range boundaries are established with ${boundaryTouches} touches on the ${boundaryLabel}`,
+    direction === 'sell' ? 'Target maps toward the opposite support boundary' : 'Target maps toward the opposite resistance boundary',
+  ];
+  const requiredTriggers: string[] = [];
+  const contextLabels: string[] = [
+    'Support/resistance range structure',
+    direction === 'sell' ? 'Upper boundary rotation watch' : 'Lower boundary rotation watch',
+  ];
+
+  if (zoneReaction) {
+    fulfilledConditions.push(direction === 'sell' ? 'Price is reacting away from resistance' : 'Price is reacting away from support');
+  } else {
+    requiredTriggers.push(direction === 'sell' ? 'Clean bearish rejection from range resistance' : 'Clean bullish rejection from range support');
+  }
+
+  if (alignedRejection) {
+    fulfilledConditions.push(direction === 'sell' ? 'Bearish rejection wick printed at resistance' : 'Bullish rejection wick printed at support');
+  } else {
+    requiredTriggers.push(direction === 'sell' ? 'Bearish rejection wick at the upper boundary' : 'Bullish rejection wick at the lower boundary');
+  }
+
+  if (alignedEngulfing) {
+    fulfilledConditions.push(direction === 'sell' ? 'Bearish engulfing confirmed at resistance' : 'Bullish engulfing confirmed at support');
+  } else {
+    requiredTriggers.push(direction === 'sell' ? 'Bearish engulfing candle from resistance' : 'Bullish engulfing candle from support');
+  }
+
+  if (alignedStructure) {
+    fulfilledConditions.push(direction === 'sell' ? 'Bearish neckline / structure break confirmed' : 'Bullish neckline / structure break confirmed');
+  } else {
+    requiredTriggers.push(direction === 'sell' ? 'Bearish structure break away from resistance' : 'Bullish structure break away from support');
+  }
+
+  if (alignedSweep) {
+    fulfilledConditions.push(direction === 'sell' ? 'Liquidity sweep into resistance completed' : 'Liquidity sweep into support completed');
+  }
+
+  if (freshDisplacement) {
+    fulfilledConditions.push(direction === 'sell' ? 'Bearish displacement away from resistance is underway' : 'Bullish displacement away from support is underway');
+  } else {
+    requiredTriggers.push(direction === 'sell' ? 'Stronger bearish displacement away from the upper boundary' : 'Stronger bullish displacement away from the lower boundary');
+  }
+
+  if (alignedMomentum) {
+    fulfilledConditions.push(direction === 'sell' ? 'Bearish rotation momentum is forming' : 'Bullish rotation momentum is forming');
+  }
+
+  if (emaTrend.trend !== 'ranging') {
+    if (emaAligned) {
+      fulfilledConditions.push(direction === 'sell' ? 'EMA flow supports the short rotation' : 'EMA flow supports the long rotation');
+    } else {
+      requiredTriggers.push(direction === 'sell' ? 'EMA flow rolls back bearish or range holds cleanly' : 'EMA flow rolls back bullish or range holds cleanly');
+    }
+  }
+
+  const strategy = direction === 'sell'
+    ? 'Resistance Rejection Range Short Watchlist'
+    : 'Support Rejection Range Long Watchlist';
+  const narrative = direction === 'sell'
+    ? `Scanner is tracking a resistance-to-support range sell on ${symbol}. Price is near the upper boundary and the setup improves if bearish rejection confirms and rotates price back toward ${oppositeBoundaryLabel}.`
+    : `Scanner is tracking a support-to-resistance range buy on ${symbol}. Price is near the lower boundary and the setup improves if bullish rejection confirms and rotates price back toward ${oppositeBoundaryLabel}.`;
+
+  return {
+    symbol,
+    direction,
+    currentPrice,
+    entry,
+    stopLoss,
+    takeProfit,
+    takeProfit2,
+    activationProbability: Math.min(95, activationProbability),
+    confidenceScore,
+    confirmations: tradeConfirmations,
+    strategy,
+    narrative,
+    fulfilledConditions,
+    requiredTriggers,
+    contextLabels,
+  };
 }
 
 // ── 8. Look-left supply/demand detection ──
@@ -1460,11 +1832,11 @@ function hasMeaningfulSwingBetween(
 }
 
 function detectDoubleBottom(candles: Candle[], zone: PriceZone | null): boolean {
-  if (!zone || zone.type !== 'demand' || candles.length < 8) {
+  if (!zone || zone.type !== 'demand' || candles.length < DOUBLE_REVERSAL_PATTERN_LOOKBACK) {
     return false;
   }
 
-  const recent = candles.slice(-12);
+  const recent = candles.slice(-DOUBLE_REVERSAL_PATTERN_LOOKBACK);
   const baselineRange = Math.max(averageRange(candles, 12), 0.0001);
   const zoneHeight = Math.max(Math.abs(zone.top - zone.bottom), 0.0001);
   const lows = recent
@@ -1500,11 +1872,11 @@ function detectDoubleBottom(candles: Candle[], zone: PriceZone | null): boolean 
 }
 
 function detectDoubleTop(candles: Candle[], zone: PriceZone | null): boolean {
-  if (!zone || zone.type !== 'supply' || candles.length < 8) {
+  if (!zone || zone.type !== 'supply' || candles.length < DOUBLE_REVERSAL_PATTERN_LOOKBACK) {
     return false;
   }
 
-  const recent = candles.slice(-12);
+  const recent = candles.slice(-DOUBLE_REVERSAL_PATTERN_LOOKBACK);
   const baselineRange = Math.max(averageRange(candles, 12), 0.0001);
   const zoneHeight = Math.max(Math.abs(zone.top - zone.bottom), 0.0001);
   const highs = recent
@@ -1540,11 +1912,11 @@ function detectDoubleTop(candles: Candle[], zone: PriceZone | null): boolean {
 }
 
 function detectInverseHeadAndShoulders(candles: Candle[], zone: PriceZone | null): boolean {
-  if (!zone || zone.type !== 'demand' || candles.length < 12) {
+  if (!zone || zone.type !== 'demand' || candles.length < HEAD_SHOULDERS_PATTERN_LOOKBACK) {
     return false;
   }
 
-  const recent = candles.slice(-18);
+  const recent = candles.slice(-HEAD_SHOULDERS_PATTERN_LOOKBACK);
   const baselineRange = Math.max(averageRange(candles, 12), 0.0001);
   const zoneHeight = Math.max(Math.abs(zone.top - zone.bottom), 0.0001);
   const lows = recent
@@ -1600,11 +1972,11 @@ function detectInverseHeadAndShoulders(candles: Candle[], zone: PriceZone | null
 }
 
 function detectHeadAndShoulders(candles: Candle[], zone: PriceZone | null): boolean {
-  if (!zone || zone.type !== 'supply' || candles.length < 12) {
+  if (!zone || zone.type !== 'supply' || candles.length < HEAD_SHOULDERS_PATTERN_LOOKBACK) {
     return false;
   }
 
-  const recent = candles.slice(-18);
+  const recent = candles.slice(-HEAD_SHOULDERS_PATTERN_LOOKBACK);
   const baselineRange = Math.max(averageRange(candles, 12), 0.0001);
   const zoneHeight = Math.max(Math.abs(zone.top - zone.bottom), 0.0001);
   const highs = recent
@@ -1833,11 +2205,15 @@ export function zoneFilter(signal: Pick<TradeSetup, 'symbol' | 'direction' | 'en
 // Pure logic — no AI, no network calls. Just candles in, setup out.
 
 export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | null {
-  if (candles.length < 30) return null;
+  if (candles.length < MIN_SCANNER_ANALYSIS_CANDLES) return null;
 
   const trend = detectTrend(candles);
   const broaderTrend = detectContextTrend(candles);
   const emaTrend = analyzeEmaTrend(candles);
+  const rangeTradeSetup = buildSupportResistanceTradeSetup(symbol, candles, broaderTrend, emaTrend);
+  if (rangeTradeSetup) {
+    return rangeTradeSetup;
+  }
   const currentPrice = candles[candles.length - 1].close;
   const lookLeftCandles = candles.slice(-Math.min(500, candles.length));
   const zones = buildZones(lookLeftCandles, currentPrice);
@@ -2022,7 +2398,7 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
 }
 
 export function analyzePotentialTrade(symbol: string, candles: Candle[]): PotentialTradeSetup | null {
-  if (candles.length < 30) return null;
+  if (candles.length < MIN_SCANNER_ANALYSIS_CANDLES) return null;
 
   const trend = detectTrend(candles);
   const currentPrice = candles[candles.length - 1].close;
@@ -2067,11 +2443,12 @@ export function analyzePotentialTrades(
   candles: Candle[],
   context?: AnalyzePotentialTradeContext,
 ): PotentialTradeSetup[] {
-  if (candles.length < 30) return [];
+  if (candles.length < MIN_SCANNER_ANALYSIS_CANDLES) return [];
 
   const trend = context?.trend ?? detectTrend(candles);
   const broaderTrend = context?.broaderTrend ?? detectContextTrend(candles);
   const emaTrend = context?.emaTrend ?? analyzeEmaTrend(candles);
+  const rangeCandidate = buildSupportResistanceRangePotential(symbol, candles, broaderTrend, emaTrend);
   const currentPrice = context?.currentPrice ?? candles[candles.length - 1].close;
   const lookLeftCandles = candles.slice(-Math.min(500, candles.length));
   const zones = context?.zones ?? buildZones(lookLeftCandles, currentPrice);
@@ -2085,10 +2462,14 @@ export function analyzePotentialTrades(
   const bearishPoiReclaim = context?.bearishPoiReclaim ?? hasPoiReclaim('sell', bearishArea, candles);
 
   if (trend === 'ranging' && !bullishReversal && !bearishReversal) {
-    return [];
+    return rangeCandidate ? [rangeCandidate] : [];
   }
 
   const candidates: PotentialTradeSetup[] = [];
+
+  if (rangeCandidate) {
+    candidates.push(rangeCandidate);
+  }
 
   if (trend === 'bullish' || trend === 'bearish') {
     const trendDirection = trend === 'bullish' ? 'buy' : 'sell';
