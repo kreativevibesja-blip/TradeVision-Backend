@@ -99,9 +99,18 @@ interface SessionWindow {
   endHour: number;
 }
 
+interface DailySessionWindow extends SessionWindow {
+  weekdaysOnly?: boolean;
+}
+
 const SESSION_WINDOWS: Record<ForexSessionType, SessionWindow> = {
   london: { startHour: 2, endHour: 11 },
   newyork: { startHour: 8, endHour: 17 },
+};
+
+const VOLATILITY_SESSION_WINDOW: DailySessionWindow = {
+  startHour: SESSION_WINDOWS.london.startHour,
+  endHour: SESSION_WINDOWS.newyork.endHour,
 };
 
 // ── Scanner symbols and timeframe ──
@@ -230,16 +239,17 @@ function getCurrentEstWeekday(): number {
 }
 
 export function isSessionActive(sessionType: SessionType): boolean {
+  const weekday = getCurrentEstWeekday();
+  const hour = getCurrentEstHour();
+
   if (sessionType === 'volatility') {
-    return true;
+    return hour >= VOLATILITY_SESSION_WINDOW.startHour && hour < VOLATILITY_SESSION_WINDOW.endHour;
   }
 
-  const weekday = getCurrentEstWeekday();
   if (weekday === 0 || weekday === 6) {
     return false;
   }
 
-  const hour = getCurrentEstHour();
   const window = SESSION_WINDOWS[sessionType];
   return hour >= window.startHour && hour < window.endHour;
 }
@@ -248,14 +258,14 @@ export function getCurrentSessionTypes(): SessionType[] {
   const active: SessionType[] = [];
   if (isSessionActive('london')) active.push('london');
   if (isSessionActive('newyork')) active.push('newyork');
-  active.push('volatility');
+  if (isSessionActive('volatility')) active.push('volatility');
   return active;
 }
 
 function getRelevantScannerModes(enabledTypes: Set<SessionType>): SessionType[] {
   const relevantModes: SessionType[] = [];
 
-  if (enabledTypes.has('volatility')) {
+  if (enabledTypes.has('volatility') && isSessionActive('volatility')) {
     relevantModes.push('volatility');
   }
 
@@ -1190,7 +1200,7 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
       dailyCount += 1;
 
       const directionLabel = result.direction.toUpperCase();
-      const modeLabel = sessionType === 'volatility' ? 'Volatility 24/7' : `${sessionType === 'london' ? 'London' : 'New York'} Session`;
+      const modeLabel = sessionType === 'volatility' ? 'Volatility London + New York Hours' : `${sessionType === 'london' ? 'London' : 'New York'} Session`;
       const alert = await insertAlert({
         userId,
         scanResultId: scanResult.id,
@@ -1202,7 +1212,7 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
 
       sendPushToUser(userId, {
         title: 'TradeVision Alert 🚨',
-        body: `${result.symbol} ${directionLabel} setup detected (${sessionType === 'volatility' ? 'Volatility 24/7' : 'Session scanner'})`,
+        body: `${result.symbol} ${directionLabel} setup detected (${sessionType === 'volatility' ? 'Volatility session hours' : 'Session scanner'})`,
         tag: `scan-${result.symbol}-${result.direction}`,
         url: '/dashboard/scanner',
       }).catch((err) => console.error('[Push] Failed to send:', err));
@@ -1359,7 +1369,7 @@ export async function checkPotentialTradeAlerts(userId: string): Promise<Scanner
     }
 
     const directionLabel = potential.direction.toUpperCase();
-    const modeLabel = potential.sessionType === 'volatility' ? 'Volatility 24/7' : `${potential.sessionType === 'london' ? 'London' : 'New York'} Session`;
+    const modeLabel = potential.sessionType === 'volatility' ? 'Volatility London + New York Hours' : `${potential.sessionType === 'london' ? 'London' : 'New York'} Session`;
     const alert = await insertAlert({
       userId,
       message: `Potential ${modeLabel} setup building on ${potential.symbol} (${directionLabel}) — ${Math.round(potential.activationProbability)}% likely if confirmation triggers print.`,
