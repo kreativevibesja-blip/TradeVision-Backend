@@ -44,6 +44,8 @@ export interface TradeConfirmations {
   zoneReaction: boolean;
   displacement: boolean;
   momentum: boolean;
+  edgeBase: boolean;
+  breakerBlock: boolean;
 }
 
 export type MarketRegime = 'range' | 'trend' | 'reversal';
@@ -355,6 +357,8 @@ function buildTradeConfirmations(input: {
   zoneReaction: boolean;
   freshDisplacement: boolean;
   alignedMomentum: boolean;
+  edgeBase?: boolean;
+  breakerBlock?: boolean;
 }): TradeConfirmations {
   return {
     liquiditySweep: input.alignedSweep,
@@ -366,6 +370,8 @@ function buildTradeConfirmations(input: {
     zoneReaction: input.zoneReaction,
     displacement: input.freshDisplacement,
     momentum: input.alignedMomentum,
+    edgeBase: input.edgeBase ?? false,
+    breakerBlock: input.breakerBlock ?? false,
   };
 }
 
@@ -393,7 +399,7 @@ function isVolatilitySymbol(symbol: string): boolean {
 }
 
 function isForexSymbol(symbol: string): boolean {
-  return /^[A-Z]{6}$/.test(symbol) && !['XAUUSD', 'BTCUSD'].includes(symbol);
+  return /^[A-Z]{6}$/.test(symbol) && !['XAUUSD', 'XAGUSD', 'BTCUSD', 'ETHUSD', 'SOLUSD', 'XRPUSD', 'ADAUSD', 'LTCUSD', 'NAS100', 'SPX500'].includes(symbol);
 }
 
 function average(values: number[]): number {
@@ -854,6 +860,82 @@ function detectSupportResistanceRange(candles: Candle[]): SupportResistanceRange
   };
 }
 
+/**
+ * Detects a tight consolidation base (accumulation/distribution) at a range edge.
+ * Returns true when several recent candles form a narrow cluster near support or
+ * resistance and the latest candle breaks out of that cluster with displacement.
+ */
+function detectEdgeConsolidationBase(
+  candles: Candle[],
+  direction: 'buy' | 'sell',
+  edgePrice: number,
+  baselineRange: number,
+): boolean {
+  if (candles.length < 6) {
+    return false;
+  }
+
+  // Look for a cluster in the last 3–12 candles (excluding the latest breakout candle)
+  const latest = candles[candles.length - 1];
+  const candidateWindow = candles.slice(-13, -1); // up to 12 candles before the latest
+  if (candidateWindow.length < 3) {
+    return false;
+  }
+
+  const avgBody = averageBody(candles, 20);
+  const edgeTolerance = Math.max(baselineRange * 2.5, edgePrice * 0.004);
+
+  // Try different base lengths (3–10 candles), pick the tightest cluster near the edge
+  let bestBaseDetected = false;
+
+  for (let baseLen = 3; baseLen <= Math.min(10, candidateWindow.length); baseLen++) {
+    const baseCandles = candidateWindow.slice(-baseLen);
+    const baseHigh = Math.max(...baseCandles.map((c) => c.high));
+    const baseLow = Math.min(...baseCandles.map((c) => c.low));
+    const baseHeight = baseHigh - baseLow;
+
+    // The cluster must be tight relative to the average candle range
+    if (baseHeight > baselineRange * 4) {
+      continue;
+    }
+
+    // Bodies inside the cluster should be small (accumulation / indecision)
+    const clusterAvgBody = average(baseCandles.map((c) => Math.abs(c.close - c.open)));
+    if (clusterAvgBody > avgBody * 1.3) {
+      continue;
+    }
+
+    // Cluster must be located near the edge
+    const clusterMid = (baseHigh + baseLow) / 2;
+    const distanceToEdge = Math.abs(clusterMid - edgePrice);
+    if (distanceToEdge > edgeTolerance) {
+      continue;
+    }
+
+    // Latest candle must break out of the cluster with displacement
+    const latestBody = Math.abs(latest.close - latest.open);
+    if (latestBody < avgBody * 0.8) {
+      continue; // no real displacement
+    }
+
+    if (direction === 'buy') {
+      // Breakout above the cluster top, close strong
+      if (latest.close > baseHigh && latest.close > latest.open) {
+        bestBaseDetected = true;
+        break;
+      }
+    } else {
+      // Breakout below the cluster bottom, close strong
+      if (latest.close < baseLow && latest.close < latest.open) {
+        bestBaseDetected = true;
+        break;
+      }
+    }
+  }
+
+  return bestBaseDetected;
+}
+
 function isPriceNearRangeEdge(currentPrice: number, range: SupportResistanceRange | null): boolean {
   if (!range) {
     return false;
@@ -939,6 +1021,8 @@ function buildSupportResistanceTradeSetup(
     : last.low <= range.support + edgeBuffer && last.close > range.support;
   const freshDisplacement = hasFreshDisplacement(direction, candles);
   const emaAligned = isEmaDirectionAligned(direction, emaTrend);
+  const edgePrice = direction === 'sell' ? range.resistance : range.support;
+  const hasEdgeBase = detectEdgeConsolidationBase(candles, direction, edgePrice, range.baselineRange);
 
   const confirmationCount = [
     zoneReaction,
@@ -948,13 +1032,15 @@ function buildSupportResistanceTradeSetup(
     alignedStructure,
     alignedMomentum,
     freshDisplacement,
+    hasEdgeBase,
   ].filter(Boolean).length;
 
   if (!zoneReaction) {
     return null;
   }
 
-  if (!alignedRejection && !alignedEngulfing && !alignedStructure) {
+  // Classic entry: need rejection/engulfing/structure. Base-at-edge + displacement is an alternative.
+  if (!alignedRejection && !alignedEngulfing && !alignedStructure && !(hasEdgeBase && freshDisplacement)) {
     return null;
   }
 
@@ -989,6 +1075,7 @@ function buildSupportResistanceTradeSetup(
     zoneReaction,
     freshDisplacement,
     alignedMomentum,
+    edgeBase: hasEdgeBase,
   });
   const confidenceScore = countTradeConfirmations(tradeConfirmations);
 
@@ -996,6 +1083,7 @@ function buildSupportResistanceTradeSetup(
     direction === 'sell' ? 'Range resistance rejection' : 'Range support rejection',
     direction === 'sell' ? 'Price tapped resistance band' : 'Price tapped support band',
     direction === 'sell' ? 'Target mapped to range support' : 'Target mapped to range resistance',
+    ...(hasEdgeBase ? [direction === 'sell' ? 'Consolidation base formed at resistance' : 'Consolidation base formed at support'] : []),
     ...(alignedRejection ? [direction === 'sell' ? 'Bearish rejection at resistance' : 'Bullish rejection at support'] : []),
     ...(alignedEngulfing ? [direction === 'sell' ? 'Bearish engulfing from resistance' : 'Bullish engulfing from support'] : []),
     ...(alignedStructure ? [direction === 'sell' ? 'Bearish neckline / structure break' : 'Bullish neckline / structure break'] : []),
@@ -1077,6 +1165,8 @@ function buildSupportResistanceRangePotential(
     : last.low <= range.support + edgeBuffer && last.close > range.support;
   const freshDisplacement = hasFreshDisplacement(direction, candles);
   const emaAligned = isEmaDirectionAligned(direction, emaTrend);
+  const edgePrice = direction === 'sell' ? range.resistance : range.support;
+  const hasEdgeBase = detectEdgeConsolidationBase(candles, direction, edgePrice, range.baselineRange);
   const tradeConfirmations = buildTradeConfirmations({
     alignedSweep,
     alignedEngulfing,
@@ -1087,6 +1177,7 @@ function buildSupportResistanceRangePotential(
     zoneReaction,
     freshDisplacement,
     alignedMomentum,
+    edgeBase: hasEdgeBase,
   });
   const confidenceScore = countTradeConfirmations(tradeConfirmations);
   const boundaryTouches = direction === 'sell' ? range.resistanceTouches : range.supportTouches;
@@ -1119,6 +1210,7 @@ function buildSupportResistanceRangePotential(
   activationProbability += freshDisplacement ? 8 : 0;
   activationProbability += alignedMomentum ? 6 : 0;
   activationProbability += emaAligned ? 4 : 0;
+  activationProbability += hasEdgeBase ? 14 : 0;
   activationProbability += reward >= risk * 1.5 ? 6 : 0;
   activationProbability -= broaderTrend === 'ranging' ? 0 : emaAligned ? 0 : 6;
 
@@ -1159,6 +1251,13 @@ function buildSupportResistanceRangePotential(
 
   if (alignedSweep) {
     fulfilledConditions.push(direction === 'sell' ? 'Liquidity sweep into resistance completed' : 'Liquidity sweep into support completed');
+  }
+
+  if (hasEdgeBase) {
+    fulfilledConditions.push(direction === 'sell' ? 'Consolidation base formed at resistance before breakdown' : 'Consolidation base formed at support before breakout');
+    contextLabels.push('Edge base accumulation');
+  } else {
+    requiredTriggers.push(direction === 'sell' ? 'Tight consolidation base at resistance before breakdown' : 'Tight consolidation base at support before breakout');
   }
 
   if (freshDisplacement) {
@@ -1204,6 +1303,118 @@ function buildSupportResistanceRangePotential(
     requiredTriggers,
     contextLabels,
   };
+}
+
+// ── Breaker Block Detection ──
+// A breaker block is an order block (supply/demand zone) that was
+// broken through by price, flipping its polarity. Supply becomes
+// demand (bullish breaker) and demand becomes supply (bearish breaker).
+// The trade is on the retest of the flipped zone from the new side.
+
+export interface BreakerBlock {
+  /** The trade direction this breaker supports */
+  direction: 'buy' | 'sell';
+  top: number;
+  bottom: number;
+  /** Index where the original zone was formed */
+  originIndex: number;
+  /** Index where the zone was broken through */
+  breakIndex: number;
+}
+
+function detectBreakerBlocks(candles: Candle[], currentPrice: number): BreakerBlock[] {
+  if (candles.length < 20) {
+    return [];
+  }
+
+  const lookback = candles.slice(-Math.min(200, candles.length));
+  const zones = buildZones(lookback, currentPrice);
+  const breakers: BreakerBlock[] = [];
+  const minAge = 5; // zone must be at least 5 candles old before it can be "broken"
+
+  for (const zone of zones) {
+    if (zone.originIndex == null || zone.originIndex < 0) {
+      continue;
+    }
+
+    const originAge = lookback.length - 1 - zone.originIndex;
+    if (originAge < minAge) {
+      continue;
+    }
+
+    // Check if a candle after the zone's origin closed cleanly through it
+    let breakIndex = -1;
+
+    for (let i = zone.originIndex + minAge; i < lookback.length; i++) {
+      const candle = lookback[i];
+
+      if (zone.type === 'supply') {
+        // Supply broken: a candle closed above the zone top
+        if (candle.close > zone.top) {
+          breakIndex = i;
+          break;
+        }
+      } else {
+        // Demand broken: a candle closed below the zone bottom
+        if (candle.close < zone.bottom) {
+          breakIndex = i;
+          break;
+        }
+      }
+    }
+
+    if (breakIndex < 0) {
+      continue; // zone was never broken
+    }
+
+    // The break must have happened before the latest candle — we need room for a retest
+    if (breakIndex >= lookback.length - 1) {
+      continue;
+    }
+
+    // Flip polarity: broken supply → bullish breaker, broken demand → bearish breaker
+    const breakerDirection: 'buy' | 'sell' = zone.type === 'supply' ? 'buy' : 'sell';
+
+    breakers.push({
+      direction: breakerDirection,
+      top: zone.top,
+      bottom: zone.bottom,
+      originIndex: zone.originIndex,
+      breakIndex,
+    });
+  }
+
+  return breakers;
+}
+
+function findActiveBreakerBlock(
+  direction: 'buy' | 'sell',
+  currentPrice: number,
+  candles: Candle[],
+): BreakerBlock | null {
+  const breakers = detectBreakerBlocks(candles, currentPrice);
+  const baselineRange = Math.max(averageRange(candles, 12), currentPrice * 0.0004);
+
+  const matching = breakers
+    .filter((b) => b.direction === direction)
+    .filter((b) => {
+      // Price must be near or inside the breaker zone (retesting it)
+      const touchBuffer = Math.max(Math.abs(b.top - b.bottom) * 0.25, baselineRange * 0.5);
+
+      if (direction === 'buy') {
+        // Bullish breaker: ex-supply now demand. Price should be near/above the zone bottom
+        return currentPrice >= b.bottom - touchBuffer && currentPrice <= b.top + touchBuffer;
+      }
+
+      // Bearish breaker: ex-demand now supply. Price should be near/below the zone top
+      return currentPrice >= b.bottom - touchBuffer && currentPrice <= b.top + touchBuffer;
+    })
+    .sort((a, b) => {
+      // Prefer the most recently broken zone
+      return b.breakIndex - a.breakIndex;
+    });
+
+  return matching[0] ?? null;
 }
 
 // ── 8. Look-left supply/demand detection ──
@@ -1478,7 +1689,9 @@ function buildPotentialCandidate({
   const volatilitySymbol = isVolatilitySymbol(symbol);
   const broaderTrendDirection = toTradeDirection(broaderTrend);
   const trendDirection = toTradeDirection(trend);
-  const hasContinuationAreaReaction = nearDirectionalZone || freshReaction || poiReclaim;
+  const activeBreaker = findActiveBreakerBlock(direction, currentPrice, candles);
+  const hasBreaker = activeBreaker !== null;
+  const hasContinuationAreaReaction = nearDirectionalZone || freshReaction || poiReclaim || hasBreaker;
   const tradeConfirmations = buildTradeConfirmations({
     alignedSweep,
     alignedEngulfing,
@@ -1489,6 +1702,7 @@ function buildPotentialCandidate({
     zoneReaction: nearDirectionalZone || freshReaction,
     freshDisplacement,
     alignedMomentum,
+    breakerBlock: hasBreaker,
   });
   const confirmationScore = countTradeConfirmations(tradeConfirmations);
   const counterPressureCount = [
@@ -1572,6 +1786,7 @@ function buildPotentialCandidate({
   if (alignedStructure) probability += mode === 'counter' ? 10 : 5;
   if (alignedMomentum) probability += 5;
   if (emaAligned) probability += 10;
+  if (hasBreaker) probability += 14;
   if (stretchedFromArea) probability -= 15;
   if (emaTrend.trend !== 'ranging' && !emaAligned) probability -= mode === 'counter' ? 16 : 28;
 
@@ -1714,6 +1929,11 @@ function buildPotentialCandidate({
     contextLabels.push(direction === 'buy' ? 'Demand reversal in play' : 'Supply reversal in play');
   }
 
+  if (hasBreaker) {
+    fulfilledConditions.push(direction === 'buy' ? 'Bullish breaker block retest (flipped supply → demand)' : 'Bearish breaker block retest (flipped demand → supply)');
+    contextLabels.push(direction === 'buy' ? 'Bullish breaker block' : 'Bearish breaker block');
+  }
+
   if (alignedMomentum) {
     fulfilledConditions.push(direction === 'buy' ? 'Bullish momentum is aligned' : 'Bearish momentum is aligned');
   }
@@ -1802,7 +2022,7 @@ function hasStrongClosure(direction: 'buy' | 'sell', candles: Candle[]): boolean
     return last.close > last.open && last.close >= last.low + range * 0.7 && last.close > prev.high;
   }
 
-  return last.close < last.open && last.close <= last.high - range * 0.3 && last.close < prev.low;
+  return last.close < last.open && last.close <= last.high - range * 0.7 && last.close < prev.low;
 }
 
 function isZoneRetestStillTradable(currentPrice: number, zone: PriceZone, candles: Candle[]): boolean {
@@ -2337,10 +2557,12 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   const stretchedFromArea = isExtendedFromArea(direction, currentPrice, preferredArea, candles);
   const emaAligned = isEmaDirectionAligned(direction, emaTrend);
   const nearDirectionalZone = directionalZone ? isNearZone(currentPrice, [directionalZone], 0.0025) !== null : false;
+  const activeBreaker = findActiveBreakerBlock(direction, currentPrice, candles);
+  const hasBreaker = activeBreaker !== null;
   const volatilitySymbol = isVolatilitySymbol(symbol);
   const trendDirection = toTradeDirection(trend);
   const broaderTrendDirection = toTradeDirection(broaderTrend);
-  const hasContinuationAreaReaction = nearDirectionalZone || freshReaction || poiReclaim;
+  const hasContinuationAreaReaction = nearDirectionalZone || freshReaction || poiReclaim || hasBreaker;
   const tradeConfirmations = buildTradeConfirmations({
     alignedSweep,
     alignedEngulfing,
@@ -2351,6 +2573,7 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
     zoneReaction: nearDirectionalZone || freshReaction,
     freshDisplacement,
     alignedMomentum,
+    breakerBlock: hasBreaker,
   });
   const confirmationScore = countTradeConfirmations(tradeConfirmations);
 
@@ -2361,8 +2584,8 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   if (engulfing && !alignedEngulfing) return null;
   if (rejection && !alignedRejection) return null;
   if (structure && !alignedStructure) return null;
-  if (!directionalZone && !directionalFvg) return null;
-  if (isVolatilitySymbol(symbol) && !directionalZone) return null;
+  if (!directionalZone && !directionalFvg && !hasBreaker) return null;
+  if (isVolatilitySymbol(symbol) && !directionalZone && !hasBreaker) return null;
   if (stretchedFromArea && !freshDisplacement) return null;
 
   if (volatilitySymbol && trendDirection === direction && !isReversalSetup && !hasContinuationAreaReaction) return null;
@@ -2384,18 +2607,18 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
     }
   }
 
-  if (directionalConfirmationCount < 2 && !isReversalSetup) return null;
-  if (!alignedEngulfing && !alignedRejection && !alignedStructure && !poiReclaim && !isReversalSetup) return null;
+  if (directionalConfirmationCount < 2 && !isReversalSetup && !hasBreaker) return null;
+  if (!alignedEngulfing && !alignedRejection && !alignedStructure && !poiReclaim && !isReversalSetup && !hasBreaker) return null;
 
   // Liquidity sweeps need actual reversal confirmation before the scanner fires.
-  if (alignedSweep && !alignedEngulfing && !alignedStructure && !isReversalSetup) return null;
+  if (alignedSweep && !alignedEngulfing && !alignedStructure && !isReversalSetup && !hasBreaker) return null;
 
   // If the local tape is still moving against the setup, do not force an entry from the higher-level trend.
-  if (!alignedMomentum && !alignedStructure && !alignedEngulfing && !poiReclaim && !isReversalSetup) return null;
+  if (!alignedMomentum && !alignedStructure && !alignedEngulfing && !poiReclaim && !isReversalSetup && !hasBreaker) return null;
 
   // Favor the same setup family shown in the winning examples: reaction from a clean area, then displacement.
-  if (!freshReaction && !poiReclaim && !alignedSweep && !alignedRejection && !alignedEngulfing && !isReversalSetup) return null;
-  if (!freshDisplacement && !alignedStructure && !alignedEngulfing && !poiReclaim && !isReversalSetup) return null;
+  if (!freshReaction && !poiReclaim && !alignedSweep && !alignedRejection && !alignedEngulfing && !isReversalSetup && !hasBreaker) return null;
+  if (!freshDisplacement && !alignedStructure && !alignedEngulfing && !poiReclaim && !isReversalSetup && !hasBreaker) return null;
 
   const entry = last.close;
   const stopLoss = computeStopLoss(symbol, direction, candles);
@@ -2433,6 +2656,10 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
         : broaderTrend === 'bullish'
           ? 'Bearish Countertrend Reversal from Supply'
           : 'Bearish Higher-Timeframe Reversal'
+      : hasBreaker
+        ? direction === 'buy'
+          ? 'Bullish Breaker Block Retest'
+          : 'Bearish Breaker Block Retest'
       : poiReclaim
         ? direction === 'buy'
           ? broaderTrend === 'bearish'
@@ -2449,6 +2676,7 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
         : []),
       ...(isReversalSetup ? [direction === 'buy' ? 'Demand reversal pattern confirmed' : 'Supply reversal pattern confirmed', direction === 'buy' ? 'Bullish closure confirmation' : 'Bearish closure confirmation'] : []),
       ...(poiReclaim && !isReversalSetup ? [direction === 'buy' ? 'POI reclaim from demand/support' : 'POI reclaim from supply/resistance'] : []),
+      ...(hasBreaker ? [direction === 'buy' ? 'Bullish breaker block retest (flipped supply → demand)' : 'Bearish breaker block retest (flipped demand → supply)'] : []),
       ...buildConfirmationLabels(confirmations),
     ],
   };

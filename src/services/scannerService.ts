@@ -508,7 +508,7 @@ function promotePotentialToScanCycleResult(potential: PotentialTradeSetup): Scan
     entry: potential.entry,
     stopLoss: potential.stopLoss,
     takeProfit: potential.takeProfit,
-    takeProfit2: null,
+    takeProfit2: potential.takeProfit2,
     confidenceScore: potential.confidenceScore,
     marketRegime: potential.marketRegime,
     strategy: potential.strategy.replace(/ Watchlist$/i, ''),
@@ -1248,7 +1248,7 @@ async function scanSymbol(symbol: string): Promise<ScanCycleResult | null> {
       entry: setup.entry,
       stopLoss: setup.stopLoss,
       takeProfit: setup.takeProfit,
-      takeProfit2: null,
+      takeProfit2: setup.takeProfit2,
       confidenceScore: setup.confidenceScore,
       marketRegime: setup.marketRegime,
       strategy: setup.strategy,
@@ -1361,7 +1361,7 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
         entry: result.entry,
         stopLoss: result.stopLoss,
         takeProfit: result.takeProfit,
-        takeProfit2: null,
+        takeProfit2: result.takeProfit2,
         confidenceScore: result.confidenceScore,
         marketRegime: result.marketRegime,
         strategy: result.strategy,
@@ -1396,7 +1396,7 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
       dailyCount += 1;
 
       const directionLabel = result.direction.toUpperCase();
-      const modeLabel = sessionType === 'volatility' ? 'Volatility London + New York Hours' : `${sessionType === 'london' ? 'London' : 'New York'} Session`;
+      const modeLabel = sessionType === 'volatility' ? 'Volatility 24/7' : `${sessionType === 'london' ? 'London' : 'New York'} Session`;
       const alert = await insertAlert({
         userId,
         scanResultId: scanResult.id,
@@ -1408,7 +1408,7 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
 
       sendPushToUser(userId, {
         title: 'TradeVision Alert 🚨',
-        body: `${result.symbol} ${directionLabel} setup detected (${sessionType === 'volatility' ? 'Volatility session hours' : 'Session scanner'})`,
+        body: `${result.symbol} ${directionLabel} setup detected (${sessionType === 'volatility' ? 'Volatility 24/7' : 'Session scanner'})`,
         tag: `scan-${result.symbol}-${result.direction}`,
         url: '/dashboard/scanner',
       }).catch((err) => console.error('[Push] Failed to send:', err));
@@ -1526,7 +1526,6 @@ export async function getPotentialTrades(userId: string, limit = 12): Promise<Po
       .slice(0, limit)
       .map((item) => ({
         ...item,
-        takeProfit2: null,
         sessionType,
       }));
 
@@ -1565,7 +1564,7 @@ export async function checkPotentialTradeAlerts(userId: string): Promise<Scanner
     }
 
     const directionLabel = potential.direction.toUpperCase();
-    const modeLabel = potential.sessionType === 'volatility' ? 'Volatility London + New York Hours' : `${potential.sessionType === 'london' ? 'London' : 'New York'} Session`;
+    const modeLabel = potential.sessionType === 'volatility' ? 'Volatility 24/7' : `${potential.sessionType === 'london' ? 'London' : 'New York'} Session`;
     const alert = await insertAlert({
       userId,
       message: `Potential ${modeLabel} setup building on ${potential.symbol} (${directionLabel}) — ${Math.round(potential.activationProbability)}% likely if confirmation triggers print.`,
