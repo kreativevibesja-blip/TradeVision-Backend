@@ -158,6 +158,40 @@ function detectContextTrend(candles: Candle[]): TrendDirection {
   return detectTrendFromLookback(candles, 48, 24);
 }
 
+// ── 1b. Macro Trend Detection ──
+// Uses the full candle history (600+) to classify the overarching market
+// direction.  Combines EMA 50/200 alignment with a quarter-based swing
+// structure comparison.  Both signals must broadly agree for a clear
+// trend — disagreement yields 'ranging'.
+
+function detectMacroTrend(candles: Candle[], emaTrend: EmaTrendContext): TrendDirection {
+  if (candles.length < 100) return 'ranging';
+
+  const emaBias: TrendDirection = emaTrend.trend;
+
+  const quarterLen = Math.floor(candles.length / 4);
+  const q1Avg = average(candles.slice(0, quarterLen).map(c => c.close));
+  const q2Avg = average(candles.slice(quarterLen, quarterLen * 2).map(c => c.close));
+  const q3Avg = average(candles.slice(quarterLen * 2, quarterLen * 3).map(c => c.close));
+  const q4Avg = average(candles.slice(quarterLen * 3).map(c => c.close));
+
+  const transitions = [q2Avg > q1Avg, q3Avg > q2Avg, q4Avg > q3Avg];
+  const upCount = transitions.filter(Boolean).length;
+  const downCount = transitions.filter(v => !v).length;
+
+  let swingBias: TrendDirection = 'ranging';
+  if (upCount >= 2) swingBias = 'bullish';
+  if (downCount >= 2) swingBias = 'bearish';
+
+  // Both agree → clear trend
+  if (emaBias === swingBias) return emaBias;
+  // One clear + one neutral → trust the clear signal
+  if (emaBias !== 'ranging' && swingBias === 'ranging') return emaBias;
+  if (swingBias !== 'ranging' && emaBias === 'ranging') return swingBias;
+  // Disagree → ranging
+  return 'ranging';
+}
+
 // ── 2. Liquidity Sweep Detection ──
 // Checks if the latest candle wicked beyond a recent
 // high/low but closed back inside — classic stop hunt.
@@ -2030,6 +2064,7 @@ interface PotentialCandidateInput {
   candles: Candle[];
   trend: TrendDirection;
   broaderTrend: TrendDirection;
+  macroTrend: TrendDirection;
   emaTrend: EmaTrendContext;
   currentPrice: number;
   zones: PriceZone[];
@@ -2048,6 +2083,7 @@ function buildPotentialCandidate({
   candles,
   trend,
   broaderTrend,
+  macroTrend,
   emaTrend,
   currentPrice,
   zones,
@@ -2396,15 +2432,12 @@ function buildPotentialCandidate({
     return null;
   }
 
+  const isMacroAligned = macroTrend !== 'ranging';
   const strategy = mode === 'counter'
     ? `${poiReclaim
       ? direction === 'buy'
-        ? broaderTrend === 'bearish'
-          ? 'Bullish POI Reclaim Countertrend'
-          : 'Bullish Higher-Timeframe Reversal'
-        : broaderTrend === 'bullish'
-          ? 'Bearish POI Reclaim Countertrend'
-          : 'Bearish Higher-Timeframe Reversal'
+        ? 'Bullish POI Reclaim Countertrend'
+        : 'Bearish POI Reclaim Countertrend'
       : hasEqlSweep
         ? direction === 'buy'
           ? 'Bullish EQL Sweep Reversal'
@@ -2414,12 +2447,16 @@ function buildPotentialCandidate({
         : 'Counter-Trend Zone Tap'} Watchlist`
     : `${isReversalSetup
       ? direction === 'buy'
-        ? broaderTrend === 'bearish'
-          ? 'Bullish Countertrend Reversal from Demand'
-          : 'Bullish Higher-Timeframe Reversal'
-        : broaderTrend === 'bullish'
-          ? 'Bearish Countertrend Reversal from Supply'
-          : 'Bearish Higher-Timeframe Reversal'
+        ? isMacroAligned
+          ? 'Bullish Trend Pullback Reversal'
+          : broaderTrend === 'bearish'
+            ? 'Bullish Countertrend Reversal from Demand'
+            : 'Bullish Higher-Timeframe Reversal'
+        : isMacroAligned
+          ? 'Bearish Trend Pullback Reversal'
+          : broaderTrend === 'bullish'
+            ? 'Bearish Countertrend Reversal from Supply'
+            : 'Bearish Higher-Timeframe Reversal'
       : hasFvgReaction
         ? direction === 'buy'
           ? 'Bullish FVG Fill Continuation'
@@ -2430,12 +2467,12 @@ function buildPotentialCandidate({
           : 'Bearish EQH Sweep Reversal'
       : poiReclaim
         ? direction === 'buy'
-          ? broaderTrend === 'bearish'
-            ? 'Bullish POI Reclaim Countertrend'
-            : 'Bullish POI Reclaim Continuation'
-          : broaderTrend === 'bullish'
-            ? 'Bearish POI Reclaim Countertrend'
-            : 'Bearish POI Reclaim Continuation'
+          ? isMacroAligned || broaderTrend !== 'bearish'
+            ? 'Bullish POI Reclaim Continuation'
+            : 'Bullish POI Reclaim Countertrend'
+          : isMacroAligned || broaderTrend !== 'bullish'
+            ? 'Bearish POI Reclaim Continuation'
+            : 'Bearish POI Reclaim Countertrend'
       : nearDirectionalZone
         ? deriveStrategy(direction, sweep)
         : direction === 'buy'
@@ -2955,40 +2992,47 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   const bearishReversalPattern = resolveBearishReversalPattern(currentPrice, currentZone, candles);
   const bullishReversal = bullishReversalPattern.matched;
   const bearishReversal = bearishReversalPattern.matched;
-  const marketRegime = resolveMarketRegime({
-    trend,
-    broaderTrend,
-    currentPrice,
-    range,
-    bullishReversal,
-    bearishReversal,
-  });
-  const rangeTradeSetup = marketRegime === 'range'
-    ? buildSupportResistanceTradeSetup(symbol, candles, broaderTrend, emaTrend)
-    : null;
-  if (rangeTradeSetup) {
-    return rangeTradeSetup;
+  const macroTrend = detectMacroTrend(candles, emaTrend);
+
+  // Macro ranging → prioritize range trades (buy support, sell resistance)
+  if (macroTrend === 'ranging') {
+    const rangeTradeSetup = buildSupportResistanceTradeSetup(symbol, candles, broaderTrend, emaTrend);
+    if (rangeTradeSetup) return rangeTradeSetup;
+    if (trend === 'ranging' && !bullishReversal && !bearishReversal) return null;
   }
+
   const bullishArea = toPriceArea(findDirectionalZone('buy', zones, currentPrice, candles, symbol) ?? findDirectionalFvg('buy', gaps, candles, symbol));
   const bearishArea = toPriceArea(findDirectionalZone('sell', zones, currentPrice, candles, symbol) ?? findDirectionalFvg('sell', gaps, candles, symbol));
   const bullishPoiReclaim = hasPoiReclaim('buy', bullishArea, candles);
   const bearishPoiReclaim = hasPoiReclaim('sell', bearishArea, candles);
 
-  if (trend === 'ranging' && !bullishReversal && !bearishReversal) return null;
+  // Lock direction to the macro trend.  Counter-trend reversal patterns
+  // that oppose the macro direction are skipped entirely.
+  let direction: 'buy' | 'sell';
+  if (macroTrend === 'bullish') {
+    if (bearishReversal && !bullishReversal) return null;
+    direction = 'buy';
+  } else if (macroTrend === 'bearish') {
+    if (bullishReversal && !bearishReversal) return null;
+    direction = 'sell';
+  } else {
+    // Macro ranging — use micro trend / reversal patterns for direction
+    if (trend === 'ranging' && !bullishReversal && !bearishReversal) return null;
+    direction = bullishReversal
+      ? 'buy'
+      : bearishReversal
+        ? 'sell'
+        : currentZone?.type === 'demand' && bullishPoiReclaim
+          ? 'buy'
+          : currentZone?.type === 'supply' && bearishPoiReclaim
+            ? 'sell'
+          : trend === 'bullish'
+            ? 'buy'
+            : 'sell';
+  }
 
-  const direction: 'buy' | 'sell' = bullishReversal
-    ? 'buy'
-    : bearishReversal
-      ? 'sell'
-      : currentZone?.type === 'demand' && bullishPoiReclaim
-        ? 'buy'
-        : currentZone?.type === 'supply' && bearishPoiReclaim
-          ? 'sell'
-      : trend === 'bullish'
-        ? 'buy'
-        : 'sell';
-
-  const isReversalSetup = bullishReversal || bearishReversal;
+  // Only count a reversal when it aligns with the chosen direction
+  const isReversalSetup = (direction === 'buy' && bullishReversal) || (direction === 'sell' && bearishReversal);
   const directionalZone = findDirectionalZone(direction, zones, currentPrice, candles, symbol);
   const directionalFvg = findDirectionalFvg(direction, gaps, candles, symbol);
   const preferredArea = toPriceArea(directionalZone ?? directionalFvg);
@@ -3066,19 +3110,28 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
 
   if (volatilitySymbol && trendDirection === direction && !isReversalSetup && !hasContinuationAreaReaction) return null;
 
-  if (volatilitySymbol && trendDirection && direction !== trendDirection) {
-    if (!isReversalSetup) return null;
-    if (!nearDirectionalZone || !freshReaction || !(alignedSweep || hasEqlSweep) || !(alignedStructure || hasMss)) return null;
+  // When macro trend is clear, micro-trend pullbacks are expected — only gate
+  // on micro counter-trend disagreement when macro is ranging.
+  if (macroTrend === 'ranging') {
+    if (volatilitySymbol && trendDirection && direction !== trendDirection) {
+      if (!isReversalSetup) return null;
+      if (!nearDirectionalZone || !freshReaction || !(alignedSweep || hasEqlSweep) || !(alignedStructure || hasMss)) return null;
+    }
+    if (volatilitySymbol && broaderTrendDirection && direction !== broaderTrendDirection && !isReversalSetup) return null;
   }
-
-  if (volatilitySymbol && broaderTrendDirection && direction !== broaderTrendDirection && !isReversalSetup) return null;
 
   const directionalConfirmationCount = [alignedSweep || hasEqlSweep, alignedEngulfing, alignedRejection, alignedStructure || hasMss, alignedMomentum, poiReclaim]
     .filter(Boolean)
     .length;
 
+  // When macro trend is clear, relax the EMA counter-trend gate because
+  // pullbacks naturally push price against shorter EMAs.
   if (emaTrend.trend !== 'ranging' && !emaAligned) {
-    if (!isReversalSetup || !poiReclaim || !(alignedStructure || hasMss) || directionalConfirmationCount < 3) {
+    if (macroTrend === 'ranging') {
+      if (!isReversalSetup || !poiReclaim || !(alignedStructure || hasMss) || directionalConfirmationCount < 3) {
+        return null;
+      }
+    } else if (directionalConfirmationCount < 2 && !isReversalSetup) {
       return null;
     }
   }
@@ -3126,12 +3179,16 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
     marketRegime: isReversalSetup ? 'reversal' : 'trend',
     strategy: isReversalSetup
       ? direction === 'buy'
-        ? broaderTrend === 'bearish'
-          ? 'Bullish Countertrend Reversal from Demand'
-          : 'Bullish Higher-Timeframe Reversal'
-        : broaderTrend === 'bullish'
-          ? 'Bearish Countertrend Reversal from Supply'
-          : 'Bearish Higher-Timeframe Reversal'
+        ? macroTrend === 'bullish'
+          ? 'Bullish Trend Pullback Reversal'
+          : broaderTrend === 'bearish'
+            ? 'Bullish Countertrend Reversal from Demand'
+            : 'Bullish Higher-Timeframe Reversal'
+        : macroTrend === 'bearish'
+          ? 'Bearish Trend Pullback Reversal'
+          : broaderTrend === 'bullish'
+            ? 'Bearish Countertrend Reversal from Supply'
+            : 'Bearish Higher-Timeframe Reversal'
       : hasBreaker
         ? direction === 'buy'
           ? 'Bullish Breaker Block Retest'
@@ -3146,12 +3203,12 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
           : 'Bearish EQH Sweep Reversal'
       : poiReclaim
         ? direction === 'buy'
-          ? broaderTrend === 'bearish'
-            ? 'Bullish POI Reclaim Countertrend'
-            : 'Bullish POI Reclaim Continuation'
-          : broaderTrend === 'bullish'
-            ? 'Bearish POI Reclaim Countertrend'
-            : 'Bearish POI Reclaim Continuation'
+          ? macroTrend === 'bullish' || broaderTrend !== 'bearish'
+            ? 'Bullish POI Reclaim Continuation'
+            : 'Bullish POI Reclaim Countertrend'
+          : macroTrend === 'bearish' || broaderTrend !== 'bullish'
+            ? 'Bearish POI Reclaim Continuation'
+            : 'Bearish POI Reclaim Countertrend'
       : deriveStrategy(direction, sweep),
     confirmations: tradeConfirmations,
     confirmationLabels: [
@@ -3230,126 +3287,68 @@ export function analyzePotentialTrades(
   const trend = context?.trend ?? detectTrend(candles);
   const broaderTrend = context?.broaderTrend ?? detectContextTrend(candles);
   const emaTrend = context?.emaTrend ?? analyzeEmaTrend(candles);
+  const macroTrend = detectMacroTrend(candles, emaTrend);
   const currentPrice = context?.currentPrice ?? candles[candles.length - 1].close;
-  const range = detectSupportResistanceRange(candles);
   const lookLeftCandles = candles.slice(-Math.min(500, candles.length));
   const zones = context?.zones ?? buildZones(lookLeftCandles, currentPrice);
   const gaps = context?.gaps ?? buildFairValueGaps(lookLeftCandles, currentPrice);
   const currentZone = context?.currentZone ?? findActiveReversalZone(currentPrice, zones, candles);
   const bullishReversal = context?.bullishReversal ?? resolveBullishReversalPattern(currentPrice, currentZone, candles).matched;
   const bearishReversal = context?.bearishReversal ?? resolveBearishReversalPattern(currentPrice, currentZone, candles).matched;
-  const marketRegime = resolveMarketRegime({
-    trend,
-    broaderTrend,
-    currentPrice,
-    range,
-    bullishReversal,
-    bearishReversal,
-  });
   const rangeCandidate = buildSupportResistanceRangePotential(symbol, candles, broaderTrend, emaTrend);
   const bullishArea = toPriceArea(findDirectionalZone('buy', zones, currentPrice, candles, symbol) ?? findDirectionalFvg('buy', gaps, candles, symbol));
   const bearishArea = toPriceArea(findDirectionalZone('sell', zones, currentPrice, candles, symbol) ?? findDirectionalFvg('sell', gaps, candles, symbol));
   const bullishPoiReclaim = context?.bullishPoiReclaim ?? hasPoiReclaim('buy', bullishArea, candles);
   const bearishPoiReclaim = context?.bearishPoiReclaim ?? hasPoiReclaim('sell', bearishArea, candles);
 
-  if (trend === 'ranging' && !bullishReversal && !bearishReversal) {
-    return rangeCandidate ? [rangeCandidate] : [];
+  // Macro ranging → only range candidates (buy support, sell resistance)
+  if (macroTrend === 'ranging') {
+    if (trend === 'ranging' && !bullishReversal && !bearishReversal) {
+      return rangeCandidate ? [rangeCandidate] : [];
+    }
+
+    const candidates: PotentialTradeSetup[] = [];
+    if (rangeCandidate) candidates.push(rangeCandidate);
+
+    // In ranging macro, allow micro-trend direction as a secondary candidate
+    const microDirection = bullishReversal
+      ? 'buy' as const
+      : bearishReversal
+        ? 'sell' as const
+        : trend === 'bullish'
+          ? 'buy' as const
+          : trend === 'bearish'
+            ? 'sell' as const
+            : null;
+
+    if (microDirection) {
+      const microCandidate = buildPotentialCandidate({
+        symbol, candles, trend, broaderTrend, macroTrend, emaTrend, currentPrice,
+        zones, gaps, currentZone, direction: microDirection, mode: 'trend',
+        bullishReversal, bearishReversal, bullishPoiReclaim, bearishPoiReclaim,
+      });
+      if (microCandidate) candidates.push(microCandidate);
+    }
+
+    return candidates
+      .filter((c, i, a) => a.findIndex(x => x.direction === c.direction && x.strategy === c.strategy) === i)
+      .sort((a, b) => b.activationProbability - a.activationProbability);
   }
+
+  // Macro trend is clear — only generate candidates in the macro direction.
+  // No counter-trend candidates.
+  const macroDirection: 'buy' | 'sell' = macroTrend === 'bullish' ? 'buy' : 'sell';
 
   const candidates: PotentialTradeSetup[] = [];
 
-  if (rangeCandidate) {
-    candidates.push(rangeCandidate);
-  }
-
-  if (trend === 'bullish' || trend === 'bearish') {
-    const trendDirection = trend === 'bullish' ? 'buy' : 'sell';
-    const continuationCandidate = buildPotentialCandidate({
-      symbol,
-      candles,
-      trend,
-      broaderTrend,
-      emaTrend,
-      currentPrice,
-      zones,
-      gaps,
-      currentZone,
-      direction: trendDirection,
-      mode: 'trend',
-      bullishReversal,
-      bearishReversal,
-      bullishPoiReclaim,
-      bearishPoiReclaim,
-    });
-    if (continuationCandidate) {
-      candidates.push(continuationCandidate);
-    }
-
-    const shouldSkipCounterCandidate = isVolatilitySymbol(symbol)
-      && broaderTrend === trend
-      && (trend === 'bullish' || trend === 'bearish');
-
-    if (shouldSkipCounterCandidate) {
-      return candidates
-        .filter((candidate, index, array) => array.findIndex((item) => item.direction === candidate.direction && item.strategy === candidate.strategy) === index)
-        .sort((left, right) => right.activationProbability - left.activationProbability);
-    }
-
-    const counterCandidate = buildPotentialCandidate({
-      symbol,
-      candles,
-      trend,
-      broaderTrend,
-      emaTrend,
-      currentPrice,
-      zones,
-      gaps,
-      currentZone,
-      direction: getOppositeDirection(trendDirection),
-      mode: 'counter',
-      bullishReversal,
-      bearishReversal,
-      bullishPoiReclaim,
-      bearishPoiReclaim,
-    });
-    if (counterCandidate) {
-      candidates.push(counterCandidate);
-    }
-  } else {
-    const reversalDirection = bullishReversal ? 'buy' : bearishReversal ? 'sell' : null;
-    if (reversalDirection) {
-      const reversalCandidate = buildPotentialCandidate({
-        symbol,
-        candles,
-        trend,
-        broaderTrend,
-        emaTrend,
-        currentPrice,
-        zones,
-        gaps,
-        currentZone,
-        direction: reversalDirection,
-        mode: 'counter',
-        bullishReversal,
-        bearishReversal,
-        bullishPoiReclaim,
-        bearishPoiReclaim,
-      });
-      if (reversalCandidate) {
-        candidates.push(reversalCandidate);
-      }
-    }
-  }
+  const trendCandidate = buildPotentialCandidate({
+    symbol, candles, trend, broaderTrend, macroTrend, emaTrend, currentPrice,
+    zones, gaps, currentZone, direction: macroDirection, mode: 'trend',
+    bullishReversal, bearishReversal, bullishPoiReclaim, bearishPoiReclaim,
+  });
+  if (trendCandidate) candidates.push(trendCandidate);
 
   return candidates
-    .filter((candidate, index, array) => array.findIndex((item) => item.direction === candidate.direction && item.strategy === candidate.strategy) === index)
-    .sort((left, right) => {
-      const leftMatchesRegime = candidateMatchesRegime(left, marketRegime);
-      const rightMatchesRegime = candidateMatchesRegime(right, marketRegime);
-      if (leftMatchesRegime !== rightMatchesRegime) {
-        return rightMatchesRegime ? 1 : -1;
-      }
-
-      return right.activationProbability - left.activationProbability;
-    });
+    .filter((c, i, a) => a.findIndex(x => x.direction === c.direction && x.strategy === c.strategy) === i)
+    .sort((a, b) => b.activationProbability - a.activationProbability);
 }
