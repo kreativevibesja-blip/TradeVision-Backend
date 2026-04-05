@@ -65,7 +65,7 @@ export interface PotentialTrade {
   entry: number;
   stopLoss: number;
   takeProfit: number;
-  takeProfit2: number;
+  takeProfit2: number | null;
   activationProbability: number;
   strategy: string;
   narrative: string;
@@ -440,9 +440,6 @@ function refinePotentialTradeWithH1(
   const fallbackTakeProfit = nextPotential.direction === 'buy'
     ? nextPotential.entry + risk * 2
     : nextPotential.entry - risk * 2;
-  const fallbackTakeProfit2 = nextPotential.direction === 'buy'
-    ? nextPotential.entry + risk * 3
-    : nextPotential.entry - risk * 3;
   const higherTimeframeTargets = collectHigherTimeframeTargets(nextPotential.direction, h1Context.h1Candles, nextPotential.entry);
 
   nextPotential.takeProfit = selectDirectionalTarget(
@@ -452,24 +449,10 @@ function refinePotentialTradeWithH1(
     risk * 1.4,
     fallbackTakeProfit,
   );
-  nextPotential.takeProfit2 = selectDirectionalTarget(
-    nextPotential.direction,
-    higherTimeframeTargets,
-    nextPotential.entry,
-    Math.max(risk * 2.8, Math.abs(nextPotential.entry - nextPotential.takeProfit) + risk * 0.8),
-    fallbackTakeProfit2,
-  );
-
-  if (nextPotential.direction === 'buy' && nextPotential.takeProfit2 <= nextPotential.takeProfit) {
-    nextPotential.takeProfit2 = Math.max(fallbackTakeProfit2, nextPotential.takeProfit + risk);
-  }
-
-  if (nextPotential.direction === 'sell' && nextPotential.takeProfit2 >= nextPotential.takeProfit) {
-    nextPotential.takeProfit2 = Math.min(fallbackTakeProfit2, nextPotential.takeProfit - risk);
-  }
+  nextPotential.takeProfit2 = nextPotential.takeProfit;
 
   nextPotential.fulfilledConditions.push('H1 target map applied');
-  nextPotential.contextLabels.push('TP refined with H1 structure');
+  nextPotential.contextLabels.push('Final TP refined with H1 structure');
 
   return nextPotential;
 }
@@ -481,7 +464,7 @@ function promotePotentialToScanCycleResult(potential: PotentialTradeSetup): Scan
     entry: potential.entry,
     stopLoss: potential.stopLoss,
     takeProfit: potential.takeProfit,
-    takeProfit2: potential.takeProfit2,
+    takeProfit2: null,
     confidenceScore: Math.max(HIGH_CONFIDENCE_POTENTIAL_THRESHOLD, Math.round(potential.activationProbability)),
     strategy: potential.strategy.replace(/ Watchlist$/i, ''),
     confirmations: [
@@ -846,10 +829,6 @@ async function insertAlert(alert: { userId: string; scanResultId?: string; messa
 }
 
 function getFinalTakeProfit(result: ScanResult): number {
-  if (result.takeProfit2 != null && Number.isFinite(result.takeProfit2)) {
-    return result.takeProfit2;
-  }
-
   return result.takeProfit;
 }
 
@@ -1032,7 +1011,7 @@ interface ScanCycleResult {
   entry: number;
   stopLoss: number;
   takeProfit: number;
-  takeProfit2: number;
+  takeProfit2: number | null;
   confidenceScore: number;
   strategy: string;
   confirmations: string[];
@@ -1104,7 +1083,7 @@ async function scanSymbol(symbol: string): Promise<ScanCycleResult | null> {
       entry: setup.entry,
       stopLoss: setup.stopLoss,
       takeProfit: setup.takeProfit,
-      takeProfit2: setup.takeProfit2,
+      takeProfit2: null,
       confidenceScore: setup.confidenceScore,
       strategy: setup.strategy,
       confirmations: setup.confirmationLabels,
@@ -1185,7 +1164,7 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
         entry: result.entry,
         stopLoss: result.stopLoss,
         takeProfit: result.takeProfit,
-        takeProfit2: result.takeProfit2,
+        takeProfit2: null,
         confidenceScore: result.confidenceScore,
         strategy: result.strategy,
         confirmations: result.confirmations,
@@ -1215,7 +1194,7 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
       const alert = await insertAlert({
         userId,
         scanResultId: scanResult.id,
-        message: `High-quality ${modeLabel} setup detected on ${result.symbol} (${directionLabel}) — Score ${result.score}/9, ${result.strategy}, TP1 1:2 and TP2 1:3 mapped.`,
+        message: `High-quality ${modeLabel} setup detected on ${result.symbol} (${directionLabel}) — Score ${result.score}/9, ${result.strategy}, final TP 1:2 mapped.`,
         type: 'trade',
       });
 
@@ -1341,6 +1320,7 @@ export async function getPotentialTrades(userId: string, limit = 12): Promise<Po
       .slice(0, limit)
       .map((item) => ({
         ...item,
+        takeProfit2: null,
         sessionType,
       }));
 
