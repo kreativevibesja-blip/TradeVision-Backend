@@ -4,7 +4,7 @@ import { getRuntimeCandles } from '../lib/deriv/activeCandles';
 import { ensureDerivSubscription, getDerivHistoryCandles } from '../lib/deriv/ws';
 import { DERIV_SCANNER_SYMBOL_IDS, SESSION_SCANNER_SYMBOL_IDS, VOLATILITY_SCANNER_SYMBOL_IDS } from '../lib/deriv/symbols';
 import { scheduleScannerPanelRefreshForAllUsers, scheduleScannerPanelRefreshForUser } from '../lib/scanner/panelStream';
-import { analyzeMarket, analyzePotentialTrades, detectTrend, findSwingHighsLows, type Candle, type PotentialTradeSetup, type TrendDirection } from './scannerEngine';
+import { analyzeMarket, analyzePotentialTrades, detectTrend, findSwingHighsLows, type Candle, type PotentialTradeSetup, type TradeConfirmations, type TrendDirection } from './scannerEngine';
 import { sendPushToUser } from './pushService';
 
 // ── Types ──
@@ -36,7 +36,7 @@ export interface ScanResult {
   takeProfit2: number | null;
   confidenceScore: number;
   strategy: string | null;
-  confirmations: string[];
+  confirmations: TradeConfirmations | string[];
   sessionType: SessionType;
   status: ScanResultStatus;
   closeReason: ScanCloseReason;
@@ -476,12 +476,9 @@ function promotePotentialToScanCycleResult(potential: PotentialTradeSetup): Scan
     stopLoss: potential.stopLoss,
     takeProfit: potential.takeProfit,
     takeProfit2: null,
-    confidenceScore: Math.max(HIGH_CONFIDENCE_POTENTIAL_THRESHOLD, Math.round(potential.activationProbability)),
+    confidenceScore: potential.confidenceScore,
     strategy: potential.strategy.replace(/ Watchlist$/i, ''),
-    confirmations: [
-      ...potential.fulfilledConditions.slice(0, 4),
-      'H1 bias confirmation',
-    ].filter((label, index, array) => array.indexOf(label) === index),
+    confirmations: potential.confirmations,
     score: 9,
   };
 }
@@ -1127,7 +1124,7 @@ interface ScanCycleResult {
   takeProfit2: number | null;
   confidenceScore: number;
   strategy: string;
-  confirmations: string[];
+  confirmations: TradeConfirmations;
   score: number;
 }
 
@@ -1199,7 +1196,7 @@ async function scanSymbol(symbol: string): Promise<ScanCycleResult | null> {
       takeProfit2: null,
       confidenceScore: setup.confidenceScore,
       strategy: setup.strategy,
-      confirmations: setup.confirmationLabels,
+      confirmations: setup.confirmations,
       score: setup.score,
     };
   } catch (err) {

@@ -34,6 +34,18 @@ export interface SetupConfirmations {
   structure: StructureBreak | null;
 }
 
+export interface TradeConfirmations {
+  liquiditySweep: boolean;
+  engulfing: boolean;
+  rejection: boolean;
+  bos: boolean;
+  poiReclaim: boolean;
+  emaAligned: boolean;
+  zoneReaction: boolean;
+  displacement: boolean;
+  momentum: boolean;
+}
+
 export interface TradeSetup {
   symbol: string;
   direction: 'buy' | 'sell';
@@ -44,7 +56,7 @@ export interface TradeSetup {
   score: number;
   confidenceScore: number;
   strategy: string;
-  confirmations: SetupConfirmations;
+  confirmations: TradeConfirmations;
   confirmationLabels: string[];
 }
 
@@ -84,6 +96,8 @@ export interface PotentialTradeSetup {
   takeProfit: number;
   takeProfit2: number;
   activationProbability: number;
+  confidenceScore: number;
+  confirmations: TradeConfirmations;
   strategy: string;
   narrative: string;
   fulfilledConditions: string[];
@@ -316,6 +330,34 @@ function buildConfirmationLabels(confirmations: SetupConfirmations): string[] {
   }
 
   return labels;
+}
+
+export function countTradeConfirmations(confirmations: TradeConfirmations): number {
+  return Object.values(confirmations).filter(Boolean).length;
+}
+
+function buildTradeConfirmations(input: {
+  alignedSweep: boolean;
+  alignedEngulfing: boolean;
+  alignedRejection: boolean;
+  alignedStructure: boolean;
+  poiReclaim: boolean;
+  emaAligned: boolean;
+  zoneReaction: boolean;
+  freshDisplacement: boolean;
+  alignedMomentum: boolean;
+}): TradeConfirmations {
+  return {
+    liquiditySweep: input.alignedSweep,
+    engulfing: input.alignedEngulfing,
+    rejection: input.alignedRejection,
+    bos: input.alignedStructure,
+    poiReclaim: input.poiReclaim,
+    emaAligned: input.emaAligned,
+    zoneReaction: input.zoneReaction,
+    displacement: input.freshDisplacement,
+    momentum: input.alignedMomentum,
+  };
 }
 
 // ── SL/TP calculation helpers ──
@@ -1009,6 +1051,18 @@ function buildPotentialCandidate({
   const broaderTrendDirection = toTradeDirection(broaderTrend);
   const trendDirection = toTradeDirection(trend);
   const hasContinuationAreaReaction = nearDirectionalZone || freshReaction || poiReclaim;
+  const tradeConfirmations = buildTradeConfirmations({
+    alignedSweep,
+    alignedEngulfing,
+    alignedRejection,
+    alignedStructure,
+    poiReclaim,
+    emaAligned,
+    zoneReaction: nearDirectionalZone || freshReaction,
+    freshDisplacement,
+    alignedMomentum,
+  });
+  const confirmationScore = countTradeConfirmations(tradeConfirmations);
   const counterPressureCount = [
     nearDirectionalZone,
     freshReaction,
@@ -1232,6 +1286,10 @@ function buildPotentialCandidate({
     contextLabels.push(direction === 'buy' ? 'Demand reversal in play' : 'Supply reversal in play');
   }
 
+  if (alignedMomentum) {
+    fulfilledConditions.push(direction === 'buy' ? 'Bullish momentum is aligned' : 'Bearish momentum is aligned');
+  }
+
   const entry = currentPrice;
   const stopLoss = computeStopLoss(symbol, direction, candles);
   const { takeProfit, takeProfit2, structuralTargets } = resolveTakeProfitTargets(symbol, direction, entry, stopLoss, candles);
@@ -1287,6 +1345,8 @@ function buildPotentialCandidate({
     takeProfit,
     takeProfit2,
     activationProbability: Math.min(95, probability),
+    confidenceScore: confirmationScore,
+    confirmations: tradeConfirmations,
     strategy,
     narrative,
     fulfilledConditions,
@@ -1678,6 +1738,18 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   const trendDirection = toTradeDirection(trend);
   const broaderTrendDirection = toTradeDirection(broaderTrend);
   const hasContinuationAreaReaction = nearDirectionalZone || freshReaction || poiReclaim;
+  const tradeConfirmations = buildTradeConfirmations({
+    alignedSweep,
+    alignedEngulfing,
+    alignedRejection,
+    alignedStructure,
+    poiReclaim,
+    emaAligned,
+    zoneReaction: nearDirectionalZone || freshReaction,
+    freshDisplacement,
+    alignedMomentum,
+  });
+  const confirmationScore = countTradeConfirmations(tradeConfirmations);
 
   if (direction === 'sell' && currentZone?.type === 'demand' && bullishPoiReclaim) return null;
   if (direction === 'buy' && currentZone?.type === 'supply' && bearishPoiReclaim) return null;
@@ -1748,7 +1820,7 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
     takeProfit,
     takeProfit2,
     score,
-    confidenceScore: isReversalSetup ? Math.max(90, scoreToConfidence(Math.min(9, score + 2))) : scoreToConfidence(score),
+    confidenceScore: confirmationScore,
     strategy: isReversalSetup
       ? direction === 'buy'
         ? broaderTrend === 'bearish'
@@ -1766,7 +1838,7 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
             ? 'Bearish POI Reclaim Countertrend'
             : 'Bearish POI Reclaim Continuation'
       : deriveStrategy(direction, sweep),
-    confirmations,
+    confirmations: tradeConfirmations,
     confirmationLabels: [
       ...(emaTrend.trend !== 'ranging' && emaAligned
         ? [direction === 'buy' ? 'EMA 50 above EMA 200 and price holding above EMA 50' : 'EMA 50 below EMA 200 and price holding below EMA 50']
