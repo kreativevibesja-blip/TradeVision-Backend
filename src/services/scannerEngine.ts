@@ -46,6 +46,11 @@ export interface TradeConfirmations {
   momentum: boolean;
   edgeBase: boolean;
   breakerBlock: boolean;
+  fvgReaction: boolean;
+  equalLevelSweep: boolean;
+  premiumDiscount: boolean;
+  ote: boolean;
+  mss: boolean;
 }
 
 export type MarketRegime = 'range' | 'trend' | 'reversal';
@@ -359,6 +364,11 @@ function buildTradeConfirmations(input: {
   alignedMomentum: boolean;
   edgeBase?: boolean;
   breakerBlock?: boolean;
+  fvgReaction?: boolean;
+  equalLevelSweep?: boolean;
+  premiumDiscount?: boolean;
+  ote?: boolean;
+  mss?: boolean;
 }): TradeConfirmations {
   return {
     liquiditySweep: input.alignedSweep,
@@ -372,6 +382,11 @@ function buildTradeConfirmations(input: {
     momentum: input.alignedMomentum,
     edgeBase: input.edgeBase ?? false,
     breakerBlock: input.breakerBlock ?? false,
+    fvgReaction: input.fvgReaction ?? false,
+    equalLevelSweep: input.equalLevelSweep ?? false,
+    premiumDiscount: input.premiumDiscount ?? false,
+    ote: input.ote ?? false,
+    mss: input.mss ?? false,
   };
 }
 
@@ -1417,6 +1432,319 @@ function findActiveBreakerBlock(
   return matching[0] ?? null;
 }
 
+// ── Equal Highs / Equal Lows Liquidity Detection ──
+// Identifies 2+ swing highs or swing lows resting at the same price
+// level. These are engineered liquidity pools (resting stop orders).
+// A sweep through EQH/EQL followed by a reversal is a high-probability
+// signal — distinctly stronger than a generic wick sweep.
+
+interface EqualLevel {
+  type: 'equal_highs' | 'equal_lows';
+  price: number;
+  touches: number;
+  indices: number[];
+}
+
+function detectEqualLevels(candles: Candle[]): EqualLevel[] {
+  if (candles.length < 30) return [];
+
+  const lookback = candles.slice(-Math.min(200, candles.length));
+  const swings = findSwingHighsLows(lookback);
+  const levels: EqualLevel[] = [];
+
+  const highs = swings.filter((s) => s.type === 'high').sort((a, b) => a.index - b.index);
+  const lows = swings.filter((s) => s.type === 'low').sort((a, b) => a.index - b.index);
+
+  // Group swing highs that rest at approximately the same price
+  const tolerance = averageRange(lookback, 14) * 0.35;
+  const usedHighIdx = new Set<number>();
+
+  for (let i = 0; i < highs.length; i++) {
+    if (usedHighIdx.has(i)) continue;
+    const cluster: SwingPoint[] = [highs[i]];
+    usedHighIdx.add(i);
+
+    for (let j = i + 1; j < highs.length; j++) {
+      if (usedHighIdx.has(j)) continue;
+      if (Math.abs(highs[j].price - highs[i].price) <= tolerance) {
+        cluster.push(highs[j]);
+        usedHighIdx.add(j);
+      }
+    }
+
+    if (cluster.length >= 2) {
+      levels.push({
+        type: 'equal_highs',
+        price: average(cluster.map((s) => s.price)),
+        touches: cluster.length,
+        indices: cluster.map((s) => s.index),
+      });
+    }
+  }
+
+  const usedLowIdx = new Set<number>();
+
+  for (let i = 0; i < lows.length; i++) {
+    if (usedLowIdx.has(i)) continue;
+    const cluster: SwingPoint[] = [lows[i]];
+    usedLowIdx.add(i);
+
+    for (let j = i + 1; j < lows.length; j++) {
+      if (usedLowIdx.has(j)) continue;
+      if (Math.abs(lows[j].price - lows[i].price) <= tolerance) {
+        cluster.push(lows[j]);
+        usedLowIdx.add(j);
+      }
+    }
+
+    if (cluster.length >= 2) {
+      levels.push({
+        type: 'equal_lows',
+        price: average(cluster.map((s) => s.price)),
+        touches: cluster.length,
+        indices: cluster.map((s) => s.index),
+      });
+    }
+  }
+
+  return levels;
+}
+
+function detectEqualLevelSweep(
+  direction: 'buy' | 'sell',
+  candles: Candle[],
+): EqualLevel | null {
+  if (candles.length < 30) return null;
+
+  const last = candles[candles.length - 1];
+  const levels = detectEqualLevels(candles);
+
+  for (const level of levels) {
+    if (direction === 'buy' && level.type === 'equal_lows') {
+      // Bullish: price swept below equal lows then closed back above
+      if (last.low < level.price && last.close > level.price) {
+        return level;
+      }
+    }
+
+    if (direction === 'sell' && level.type === 'equal_highs') {
+      // Bearish: price swept above equal highs then closed back below
+      if (last.high > level.price && last.close < level.price) {
+        return level;
+      }
+    }
+  }
+
+  return null;
+}
+
+// ── Premium / Discount Zone Filter ──
+// ICT premium/discount model: the current swing range is divided at 50%.
+// Buys should enter in discount (below 50%), sells in premium (above 50%).
+// Returns a multiplier: >0 means correct zone, <0 means wrong zone.
+
+function getPremiumDiscountBias(
+  direction: 'buy' | 'sell',
+  currentPrice: number,
+  candles: Candle[],
+): number {
+  if (candles.length < 20) return 0;
+
+  const lookback = candles.slice(-Math.min(60, candles.length));
+  const swingHigh = Math.max(...lookback.map((c) => c.high));
+  const swingLow = Math.min(...lookback.map((c) => c.low));
+  const swingRange = swingHigh - swingLow;
+
+  if (swingRange <= 0) return 0;
+
+  const midpoint = swingLow + swingRange * 0.5;
+
+  if (direction === 'buy') {
+    // Buying in discount (below mid) = good (+boost), buying in premium = bad (-penalty)
+    if (currentPrice <= midpoint) return 10;
+    return -8;
+  }
+
+  // Selling in premium (above mid) = good (+boost), selling in discount = bad (-penalty)
+  if (currentPrice >= midpoint) return 10;
+  return -8;
+}
+
+// ── Optimal Trade Entry (OTE) Detection ──
+// The 62%–79% Fibonacci retracement of a recent displacement leg,
+// ideally overlapping with an FVG or demand/supply zone at that level.
+// OTE + FVG overlap is one of the highest-conviction ICT entries.
+
+interface OteResult {
+  inOteZone: boolean;
+  hasFvgOverlap: boolean;
+  hasZoneOverlap: boolean;
+  oteTop: number;
+  oteBottom: number;
+}
+
+function detectOptimalTradeEntry(
+  direction: 'buy' | 'sell',
+  currentPrice: number,
+  candles: Candle[],
+  gaps: FairValueGap[],
+  zones: PriceZone[],
+): OteResult | null {
+  if (candles.length < 20) return null;
+
+  // Find the most recent displacement leg (strong impulsive move)
+  const lookback = candles.slice(-Math.min(40, candles.length));
+  let legHigh = -Infinity;
+  let legLow = Infinity;
+  let legHighIdx = -1;
+  let legLowIdx = -1;
+
+  for (let i = 0; i < lookback.length; i++) {
+    if (lookback[i].high > legHigh) { legHigh = lookback[i].high; legHighIdx = i; }
+    if (lookback[i].low < legLow) { legLow = lookback[i].low; legLowIdx = i; }
+  }
+
+  const legRange = legHigh - legLow;
+  if (legRange <= 0) return null;
+
+  let oteTop: number;
+  let oteBottom: number;
+
+  if (direction === 'buy') {
+    // Bullish OTE: recent impulse should be up (low before high), retracement is the pullback
+    if (legLowIdx >= legHighIdx) return null; // leg must go low→high
+    // 62%-79% retracement from the high (measured from top down)
+    oteTop = legHigh - legRange * 0.62;
+    oteBottom = legHigh - legRange * 0.79;
+  } else {
+    // Bearish OTE: recent impulse should be down (high before low), retracement is the rally
+    if (legHighIdx >= legLowIdx) return null; // leg must go high→low
+    // 62%-79% retracement from the low (measured from bottom up)
+    oteBottom = legLow + legRange * 0.62;
+    oteTop = legLow + legRange * 0.79;
+  }
+
+  const inOteZone = currentPrice >= oteBottom && currentPrice <= oteTop;
+  if (!inOteZone) return null;
+
+  // Check if any FVG overlaps the OTE zone
+  const hasFvgOverlap = gaps.some((gap) => {
+    if (direction === 'buy' && gap.type !== 'bullish') return false;
+    if (direction === 'sell' && gap.type !== 'bearish') return false;
+    return gap.bottom <= oteTop && gap.top >= oteBottom;
+  });
+
+  // Check if any zone overlaps the OTE zone
+  const hasZoneOverlap = zones.some((zone) => {
+    if (direction === 'buy' && zone.type !== 'demand') return false;
+    if (direction === 'sell' && zone.type !== 'supply') return false;
+    return zone.bottom <= oteTop && zone.top >= oteBottom;
+  });
+
+  return { inOteZone, hasFvgOverlap, hasZoneOverlap, oteTop, oteBottom };
+}
+
+// ── Market Structure Shift (MSS) Detection ──
+// A true MSS is when a significant swing high or swing low
+// (identified by findSwingHighsLows) gets broken by a candle close.
+// This is structurally more significant than a micro BOS which only
+// checks if the latest candle closed beyond the previous candle's range.
+
+function detectMarketStructureShift(
+  candles: Candle[],
+): { direction: 'bullish' | 'bearish'; brokenSwing: SwingPoint } | null {
+  if (candles.length < 20) return null;
+
+  const lookback = candles.slice(-Math.min(60, candles.length));
+  const swings = findSwingHighsLows(lookback);
+  const last = lookback[lookback.length - 1];
+
+  // Check most recent swing highs/lows (from newest to oldest) for a break
+  const recentSwingHighs = swings
+    .filter((s) => s.type === 'high' && s.index < lookback.length - 2)
+    .sort((a, b) => b.index - a.index);
+
+  const recentSwingLows = swings
+    .filter((s) => s.type === 'low' && s.index < lookback.length - 2)
+    .sort((a, b) => b.index - a.index);
+
+  // Bullish MSS: price closes above a recent swing high
+  for (const swingHigh of recentSwingHighs.slice(0, 3)) {
+    if (last.close > swingHigh.price && last.open <= swingHigh.price) {
+      return { direction: 'bullish', brokenSwing: swingHigh };
+    }
+  }
+
+  // Bearish MSS: price closes below a recent swing low
+  for (const swingLow of recentSwingLows.slice(0, 3)) {
+    if (last.close < swingLow.price && last.open >= swingLow.price) {
+      return { direction: 'bearish', brokenSwing: swingLow };
+    }
+  }
+
+  return null;
+}
+
+function isMssAligned(direction: 'buy' | 'sell', mss: ReturnType<typeof detectMarketStructureShift>): boolean {
+  if (!mss) return false;
+  return (direction === 'buy' && mss.direction === 'bullish') || (direction === 'sell' && mss.direction === 'bearish');
+}
+
+// ── FVG Reaction Trade Detection ──
+// Detects when price fills (retraces into) an unfilled FVG,
+// shows a reaction candle inside the gap, and has displacement out.
+// This is a standalone strategy family, not just a supporting area.
+
+interface FvgReaction {
+  gap: FairValueGap;
+  hasReactionCandle: boolean;
+  hasDisplacementOut: boolean;
+}
+
+function detectFvgReaction(
+  direction: 'buy' | 'sell',
+  candles: Candle[],
+  gaps: FairValueGap[],
+): FvgReaction | null {
+  if (candles.length < 10 || gaps.length === 0) return null;
+
+  const last = candles[candles.length - 1];
+  const prev = candles[candles.length - 2];
+  const avgBody = average(candles.slice(-14).map((c) => Math.abs(c.close - c.open)));
+
+  // Find an FVG that price retested (previous candle entered the gap)
+  for (const gap of gaps) {
+    if (direction === 'buy' && gap.type !== 'bullish') continue;
+    if (direction === 'sell' && gap.type !== 'bearish') continue;
+
+    // Previous candle must have entered the gap (retracement into FVG)
+    const prevEnteredGap = direction === 'buy'
+      ? prev.low <= gap.top && prev.low >= gap.bottom
+      : prev.high >= gap.bottom && prev.high <= gap.top;
+
+    if (!prevEnteredGap) continue;
+
+    // Reaction candle: current candle shows rejection/engulfing from the gap
+    const body = Math.abs(last.close - last.open);
+    const range = Math.max(last.high - last.low, 0.0001);
+
+    const hasReactionCandle = direction === 'buy'
+      ? last.close > last.open && body > avgBody * 0.8 && (last.close - last.low) > range * 0.6
+      : last.close < last.open && body > avgBody * 0.8 && (last.high - last.close) > range * 0.6;
+
+    // Displacement out: current candle body extends beyond the FVG
+    const hasDisplacementOut = direction === 'buy'
+      ? last.close > gap.top
+      : last.close < gap.bottom;
+
+    if (hasReactionCandle) {
+      return { gap, hasReactionCandle, hasDisplacementOut };
+    }
+  }
+
+  return null;
+}
+
 // ── 8. Look-left supply/demand detection ──
 
 export function findSwingHighsLows(candles: Candle[]): SwingPoint[] {
@@ -1691,9 +2019,18 @@ function buildPotentialCandidate({
   const trendDirection = toTradeDirection(trend);
   const activeBreaker = findActiveBreakerBlock(direction, currentPrice, candles);
   const hasBreaker = activeBreaker !== null;
-  const hasContinuationAreaReaction = nearDirectionalZone || freshReaction || poiReclaim || hasBreaker;
+  const fvgReaction = detectFvgReaction(direction, candles, gaps);
+  const hasFvgReaction = fvgReaction !== null && fvgReaction.hasReactionCandle;
+  const eqlSweep = detectEqualLevelSweep(direction, candles);
+  const hasEqlSweep = eqlSweep !== null;
+  const premiumDiscountBias = getPremiumDiscountBias(direction, currentPrice, candles);
+  const ote = detectOptimalTradeEntry(direction, currentPrice, candles, gaps, zones);
+  const hasOte = ote !== null && ote.inOteZone;
+  const mss = detectMarketStructureShift(candles);
+  const hasMss = isMssAligned(direction, mss);
+  const hasContinuationAreaReaction = nearDirectionalZone || freshReaction || poiReclaim || hasBreaker || hasFvgReaction;
   const tradeConfirmations = buildTradeConfirmations({
-    alignedSweep,
+    alignedSweep: alignedSweep || hasEqlSweep,
     alignedEngulfing,
     alignedRejection,
     alignedStructure,
@@ -1703,6 +2040,11 @@ function buildPotentialCandidate({
     freshDisplacement,
     alignedMomentum,
     breakerBlock: hasBreaker,
+    fvgReaction: hasFvgReaction,
+    equalLevelSweep: hasEqlSweep,
+    premiumDiscount: premiumDiscountBias > 0,
+    ote: hasOte,
+    mss: hasMss,
   });
   const confirmationScore = countTradeConfirmations(tradeConfirmations);
   const counterPressureCount = [
@@ -1787,6 +2129,11 @@ function buildPotentialCandidate({
   if (alignedMomentum) probability += 5;
   if (emaAligned) probability += 10;
   if (hasBreaker) probability += 14;
+  if (hasFvgReaction) probability += 14;
+  if (hasEqlSweep) probability += 12;
+  if (hasOte) probability += ote!.hasFvgOverlap || ote!.hasZoneOverlap ? 16 : 10;
+  if (hasMss) probability += 10;
+  probability += premiumDiscountBias;
   if (stretchedFromArea) probability -= 15;
   if (emaTrend.trend !== 'ranging' && !emaAligned) probability -= mode === 'counter' ? 16 : 28;
 
@@ -1934,6 +2281,31 @@ function buildPotentialCandidate({
     contextLabels.push(direction === 'buy' ? 'Bullish breaker block' : 'Bearish breaker block');
   }
 
+  if (hasFvgReaction) {
+    fulfilledConditions.push(direction === 'buy' ? 'Bullish FVG fill reaction — price entered imbalance and reversed' : 'Bearish FVG fill reaction — price entered imbalance and reversed');
+    contextLabels.push(direction === 'buy' ? 'FVG fill reaction up' : 'FVG fill reaction down');
+  }
+
+  if (hasEqlSweep) {
+    fulfilledConditions.push(direction === 'buy' ? `Equal lows swept (${eqlSweep!.touches} touches) — engineered liquidity taken` : `Equal highs swept (${eqlSweep!.touches} touches) — engineered liquidity taken`);
+    contextLabels.push(direction === 'buy' ? 'EQL sweep' : 'EQH sweep');
+  }
+
+  if (hasOte) {
+    fulfilledConditions.push(`Price in optimal trade entry zone (62–79% Fib retracement)${ote!.hasFvgOverlap ? ' with FVG overlap' : ote!.hasZoneOverlap ? ' with zone overlap' : ''}`);
+    contextLabels.push(ote!.hasFvgOverlap ? 'OTE + FVG' : ote!.hasZoneOverlap ? 'OTE + zone' : 'OTE zone');
+  }
+
+  if (hasMss) {
+    fulfilledConditions.push(direction === 'buy' ? 'Bullish market structure shift (swing high broken)' : 'Bearish market structure shift (swing low broken)');
+    contextLabels.push(direction === 'buy' ? 'Bullish MSS' : 'Bearish MSS');
+  }
+
+  if (premiumDiscountBias > 0) {
+    fulfilledConditions.push(direction === 'buy' ? 'Entry in discount zone (below 50% of swing)' : 'Entry in premium zone (above 50% of swing)');
+    contextLabels.push(direction === 'buy' ? 'Discount entry' : 'Premium entry');
+  }
+
   if (alignedMomentum) {
     fulfilledConditions.push(direction === 'buy' ? 'Bullish momentum is aligned' : 'Bearish momentum is aligned');
   }
@@ -1955,6 +2327,10 @@ function buildPotentialCandidate({
         : broaderTrend === 'bullish'
           ? 'Bearish POI Reclaim Countertrend'
           : 'Bearish Higher-Timeframe Reversal'
+      : hasEqlSweep
+        ? direction === 'buy'
+          ? 'Bullish EQL Sweep Reversal'
+          : 'Bearish EQH Sweep Reversal'
       : nearDirectionalZone || isReversalSetup
         ? 'Counter-Trend Zone Reversal'
         : 'Counter-Trend Zone Tap'} Watchlist`
@@ -1966,6 +2342,14 @@ function buildPotentialCandidate({
         : broaderTrend === 'bullish'
           ? 'Bearish Countertrend Reversal from Supply'
           : 'Bearish Higher-Timeframe Reversal'
+      : hasFvgReaction
+        ? direction === 'buy'
+          ? 'Bullish FVG Fill Continuation'
+          : 'Bearish FVG Fill Continuation'
+      : hasEqlSweep
+        ? direction === 'buy'
+          ? 'Bullish EQL Sweep Reversal'
+          : 'Bearish EQH Sweep Reversal'
       : poiReclaim
         ? direction === 'buy'
           ? broaderTrend === 'bearish'
@@ -2559,12 +2943,21 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   const nearDirectionalZone = directionalZone ? isNearZone(currentPrice, [directionalZone], 0.0025) !== null : false;
   const activeBreaker = findActiveBreakerBlock(direction, currentPrice, candles);
   const hasBreaker = activeBreaker !== null;
+  const fvgReaction = detectFvgReaction(direction, candles, gaps);
+  const hasFvgReaction = fvgReaction !== null && fvgReaction.hasReactionCandle;
+  const eqlSweep = detectEqualLevelSweep(direction, candles);
+  const hasEqlSweep = eqlSweep !== null;
+  const premiumDiscountBias = getPremiumDiscountBias(direction, currentPrice, candles);
+  const ote = detectOptimalTradeEntry(direction, currentPrice, candles, gaps, zones);
+  const hasOte = ote !== null && ote.inOteZone;
+  const mss = detectMarketStructureShift(candles);
+  const hasMss = isMssAligned(direction, mss);
   const volatilitySymbol = isVolatilitySymbol(symbol);
   const trendDirection = toTradeDirection(trend);
   const broaderTrendDirection = toTradeDirection(broaderTrend);
-  const hasContinuationAreaReaction = nearDirectionalZone || freshReaction || poiReclaim || hasBreaker;
+  const hasContinuationAreaReaction = nearDirectionalZone || freshReaction || poiReclaim || hasBreaker || hasFvgReaction;
   const tradeConfirmations = buildTradeConfirmations({
-    alignedSweep,
+    alignedSweep: alignedSweep || hasEqlSweep,
     alignedEngulfing,
     alignedRejection,
     alignedStructure,
@@ -2574,6 +2967,11 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
     freshDisplacement,
     alignedMomentum,
     breakerBlock: hasBreaker,
+    fvgReaction: hasFvgReaction,
+    equalLevelSweep: hasEqlSweep,
+    premiumDiscount: premiumDiscountBias > 0,
+    ote: hasOte,
+    mss: hasMss,
   });
   const confirmationScore = countTradeConfirmations(tradeConfirmations);
 
@@ -2584,41 +2982,41 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   if (engulfing && !alignedEngulfing) return null;
   if (rejection && !alignedRejection) return null;
   if (structure && !alignedStructure) return null;
-  if (!directionalZone && !directionalFvg && !hasBreaker) return null;
-  if (isVolatilitySymbol(symbol) && !directionalZone && !hasBreaker) return null;
+  if (!directionalZone && !directionalFvg && !hasBreaker && !hasFvgReaction) return null;
+  if (isVolatilitySymbol(symbol) && !directionalZone && !hasBreaker && !hasFvgReaction) return null;
   if (stretchedFromArea && !freshDisplacement) return null;
 
   if (volatilitySymbol && trendDirection === direction && !isReversalSetup && !hasContinuationAreaReaction) return null;
 
   if (volatilitySymbol && trendDirection && direction !== trendDirection) {
     if (!isReversalSetup) return null;
-    if (!nearDirectionalZone || !freshReaction || !alignedSweep || !alignedStructure) return null;
+    if (!nearDirectionalZone || !freshReaction || !(alignedSweep || hasEqlSweep) || !(alignedStructure || hasMss)) return null;
   }
 
   if (volatilitySymbol && broaderTrendDirection && direction !== broaderTrendDirection && !isReversalSetup) return null;
 
-  const directionalConfirmationCount = [alignedSweep, alignedEngulfing, alignedRejection, alignedStructure, alignedMomentum, poiReclaim]
+  const directionalConfirmationCount = [alignedSweep || hasEqlSweep, alignedEngulfing, alignedRejection, alignedStructure || hasMss, alignedMomentum, poiReclaim]
     .filter(Boolean)
     .length;
 
   if (emaTrend.trend !== 'ranging' && !emaAligned) {
-    if (!isReversalSetup || !poiReclaim || !alignedStructure || directionalConfirmationCount < 3) {
+    if (!isReversalSetup || !poiReclaim || !(alignedStructure || hasMss) || directionalConfirmationCount < 3) {
       return null;
     }
   }
 
-  if (directionalConfirmationCount < 2 && !isReversalSetup && !hasBreaker) return null;
-  if (!alignedEngulfing && !alignedRejection && !alignedStructure && !poiReclaim && !isReversalSetup && !hasBreaker) return null;
+  if (directionalConfirmationCount < 2 && !isReversalSetup && !hasBreaker && !hasFvgReaction) return null;
+  if (!alignedEngulfing && !alignedRejection && !(alignedStructure || hasMss) && !poiReclaim && !isReversalSetup && !hasBreaker && !hasFvgReaction) return null;
 
   // Liquidity sweeps need actual reversal confirmation before the scanner fires.
-  if (alignedSweep && !alignedEngulfing && !alignedStructure && !isReversalSetup && !hasBreaker) return null;
+  if ((alignedSweep || hasEqlSweep) && !alignedEngulfing && !(alignedStructure || hasMss) && !isReversalSetup && !hasBreaker) return null;
 
   // If the local tape is still moving against the setup, do not force an entry from the higher-level trend.
-  if (!alignedMomentum && !alignedStructure && !alignedEngulfing && !poiReclaim && !isReversalSetup && !hasBreaker) return null;
+  if (!alignedMomentum && !(alignedStructure || hasMss) && !alignedEngulfing && !poiReclaim && !isReversalSetup && !hasBreaker && !hasFvgReaction) return null;
 
   // Favor the same setup family shown in the winning examples: reaction from a clean area, then displacement.
-  if (!freshReaction && !poiReclaim && !alignedSweep && !alignedRejection && !alignedEngulfing && !isReversalSetup && !hasBreaker) return null;
-  if (!freshDisplacement && !alignedStructure && !alignedEngulfing && !poiReclaim && !isReversalSetup && !hasBreaker) return null;
+  if (!freshReaction && !poiReclaim && !alignedSweep && !hasEqlSweep && !alignedRejection && !alignedEngulfing && !isReversalSetup && !hasBreaker && !hasFvgReaction) return null;
+  if (!freshDisplacement && !(alignedStructure || hasMss) && !alignedEngulfing && !poiReclaim && !isReversalSetup && !hasBreaker && !hasFvgReaction) return null;
 
   const entry = last.close;
   const stopLoss = computeStopLoss(symbol, direction, candles);
@@ -2660,6 +3058,14 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
         ? direction === 'buy'
           ? 'Bullish Breaker Block Retest'
           : 'Bearish Breaker Block Retest'
+      : hasFvgReaction
+        ? direction === 'buy'
+          ? 'Bullish FVG Fill Continuation'
+          : 'Bearish FVG Fill Continuation'
+      : hasEqlSweep
+        ? direction === 'buy'
+          ? 'Bullish EQL Sweep Reversal'
+          : 'Bearish EQH Sweep Reversal'
       : poiReclaim
         ? direction === 'buy'
           ? broaderTrend === 'bearish'
@@ -2677,6 +3083,11 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
       ...(isReversalSetup ? [direction === 'buy' ? 'Demand reversal pattern confirmed' : 'Supply reversal pattern confirmed', direction === 'buy' ? 'Bullish closure confirmation' : 'Bearish closure confirmation'] : []),
       ...(poiReclaim && !isReversalSetup ? [direction === 'buy' ? 'POI reclaim from demand/support' : 'POI reclaim from supply/resistance'] : []),
       ...(hasBreaker ? [direction === 'buy' ? 'Bullish breaker block retest (flipped supply → demand)' : 'Bearish breaker block retest (flipped demand → supply)'] : []),
+      ...(hasFvgReaction ? [direction === 'buy' ? 'Bullish FVG fill reaction — price entered imbalance and reversed' : 'Bearish FVG fill reaction — price entered imbalance and reversed'] : []),
+      ...(hasEqlSweep ? [direction === 'buy' ? `Equal lows swept at ${eqlSweep!.price.toFixed(5)} (${eqlSweep!.touches} touches)` : `Equal highs swept at ${eqlSweep!.price.toFixed(5)} (${eqlSweep!.touches} touches)`] : []),
+      ...(hasOte ? [`Price in OTE zone (62–79% retracement)${ote!.hasFvgOverlap ? ' with FVG overlap' : ote!.hasZoneOverlap ? ' with zone overlap' : ''}`] : []),
+      ...(hasMss ? [direction === 'buy' ? 'Bullish market structure shift (swing high broken)' : 'Bearish market structure shift (swing low broken)'] : []),
+      ...(premiumDiscountBias > 0 ? [direction === 'buy' ? 'Entry in discount zone (below 50% of swing)' : 'Entry in premium zone (above 50% of swing)'] : []),
       ...buildConfirmationLabels(confirmations),
     ],
   };
