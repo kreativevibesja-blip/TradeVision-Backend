@@ -1282,7 +1282,7 @@ function buildPotentialCandidate({
   }
 
   if (isReversalSetup) {
-    fulfilledConditions.push(direction === 'buy' ? 'Demand double bottom reversal is visible' : 'Supply double top reversal is visible');
+    fulfilledConditions.push(direction === 'buy' ? 'Demand reversal pattern is visible' : 'Supply reversal pattern is visible');
     contextLabels.push(direction === 'buy' ? 'Demand reversal in play' : 'Supply reversal in play');
   }
 
@@ -1409,6 +1409,11 @@ interface PatternPoint {
   index: number;
 }
 
+interface ReversalPatternMatch {
+  matched: boolean;
+  label: string | null;
+}
+
 function isInDemandReversalBand(point: PatternPoint, zone: PriceZone): boolean {
   const zoneHeight = Math.max(zone.top - zone.bottom, 0.0001);
   const lowerBandCeiling = zone.bottom + zoneHeight * 0.55;
@@ -1528,6 +1533,158 @@ function detectDoubleTop(candles: Candle[], zone: PriceZone | null): boolean {
   const last = recent[recent.length - 1];
 
   return last.close <= neckline + baselineRange * 0.15;
+}
+
+function detectInverseHeadAndShoulders(candles: Candle[], zone: PriceZone | null): boolean {
+  if (!zone || zone.type !== 'demand' || candles.length < 12) {
+    return false;
+  }
+
+  const recent = candles.slice(-18);
+  const baselineRange = Math.max(averageRange(candles, 12), 0.0001);
+  const zoneHeight = Math.max(Math.abs(zone.top - zone.bottom), 0.0001);
+  const lows = recent
+    .map((candle, index) => ({ candle, index }))
+    .filter((point) => isInDemandReversalBand(point, zone))
+    .sort((left, right) => left.index - right.index);
+
+  if (lows.length < 3) {
+    return false;
+  }
+
+  const shoulderTolerance = Math.max(zoneHeight * 0.28, baselineRange * 0.4, recent[0]?.low ? recent[0].low * 0.0012 : 0.0001);
+  const headClearance = Math.max(zoneHeight * 0.22, baselineRange * 0.45, recent[0]?.low ? recent[0].low * 0.0008 : 0.0001);
+
+  for (let leftIndex = 0; leftIndex < lows.length - 2; leftIndex++) {
+    for (let headIndex = leftIndex + 1; headIndex < lows.length - 1; headIndex++) {
+      for (let rightIndex = headIndex + 1; rightIndex < lows.length; rightIndex++) {
+        const left = lows[leftIndex];
+        const head = lows[headIndex];
+        const right = lows[rightIndex];
+
+        if (head.index - left.index < 2 || right.index - head.index < 2) {
+          continue;
+        }
+
+        const shouldersAligned = Math.abs(left.candle.low - right.candle.low) <= shoulderTolerance;
+        const headIsLower = head.candle.low < Math.min(left.candle.low, right.candle.low) - headClearance;
+
+        if (!shouldersAligned || !headIsLower) {
+          continue;
+        }
+
+        const firstNecklineSlice = recent.slice(left.index + 1, head.index);
+        const secondNecklineSlice = recent.slice(head.index + 1, right.index);
+        if (firstNecklineSlice.length === 0 || secondNecklineSlice.length === 0) {
+          continue;
+        }
+
+        const neckline = Math.min(
+          Math.max(...firstNecklineSlice.map((candle) => candle.high)),
+          Math.max(...secondNecklineSlice.map((candle) => candle.high)),
+        );
+        const last = recent[recent.length - 1];
+
+        if (last.close >= neckline - baselineRange * 0.15) {
+          return true;
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
+function detectHeadAndShoulders(candles: Candle[], zone: PriceZone | null): boolean {
+  if (!zone || zone.type !== 'supply' || candles.length < 12) {
+    return false;
+  }
+
+  const recent = candles.slice(-18);
+  const baselineRange = Math.max(averageRange(candles, 12), 0.0001);
+  const zoneHeight = Math.max(Math.abs(zone.top - zone.bottom), 0.0001);
+  const highs = recent
+    .map((candle, index) => ({ candle, index }))
+    .filter((point) => isInSupplyReversalBand(point, zone))
+    .sort((left, right) => left.index - right.index);
+
+  if (highs.length < 3) {
+    return false;
+  }
+
+  const shoulderTolerance = Math.max(zoneHeight * 0.28, baselineRange * 0.4, recent[0]?.high ? recent[0].high * 0.0012 : 0.0001);
+  const headClearance = Math.max(zoneHeight * 0.22, baselineRange * 0.45, recent[0]?.high ? recent[0].high * 0.0008 : 0.0001);
+
+  for (let leftIndex = 0; leftIndex < highs.length - 2; leftIndex++) {
+    for (let headIndex = leftIndex + 1; headIndex < highs.length - 1; headIndex++) {
+      for (let rightIndex = headIndex + 1; rightIndex < highs.length; rightIndex++) {
+        const left = highs[leftIndex];
+        const head = highs[headIndex];
+        const right = highs[rightIndex];
+
+        if (head.index - left.index < 2 || right.index - head.index < 2) {
+          continue;
+        }
+
+        const shouldersAligned = Math.abs(left.candle.high - right.candle.high) <= shoulderTolerance;
+        const headIsHigher = head.candle.high > Math.max(left.candle.high, right.candle.high) + headClearance;
+
+        if (!shouldersAligned || !headIsHigher) {
+          continue;
+        }
+
+        const firstNecklineSlice = recent.slice(left.index + 1, head.index);
+        const secondNecklineSlice = recent.slice(head.index + 1, right.index);
+        if (firstNecklineSlice.length === 0 || secondNecklineSlice.length === 0) {
+          continue;
+        }
+
+        const neckline = Math.max(
+          Math.min(...firstNecklineSlice.map((candle) => candle.low)),
+          Math.min(...secondNecklineSlice.map((candle) => candle.low)),
+        );
+        const last = recent[recent.length - 1];
+
+        if (last.close <= neckline + baselineRange * 0.15) {
+          return true;
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
+function resolveBullishReversalPattern(currentPrice: number, zone: PriceZone | null, candles: Candle[]): ReversalPatternMatch {
+  if (!zone || !isZoneRetestStillTradable(currentPrice, zone, candles) || !hasStrongClosure('buy', candles)) {
+    return { matched: false, label: null };
+  }
+
+  if (detectInverseHeadAndShoulders(candles, zone)) {
+    return { matched: true, label: 'Inverse head and shoulders at demand' };
+  }
+
+  if (detectDoubleBottom(candles, zone)) {
+    return { matched: true, label: 'Double bottom at demand' };
+  }
+
+  return { matched: false, label: null };
+}
+
+function resolveBearishReversalPattern(currentPrice: number, zone: PriceZone | null, candles: Candle[]): ReversalPatternMatch {
+  if (!zone || !isZoneRetestStillTradable(currentPrice, zone, candles) || !hasStrongClosure('sell', candles)) {
+    return { matched: false, label: null };
+  }
+
+  if (detectHeadAndShoulders(candles, zone)) {
+    return { matched: true, label: 'Head and shoulders at supply' };
+  }
+
+  if (detectDoubleTop(candles, zone)) {
+    return { matched: true, label: 'Double top at supply' };
+  }
+
+  return { matched: false, label: null };
 }
 
 function findRecentDirectionalTargets(
@@ -1682,8 +1839,10 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   const zones = buildZones(lookLeftCandles, currentPrice);
   const gaps = buildFairValueGaps(lookLeftCandles, currentPrice);
   const currentZone = findActiveReversalZone(currentPrice, zones, candles);
-  const bullishReversal = Boolean(currentZone && isZoneRetestStillTradable(currentPrice, currentZone, candles) && detectDoubleBottom(candles, currentZone) && hasStrongClosure('buy', candles));
-  const bearishReversal = Boolean(currentZone && isZoneRetestStillTradable(currentPrice, currentZone, candles) && detectDoubleTop(candles, currentZone) && hasStrongClosure('sell', candles));
+  const bullishReversalPattern = resolveBullishReversalPattern(currentPrice, currentZone, candles);
+  const bearishReversalPattern = resolveBearishReversalPattern(currentPrice, currentZone, candles);
+  const bullishReversal = bullishReversalPattern.matched;
+  const bearishReversal = bearishReversalPattern.matched;
   const bullishArea = toPriceArea(findDirectionalZone('buy', zones, currentPrice, candles, symbol) ?? findDirectionalFvg('buy', gaps, candles, symbol));
   const bearishArea = toPriceArea(findDirectionalZone('sell', zones, currentPrice, candles, symbol) ?? findDirectionalFvg('sell', gaps, candles, symbol));
   const bullishPoiReclaim = hasPoiReclaim('buy', bullishArea, candles);
@@ -1843,7 +2002,7 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
       ...(emaTrend.trend !== 'ranging' && emaAligned
         ? [direction === 'buy' ? 'EMA 50 above EMA 200 and price holding above EMA 50' : 'EMA 50 below EMA 200 and price holding below EMA 50']
         : []),
-      ...(isReversalSetup ? [direction === 'buy' ? 'Double bottom at demand' : 'Double top at supply', direction === 'buy' ? 'Bullish closure confirmation' : 'Bearish closure confirmation'] : []),
+      ...(isReversalSetup ? [direction === 'buy' ? 'Demand reversal pattern confirmed' : 'Supply reversal pattern confirmed', direction === 'buy' ? 'Bullish closure confirmation' : 'Bearish closure confirmation'] : []),
       ...(poiReclaim && !isReversalSetup ? [direction === 'buy' ? 'POI reclaim from demand/support' : 'POI reclaim from supply/resistance'] : []),
       ...buildConfirmationLabels(confirmations),
     ],
@@ -1867,8 +2026,10 @@ export function analyzePotentialTrade(symbol: string, candles: Candle[]): Potent
   const zones = buildZones(lookLeftCandles, currentPrice);
   const gaps = buildFairValueGaps(lookLeftCandles, currentPrice);
   const currentZone = findActiveReversalZone(currentPrice, zones, candles);
-  const bullishReversal = Boolean(currentZone && isZoneRetestStillTradable(currentPrice, currentZone, candles) && detectDoubleBottom(candles, currentZone) && hasStrongClosure('buy', candles));
-  const bearishReversal = Boolean(currentZone && isZoneRetestStillTradable(currentPrice, currentZone, candles) && detectDoubleTop(candles, currentZone) && hasStrongClosure('sell', candles));
+  const bullishReversalPattern = resolveBullishReversalPattern(currentPrice, currentZone, candles);
+  const bearishReversalPattern = resolveBearishReversalPattern(currentPrice, currentZone, candles);
+  const bullishReversal = bullishReversalPattern.matched;
+  const bearishReversal = bearishReversalPattern.matched;
 
   const candidates = analyzePotentialTrades(symbol, candles, {
     trend,
@@ -1912,8 +2073,8 @@ export function analyzePotentialTrades(
   const zones = context?.zones ?? buildZones(lookLeftCandles, currentPrice);
   const gaps = context?.gaps ?? buildFairValueGaps(lookLeftCandles, currentPrice);
   const currentZone = context?.currentZone ?? findActiveReversalZone(currentPrice, zones, candles);
-  const bullishReversal = context?.bullishReversal ?? Boolean(currentZone && isZoneRetestStillTradable(currentPrice, currentZone, candles) && detectDoubleBottom(candles, currentZone) && hasStrongClosure('buy', candles));
-  const bearishReversal = context?.bearishReversal ?? Boolean(currentZone && isZoneRetestStillTradable(currentPrice, currentZone, candles) && detectDoubleTop(candles, currentZone) && hasStrongClosure('sell', candles));
+  const bullishReversal = context?.bullishReversal ?? resolveBullishReversalPattern(currentPrice, currentZone, candles).matched;
+  const bearishReversal = context?.bearishReversal ?? resolveBearishReversalPattern(currentPrice, currentZone, candles).matched;
   const bullishArea = toPriceArea(findDirectionalZone('buy', zones, currentPrice, candles, symbol) ?? findDirectionalFvg('buy', gaps, candles, symbol));
   const bearishArea = toPriceArea(findDirectionalZone('sell', zones, currentPrice, candles, symbol) ?? findDirectionalFvg('sell', gaps, candles, symbol));
   const bullishPoiReclaim = context?.bullishPoiReclaim ?? hasPoiReclaim('buy', bullishArea, candles);
