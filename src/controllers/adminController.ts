@@ -25,6 +25,7 @@ import {
   createAnnouncementRecord,
   type AnnouncementContentPayload,
   type AnnouncementRecord,
+  type AnnouncementType,
   type PaymentMethod,
   updatePaymentById,
 } from '../lib/supabase';
@@ -35,14 +36,19 @@ import { processReferralPayment } from '../services/referralService';
 
 const ANNOUNCEMENT_CONTENT_VERSION = 1;
 
+const VALID_ANNOUNCEMENT_TYPES: AnnouncementType[] = ['update', 'maintenance', 'discount', 'new_feature', 'security', 'event'];
+
 const parseAnnouncementContent = (content: string): AnnouncementContentPayload => {
   try {
-    const parsed = JSON.parse(content) as { version?: number; body?: unknown; expiresAt?: unknown };
+    const parsed = JSON.parse(content) as Record<string, unknown>;
 
     if (parsed.version === ANNOUNCEMENT_CONTENT_VERSION && typeof parsed.body === 'string') {
       return {
         body: parsed.body,
         expiresAt: typeof parsed.expiresAt === 'string' && parsed.expiresAt.trim().length > 0 ? parsed.expiresAt : null,
+        type: VALID_ANNOUNCEMENT_TYPES.includes(parsed.type as AnnouncementType) ? (parsed.type as AnnouncementType) : undefined,
+        couponCode: typeof parsed.couponCode === 'string' && parsed.couponCode.trim().length > 0 ? parsed.couponCode : null,
+        targetPlan: parsed.targetPlan === 'PRO' || parsed.targetPlan === 'TOP_TIER' ? parsed.targetPlan : null,
       };
     }
   } catch {
@@ -59,6 +65,9 @@ const serializeAnnouncementContent = (payload: AnnouncementContentPayload) =>
     version: ANNOUNCEMENT_CONTENT_VERSION,
     body: payload.body,
     expiresAt: payload.expiresAt,
+    type: payload.type || null,
+    couponCode: payload.couponCode || null,
+    targetPlan: payload.targetPlan || null,
   });
 
 const JAMAICA_UTC_OFFSET_HOURS = 5;
@@ -85,6 +94,9 @@ const mapAnnouncementRecord = (announcement: AnnouncementRecord) => {
     content: parsedContent.body,
     expiresAt,
     isExpired,
+    type: parsedContent.type || 'update',
+    couponCode: parsedContent.couponCode || null,
+    targetPlan: parsedContent.targetPlan || null,
   };
 };
 
@@ -476,12 +488,16 @@ export const getActiveAnnouncements = async (_req: Request, res: Response) => {
 
 export const createAnnouncement = async (req: Request, res: Response) => {
   try {
-    const { title, content, durationValue, durationUnit } = req.body;
+    const { title, content, durationValue, durationUnit, type, couponCode, targetPlan } = req.body;
+    const announcementType = VALID_ANNOUNCEMENT_TYPES.includes(type) ? type : 'update';
     const announcement = await createAnnouncementRecord({
       title,
       content: serializeAnnouncementContent({
         body: content,
         expiresAt: getExpiryFromRequest(durationValue, durationUnit),
+        type: announcementType,
+        couponCode: announcementType === 'discount' && typeof couponCode === 'string' ? couponCode.trim().toUpperCase() : null,
+        targetPlan: announcementType === 'discount' && (targetPlan === 'PRO' || targetPlan === 'TOP_TIER') ? targetPlan : null,
       }),
     });
     return res.json({ announcement: mapAnnouncementRecord(announcement) });
@@ -493,12 +509,16 @@ export const createAnnouncement = async (req: Request, res: Response) => {
 export const updateAnnouncement = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { title, content, isActive, durationValue, durationUnit, clearExpiry } = req.body;
+    const { title, content, isActive, durationValue, durationUnit, clearExpiry, type, couponCode, targetPlan } = req.body;
+    const announcementType = VALID_ANNOUNCEMENT_TYPES.includes(type) ? type : undefined;
     const nextContent =
-      typeof content === 'string' || durationValue !== undefined || clearExpiry
+      typeof content === 'string' || durationValue !== undefined || clearExpiry || announcementType
         ? serializeAnnouncementContent({
             body: typeof content === 'string' ? content : '',
             expiresAt: clearExpiry ? null : getExpiryFromRequest(durationValue, durationUnit),
+            type: announcementType,
+            couponCode: announcementType === 'discount' && typeof couponCode === 'string' ? couponCode.trim().toUpperCase() : null,
+            targetPlan: announcementType === 'discount' && (targetPlan === 'PRO' || targetPlan === 'TOP_TIER') ? targetPlan : null,
           })
         : undefined;
     const announcement = await updateAnnouncementRecord(id, {

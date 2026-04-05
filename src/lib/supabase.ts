@@ -234,9 +234,14 @@ export interface AnnouncementRecord {
   updatedAt: string;
 }
 
+export type AnnouncementType = 'update' | 'maintenance' | 'discount' | 'new_feature' | 'security' | 'event';
+
 export interface AnnouncementContentPayload {
   body: string;
   expiresAt: string | null;
+  type?: AnnouncementType;
+  couponCode?: string | null;
+  targetPlan?: 'PRO' | 'TOP_TIER' | null;
 }
 
 export type CouponType = 'percentage' | 'fixed';
