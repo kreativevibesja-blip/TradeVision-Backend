@@ -158,38 +158,73 @@ function detectContextTrend(candles: Candle[]): TrendDirection {
   return detectTrendFromLookback(candles, 48, 24);
 }
 
-// ── 1b. Macro Trend Detection ──
-// Uses the full candle history (600+) to classify the overarching market
-// direction.  Combines EMA 50/200 alignment with a quarter-based swing
-// structure comparison.  Both signals must broadly agree for a clear
-// trend — disagreement yields 'ranging'.
+// ── 1b. Macro Trend Detection (EMA 200 Filter) ──
+// The EMA 200 is the primary macro directional filter.
+// Price above EMA 200 → bullish (buy setups only).
+// Price below EMA 200 → bearish (sell setups only).
+// Price hugging EMA 200 (within a small buffer) → ranging.
 
 function detectMacroTrend(candles: Candle[], emaTrend: EmaTrendContext): TrendDirection {
-  if (candles.length < 100) return 'ranging';
+  if (candles.length < 200 || emaTrend.ema200 == null) return 'ranging';
 
-  const emaBias: TrendDirection = emaTrend.trend;
+  const currentPrice = candles[candles.length - 1].close;
+  const ema200 = emaTrend.ema200;
 
-  const quarterLen = Math.floor(candles.length / 4);
-  const q1Avg = average(candles.slice(0, quarterLen).map(c => c.close));
-  const q2Avg = average(candles.slice(quarterLen, quarterLen * 2).map(c => c.close));
-  const q3Avg = average(candles.slice(quarterLen * 2, quarterLen * 3).map(c => c.close));
-  const q4Avg = average(candles.slice(quarterLen * 3).map(c => c.close));
+  // Use average range as a buffer so choppy price around EMA 200 reads as ranging
+  const avgRange = averageRange(candles, 20);
+  const buffer = Math.max(avgRange * 2.5, ema200 * 0.003);
 
-  const transitions = [q2Avg > q1Avg, q3Avg > q2Avg, q4Avg > q3Avg];
-  const upCount = transitions.filter(Boolean).length;
-  const downCount = transitions.filter(v => !v).length;
-
-  let swingBias: TrendDirection = 'ranging';
-  if (upCount >= 2) swingBias = 'bullish';
-  if (downCount >= 2) swingBias = 'bearish';
-
-  // Both agree → clear trend
-  if (emaBias === swingBias) return emaBias;
-  // One clear + one neutral → trust the clear signal
-  if (emaBias !== 'ranging' && swingBias === 'ranging') return emaBias;
-  if (swingBias !== 'ranging' && emaBias === 'ranging') return swingBias;
-  // Disagree → ranging
+  if (currentPrice > ema200 + buffer) return 'bullish';
+  if (currentPrice < ema200 - buffer) return 'bearish';
   return 'ranging';
+}
+
+// ── 1c. EMA 50 Execution Helpers ──
+// The EMA 50 acts as the execution layer: dynamic support/resistance,
+// pullback detection, and confluence with structural zones.
+
+interface Ema50ExecutionContext {
+  /** Price is within striking distance of EMA 50 (pullback into trend) */
+  nearEma50: boolean;
+  /** A structural zone (supply/demand) overlaps with the EMA 50 region */
+  ema50ZoneConfluence: boolean;
+  /** EMA 50 sits above EMA 200 (bullish stack) or below (bearish stack) */
+  ema50Above200: boolean;
+}
+
+function analyzeEma50Execution(
+  candles: Candle[],
+  emaTrend: EmaTrendContext,
+  directionalZone: PriceZone | null,
+  directionalFvg: FairValueGap | null,
+): Ema50ExecutionContext {
+  const ema50 = emaTrend.ema50;
+  const ema200 = emaTrend.ema200;
+
+  if (ema50 == null || ema200 == null || candles.length === 0) {
+    return { nearEma50: false, ema50ZoneConfluence: false, ema50Above200: false };
+  }
+
+  const currentPrice = candles[candles.length - 1].close;
+  const avgRange = averageRange(candles, 12);
+  const ema50Proximity = Math.max(avgRange * 2, ema50 * 0.002);
+
+  const nearEma50 = Math.abs(currentPrice - ema50) <= ema50Proximity;
+
+  // Check if EMA 50 sits inside or very near a structural zone/FVG
+  let ema50ZoneConfluence = false;
+  if (directionalZone) {
+    const zoneBuffer = Math.max(avgRange * 0.5, (directionalZone.top - directionalZone.bottom) * 0.3);
+    ema50ZoneConfluence = ema50 >= directionalZone.bottom - zoneBuffer && ema50 <= directionalZone.top + zoneBuffer;
+  }
+  if (!ema50ZoneConfluence && directionalFvg) {
+    const fvgBuffer = Math.max(avgRange * 0.5, (directionalFvg.top - directionalFvg.bottom) * 0.3);
+    ema50ZoneConfluence = ema50 >= directionalFvg.bottom - fvgBuffer && ema50 <= directionalFvg.top + fvgBuffer;
+  }
+
+  const ema50Above200 = ema50 > ema200;
+
+  return { nearEma50, ema50ZoneConfluence, ema50Above200 };
 }
 
 // ── 2. Liquidity Sweep Detection ──
@@ -2118,7 +2153,10 @@ function buildPotentialCandidate({
   const stretchedFromArea = isExtendedFromArea(direction, currentPrice, preferredArea, candles);
   const nearDirectionalZone = directionalZone ? isNearZone(currentPrice, [directionalZone], 0.0025) !== null : false;
   const isReversalSetup = direction === 'buy' ? bullishReversal : bearishReversal;
-  const emaAligned = isEmaDirectionAligned(direction, emaTrend);
+  // EMA 50 execution context
+  const ema50Exec = analyzeEma50Execution(candles, emaTrend, directionalZone, directionalFvg);
+  const emaStackAligned = direction === 'buy' ? ema50Exec.ema50Above200 : !ema50Exec.ema50Above200;
+  const emaAligned = emaStackAligned;
   const volatilitySymbol = isVolatilitySymbol(symbol);
   const broaderTrendDirection = toTradeDirection(broaderTrend);
   const trendDirection = toTradeDirection(trend);
@@ -2180,11 +2218,11 @@ function buildPotentialCandidate({
     return null;
   }
 
-  if (emaTrend.trend !== 'ranging' && mode === 'trend' && !emaAligned) {
+  if (emaTrend.ema50 != null && emaTrend.ema200 != null && mode === 'trend' && !emaAligned && !isReversalSetup) {
     return null;
   }
 
-  if (emaTrend.trend !== 'ranging' && mode === 'counter' && !emaAligned && (!isReversalSetup || !poiReclaim || !alignedStructure)) {
+  if (emaTrend.ema50 != null && emaTrend.ema200 != null && mode === 'counter' && !emaAligned && (!isReversalSetup || !poiReclaim || !alignedStructure)) {
     return null;
   }
 
@@ -2233,6 +2271,8 @@ function buildPotentialCandidate({
   if (alignedStructure) probability += mode === 'counter' ? 10 : 5;
   if (alignedMomentum) probability += 5;
   if (emaAligned) probability += 10;
+  if (ema50Exec.nearEma50) probability += 8;
+  if (ema50Exec.ema50ZoneConfluence) probability += 10;
   if (hasBreaker) probability += 14;
   if (hasFvgReaction) probability += 14;
   if (hasEqlSweep) probability += 12;
@@ -2240,7 +2280,7 @@ function buildPotentialCandidate({
   if (hasMss) probability += 10;
   probability += premiumDiscountBias;
   if (stretchedFromArea) probability -= 15;
-  if (emaTrend.trend !== 'ranging' && !emaAligned) probability -= mode === 'counter' ? 16 : 28;
+  if (!emaAligned && emaTrend.ema50 != null && emaTrend.ema200 != null) probability -= mode === 'counter' ? 16 : 28;
 
   if (mode === 'counter' && !nearDirectionalZone && counterPressureCount < 2) {
     return null;
@@ -2265,13 +2305,24 @@ function buildPotentialCandidate({
     contextLabels.push('Aggressive one-tap style setup');
   }
 
-  if (emaTrend.trend !== 'ranging') {
+  if (emaTrend.ema50 != null && emaTrend.ema200 != null) {
     if (emaAligned) {
-      fulfilledConditions.push(direction === 'buy' ? 'EMA 50 and EMA 200 support bullish continuation' : 'EMA 50 and EMA 200 support bearish continuation');
-      contextLabels.push(emaTrend.trend === 'bullish' ? 'EMA bullish stack' : 'EMA bearish stack');
+      fulfilledConditions.push(direction === 'buy' ? 'EMA 50 above EMA 200 — bullish stack' : 'EMA 50 below EMA 200 — bearish stack');
+      contextLabels.push(direction === 'buy' ? 'EMA bullish stack' : 'EMA bearish stack');
     } else {
-      requiredTriggers.push(direction === 'buy' ? 'EMA 50/200 trend flip back bullish' : 'EMA 50/200 trend flip back bearish');
-      contextLabels.push(emaTrend.trend === 'bullish' ? 'EMA bearish trade is countertrend' : 'EMA bullish trade is countertrend');
+      requiredTriggers.push(direction === 'buy' ? 'EMA 50 needs to cross above EMA 200' : 'EMA 50 needs to cross below EMA 200');
+      contextLabels.push(direction === 'buy' ? 'EMA stack not yet bullish' : 'EMA stack not yet bearish');
+    }
+    if (macroTrend !== 'ranging') {
+      fulfilledConditions.push(direction === 'buy' ? 'Price above EMA 200 — macro bullish filter' : 'Price below EMA 200 — macro bearish filter');
+    }
+    if (ema50Exec.nearEma50) {
+      fulfilledConditions.push(direction === 'buy' ? 'Pullback to EMA 50 dynamic support' : 'Pullback to EMA 50 dynamic resistance');
+      contextLabels.push('EMA 50 pullback');
+    }
+    if (ema50Exec.ema50ZoneConfluence) {
+      fulfilledConditions.push('EMA 50 confluent with structural zone');
+      contextLabels.push('EMA 50 + zone confluence');
     }
   }
 
@@ -3037,6 +3088,10 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   const directionalFvg = findDirectionalFvg(direction, gaps, candles, symbol);
   const preferredArea = toPriceArea(directionalZone ?? directionalFvg);
 
+  // EMA 50 execution analysis
+  const ema50Exec = analyzeEma50Execution(candles, emaTrend, directionalZone, directionalFvg);
+  const emaStackAligned = direction === 'buy' ? ema50Exec.ema50Above200 : !ema50Exec.ema50Above200;
+
   const sweep = detectLiquiditySweep(candles);
   const pullback = detectPullback(trend, candles);
 
@@ -3061,7 +3116,8 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   const poiReclaim = direction === 'buy' ? bullishPoiReclaim : bearishPoiReclaim;
   const freshDisplacement = hasFreshDisplacement(direction, candles);
   const stretchedFromArea = isExtendedFromArea(direction, currentPrice, preferredArea, candles);
-  const emaAligned = isEmaDirectionAligned(direction, emaTrend);
+  // EMA alignment: require EMA 50 above EMA 200 for buys, below for sells
+  const emaAligned = emaStackAligned;
   const nearDirectionalZone = directionalZone ? isNearZone(currentPrice, [directionalZone], 0.0025) !== null : false;
   const activeBreaker = findActiveBreakerBlock(direction, currentPrice, candles);
   const hasBreaker = activeBreaker !== null;
@@ -3104,37 +3160,45 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   if (engulfing && !alignedEngulfing) return null;
   if (rejection && !alignedRejection) return null;
   if (structure && !alignedStructure) return null;
-  if (!directionalZone && !directionalFvg && !hasBreaker && !hasFvgReaction) return null;
+
+  const hasZonePresence = !!(directionalZone || directionalFvg || hasBreaker || hasFvgReaction);
+  const hasSweepConfirmation = alignedSweep || hasEqlSweep;
+  const hasEntryConfirmation = alignedRejection || alignedEngulfing;
+
+  // Core zone requirement
+  if (!hasZonePresence) return null;
   if (isVolatilitySymbol(symbol) && !directionalZone && !hasBreaker && !hasFvgReaction) return null;
   if (stretchedFromArea && !freshDisplacement) return null;
 
+  // Sniper entry: when macro trend is clear, enforce the full sequence:
+  // 1) Price in zone  2) Liquidity sweep  3) Rejection/engulfing  4) EMA stack aligned
+  if (macroTrend !== 'ranging') {
+    if (!emaStackAligned && !isReversalSetup) return null;
+
+    // Price must be at or reacting from a zone/FVG
+    if (!nearDirectionalZone && !freshReaction && !poiReclaim && !hasBreaker && !hasFvgReaction && !isReversalSetup) return null;
+
+    // Need sweep + entry candle confirmation for the cleanest entries
+    if (!hasSweepConfirmation && !hasEntryConfirmation && !isReversalSetup && !hasBreaker && !hasFvgReaction && !(alignedStructure || hasMss)) return null;
+  }
+
   if (volatilitySymbol && trendDirection === direction && !isReversalSetup && !hasContinuationAreaReaction) return null;
 
-  // When macro trend is clear, micro-trend pullbacks are expected — only gate
-  // on micro counter-trend disagreement when macro is ranging.
+  // When macro is ranging, apply the stricter micro counter-trend gates
   if (macroTrend === 'ranging') {
     if (volatilitySymbol && trendDirection && direction !== trendDirection) {
       if (!isReversalSetup) return null;
-      if (!nearDirectionalZone || !freshReaction || !(alignedSweep || hasEqlSweep) || !(alignedStructure || hasMss)) return null;
+      if (!nearDirectionalZone || !freshReaction || !hasSweepConfirmation || !(alignedStructure || hasMss)) return null;
     }
     if (volatilitySymbol && broaderTrendDirection && direction !== broaderTrendDirection && !isReversalSetup) return null;
   }
 
-  const directionalConfirmationCount = [alignedSweep || hasEqlSweep, alignedEngulfing, alignedRejection, alignedStructure || hasMss, alignedMomentum, poiReclaim]
+  const directionalConfirmationCount = [hasSweepConfirmation, alignedEngulfing, alignedRejection, alignedStructure || hasMss, alignedMomentum, poiReclaim]
     .filter(Boolean)
     .length;
 
-  // When macro trend is clear, relax the EMA counter-trend gate because
-  // pullbacks naturally push price against shorter EMAs.
-  if (emaTrend.trend !== 'ranging' && !emaAligned) {
-    if (macroTrend === 'ranging') {
-      if (!isReversalSetup || !poiReclaim || !(alignedStructure || hasMss) || directionalConfirmationCount < 3) {
-        return null;
-      }
-    } else if (directionalConfirmationCount < 2 && !isReversalSetup) {
-      return null;
-    }
-  }
+  // EMA 50/200 not stacked for this direction — need extra confirmation
+  if (!emaAligned && !isReversalSetup && directionalConfirmationCount < 3) return null;
 
   if (directionalConfirmationCount < 2 && !isReversalSetup && !hasBreaker && !hasFvgReaction) return null;
   if (!alignedEngulfing && !alignedRejection && !(alignedStructure || hasMss) && !poiReclaim && !isReversalSetup && !hasBreaker && !hasFvgReaction) return null;
@@ -3212,8 +3276,17 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
       : deriveStrategy(direction, sweep),
     confirmations: tradeConfirmations,
     confirmationLabels: [
-      ...(emaTrend.trend !== 'ranging' && emaAligned
-        ? [direction === 'buy' ? 'EMA 50 above EMA 200 and price holding above EMA 50' : 'EMA 50 below EMA 200 and price holding below EMA 50']
+      ...(emaAligned
+        ? [direction === 'buy' ? 'EMA 50 above EMA 200 — bullish stack confirmed' : 'EMA 50 below EMA 200 — bearish stack confirmed']
+        : []),
+      ...(macroTrend !== 'ranging'
+        ? [direction === 'buy' ? 'Price above EMA 200 — macro bullish filter' : 'Price below EMA 200 — macro bearish filter']
+        : []),
+      ...(ema50Exec.nearEma50
+        ? [direction === 'buy' ? 'Pullback to EMA 50 dynamic support' : 'Pullback to EMA 50 dynamic resistance']
+        : []),
+      ...(ema50Exec.ema50ZoneConfluence
+        ? ['EMA 50 confluent with structural zone']
         : []),
       ...(isReversalSetup ? [direction === 'buy' ? 'Demand reversal pattern confirmed' : 'Supply reversal pattern confirmed', direction === 'buy' ? 'Bullish closure confirmation' : 'Bearish closure confirmation'] : []),
       ...(poiReclaim && !isReversalSetup ? [direction === 'buy' ? 'POI reclaim from demand/support' : 'POI reclaim from supply/resistance'] : []),
