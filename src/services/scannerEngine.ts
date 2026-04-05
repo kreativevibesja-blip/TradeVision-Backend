@@ -941,6 +941,12 @@ function getOppositeDirection(direction: 'buy' | 'sell'): 'buy' | 'sell' {
   return direction === 'buy' ? 'sell' : 'buy';
 }
 
+function toTradeDirection(trend: TrendDirection): 'buy' | 'sell' | null {
+  if (trend === 'bullish') return 'buy';
+  if (trend === 'bearish') return 'sell';
+  return null;
+}
+
 interface PotentialCandidateInput {
   symbol: string;
   candles: Candle[];
@@ -999,6 +1005,10 @@ function buildPotentialCandidate({
   const nearDirectionalZone = directionalZone ? isNearZone(currentPrice, [directionalZone], 0.0025) !== null : false;
   const isReversalSetup = direction === 'buy' ? bullishReversal : bearishReversal;
   const emaAligned = isEmaDirectionAligned(direction, emaTrend);
+  const volatilitySymbol = isVolatilitySymbol(symbol);
+  const broaderTrendDirection = toTradeDirection(broaderTrend);
+  const trendDirection = toTradeDirection(trend);
+  const hasContinuationAreaReaction = nearDirectionalZone || freshReaction || poiReclaim;
   const counterPressureCount = [
     nearDirectionalZone,
     freshReaction,
@@ -1045,6 +1055,22 @@ function buildPotentialCandidate({
 
   if (isVolatilitySymbol(symbol) && !directionalZone) {
     return null;
+  }
+
+  if (volatilitySymbol && mode === 'trend' && trendDirection === direction && !hasContinuationAreaReaction) {
+    return null;
+  }
+
+  if (volatilitySymbol && mode === 'counter') {
+    if (!isReversalSetup) {
+      return null;
+    }
+
+    if ((broaderTrendDirection && broaderTrendDirection !== direction) || (trendDirection && trendDirection !== direction)) {
+      if (!nearDirectionalZone || !freshReaction || !alignedSweep || !alignedStructure) {
+        return null;
+      }
+    }
   }
 
   let probability = mode === 'trend' ? 20 : 16;
@@ -1647,6 +1673,11 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   const freshDisplacement = hasFreshDisplacement(direction, candles);
   const stretchedFromArea = isExtendedFromArea(direction, currentPrice, preferredArea, candles);
   const emaAligned = isEmaDirectionAligned(direction, emaTrend);
+  const nearDirectionalZone = directionalZone ? isNearZone(currentPrice, [directionalZone], 0.0025) !== null : false;
+  const volatilitySymbol = isVolatilitySymbol(symbol);
+  const trendDirection = toTradeDirection(trend);
+  const broaderTrendDirection = toTradeDirection(broaderTrend);
+  const hasContinuationAreaReaction = nearDirectionalZone || freshReaction || poiReclaim;
 
   if (direction === 'sell' && currentZone?.type === 'demand' && bullishPoiReclaim) return null;
   if (direction === 'buy' && currentZone?.type === 'supply' && bearishPoiReclaim) return null;
@@ -1658,6 +1689,15 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   if (!directionalZone && !directionalFvg) return null;
   if (isVolatilitySymbol(symbol) && !directionalZone) return null;
   if (stretchedFromArea && !freshDisplacement) return null;
+
+  if (volatilitySymbol && trendDirection === direction && !isReversalSetup && !hasContinuationAreaReaction) return null;
+
+  if (volatilitySymbol && trendDirection && direction !== trendDirection) {
+    if (!isReversalSetup) return null;
+    if (!nearDirectionalZone || !freshReaction || !alignedSweep || !alignedStructure) return null;
+  }
+
+  if (volatilitySymbol && broaderTrendDirection && direction !== broaderTrendDirection && !isReversalSetup) return null;
 
   const directionalConfirmationCount = [alignedSweep, alignedEngulfing, alignedRejection, alignedStructure, alignedMomentum, poiReclaim]
     .filter(Boolean)
@@ -1834,6 +1874,16 @@ export function analyzePotentialTrades(
     });
     if (continuationCandidate) {
       candidates.push(continuationCandidate);
+    }
+
+    const shouldSkipCounterCandidate = isVolatilitySymbol(symbol)
+      && broaderTrend === trend
+      && (trend === 'bullish' || trend === 'bearish');
+
+    if (shouldSkipCounterCandidate) {
+      return candidates
+        .filter((candidate, index, array) => array.findIndex((item) => item.direction === candidate.direction && item.strategy === candidate.strategy) === index)
+        .sort((left, right) => right.activationProbability - left.activationProbability);
     }
 
     const counterCandidate = buildPotentialCandidate({
