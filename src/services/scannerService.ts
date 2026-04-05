@@ -273,15 +273,23 @@ async function getOpenResultForUserSymbol(userId: string, symbol: string): Promi
 // ── Helpers ──
 
 function getCurrentEstHour(): number {
-  const now = new Date();
-  const estString = now.toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false });
-  const hour = parseInt(estString.split(',')[1]?.trim().split(':')[0] ?? '0', 10);
-  return hour;
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    hour: 'numeric',
+    hour12: false,
+  }).formatToParts(new Date());
+  const hourStr = parts.find((p) => p.type === 'hour')?.value ?? '0';
+  return parseInt(hourStr, 10) % 24; // % 24 handles midnight reported as 24
 }
 
 function getEstHourForDate(date: Date): number {
-  const estString = date.toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false });
-  return parseInt(estString.split(',')[1]?.trim().split(':')[0] ?? '0', 10);
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    hour: 'numeric',
+    hour12: false,
+  }).formatToParts(date);
+  const hourStr = parts.find((p) => p.type === 'hour')?.value ?? '0';
+  return parseInt(hourStr, 10) % 24;
 }
 
 function getCurrentEstWeekday(): number {
