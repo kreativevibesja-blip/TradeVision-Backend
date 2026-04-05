@@ -499,7 +499,14 @@ async function attachLivePricesToResults(results: ScanResult[]): Promise<ScanRes
 
   const uniqueSymbols = Array.from(new Set(openResults.map((result) => result.symbol)));
   const latestPricePairs = await Promise.all(
-    uniqueSymbols.map(async (symbol) => [symbol, await loadLatestScannerPrice(symbol)] as const),
+    uniqueSymbols.map(async (symbol) => {
+      try {
+        return [symbol, await loadLatestScannerPrice(symbol)] as const;
+      } catch (error) {
+        console.error(`[Scanner] Failed to attach live price for ${symbol}:`, error);
+        return [symbol, null] as const;
+      }
+    }),
   );
   const latestPriceBySymbol = new Map<string, number | null>(latestPricePairs);
 
@@ -620,6 +627,11 @@ export async function getScanResults(
 
   const results = (data ?? []) as ScanResult[];
   const scopedResults = scope === 'current' ? dedupeOpenResultsBySymbol(results).slice(0, limit) : results;
+
+  if (scope === 'history') {
+    return scopedResults.map((result) => ({ ...result, currentPrice: result.currentPrice ?? null }));
+  }
+
   return attachLivePricesToResults(scopedResults);
 }
 
