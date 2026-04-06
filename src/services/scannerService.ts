@@ -4,6 +4,7 @@ import { getRuntimeCandles } from '../lib/deriv/activeCandles';
 import { ensureDerivSubscription, getDerivHistoryCandles } from '../lib/deriv/ws';
 import { DERIV_SCANNER_SYMBOL_IDS, SESSION_SCANNER_SYMBOL_IDS, VOLATILITY_SCANNER_SYMBOL_IDS } from '../lib/deriv/symbols';
 import { scheduleScannerPanelRefreshForAllUsers, scheduleScannerPanelRefreshForUser } from '../lib/scanner/panelStream';
+import { getCooldownMinutes, isSymbolOnCooldown, allowContinuation, passesPostFirstTradeFilter, type TradeResult } from '../lib/scanner/cooldownEngine';
 import { analyzeMarket, analyzePotentialTrades, detectTrend, findSwingHighsLows, type Candle, type MarketRegime, type PotentialTradeSetup, type TradeConfirmations, type TrendDirection } from './scannerEngine';
 import { sendPushToUser } from './pushService';
 
@@ -88,7 +89,7 @@ interface LivePriceWindow {
 }
 
 type OpenScanResult = Pick<ScanResult, 'id' | 'userId' | 'symbol' | 'status' | 'confidenceScore' | 'createdAt'>;
-type RecentScannerActivity = Pick<ScanResult, 'symbol' | 'sessionType' | 'status' | 'createdAt' | 'closedAt' | 'closeReason'>;
+type RecentScannerActivity = Pick<ScanResult, 'symbol' | 'direction' | 'sessionType' | 'status' | 'createdAt' | 'closedAt' | 'closeReason'>;
 
 // ── Table names ──
 
@@ -1103,7 +1104,6 @@ const MAX_TRADES_PER_DAY_BY_SESSION: Record<SessionType, number> = {
 };
 const SESSION_REASSESS_COOLDOWN_MS = 90 * 60_000;
 const SESSION_ENTRY_SPACING_MS = 60 * 60_000;
-const SYMBOL_REENTRY_COOLDOWN_MS = 120 * 60_000;
 const SCANNER_ACTIVITY_LOOKBACK_MS = 24 * 60 * 60_000;
 
 async function getTodayTradeCount(userId: string, sessionType?: SessionType): Promise<number> {
@@ -1129,7 +1129,7 @@ async function getRecentScannerActivity(userId: string): Promise<RecentScannerAc
 
   const { data, error } = await supabase
     .from(SCAN_RESULT_TABLE)
-    .select('symbol, sessionType, status, createdAt, closedAt, closeReason')
+    .select('symbol, direction, sessionType, status, createdAt, closedAt, closeReason')
     .eq('userId', userId)
     .gte('createdAt', sinceIso)
     .in('status', ['active', 'triggered', 'closed', 'invalidated'])
@@ -1174,37 +1174,33 @@ function isSessionEntrySpacingActive(activities: RecentScannerActivity[], sessio
 }
 
 function isSymbolInReentryCooldown(activities: RecentScannerActivity[], symbol: string): boolean {
-  const now = Date.now();
+  const now = new Date();
 
-  return activities.some((activity) => {
-    if (activity.symbol !== symbol) {
-      return false;
+  for (const activity of activities) {
+    if (activity.symbol !== symbol) continue;
+    if (activity.status !== 'closed' && activity.status !== 'invalidated') continue;
+
+    const cooldownMinutes = getCooldownMinutes({
+      symbol,
+      result: activity.closeReason as TradeResult,
+    });
+
+    if (isSymbolOnCooldown(activity.closedAt, cooldownMinutes, now)) {
+      return true;
     }
+  }
 
-    if (activity.status !== 'closed' && activity.status !== 'invalidated') {
-      return false;
-    }
-
-    const closedAtMs = activity.closedAt ? new Date(activity.closedAt).getTime() : 0;
-    return closedAtMs > 0 && now - closedAtMs < SYMBOL_REENTRY_COOLDOWN_MS;
-  });
+  return false;
 }
 
-function isSymbolLockedUntilNextNewYorkDay(activities: RecentScannerActivity[], symbol: string): boolean {
-  const dayStartMs = new Date(getStartOfNewYorkDay()).getTime();
-
-  return activities.some((activity) => {
-    if (activity.symbol !== symbol) {
-      return false;
-    }
-
-    if (activity.status !== 'closed' || (activity.closeReason !== 'sl' && activity.closeReason !== 'tp')) {
-      return false;
-    }
-
-    const closedAtMs = activity.closedAt ? new Date(activity.closedAt).getTime() : 0;
-    return closedAtMs >= dayStartMs;
-  });
+/** Find the most recent closed activity for a symbol (used for continuation logic). */
+function findLastClosedActivity(
+  activities: RecentScannerActivity[],
+  symbol: string,
+): RecentScannerActivity | null {
+  return activities.find(
+    (a) => a.symbol === symbol && a.status === 'closed' && (a.closeReason === 'tp' || a.closeReason === 'sl'),
+  ) ?? null;
 }
 
 function getVolatilityBucketTradeCount(
@@ -1412,11 +1408,21 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
       }
 
       if (isSymbolInReentryCooldown(recentActivity, result.symbol)) {
-        continue;
-      }
-
-      if (isSymbolLockedUntilNextNewYorkDay(recentActivity, result.symbol)) {
-        continue;
+        const lastClosed = findLastClosedActivity(recentActivity, result.symbol);
+        if (
+          lastClosed &&
+          allowContinuation({
+            lastDirection: lastClosed.direction as 'buy' | 'sell',
+            lastResult: lastClosed.closeReason as TradeResult,
+            newDirection: result.direction,
+            confidenceScore: result.confidenceScore,
+          })
+        ) {
+          console.log(`[Scanner] Continuation allowed for ${result.symbol} (${result.direction}, confidence ${result.confidenceScore}) after win`);
+        } else {
+          console.log(`[Scanner] Cooldown active for ${result.symbol}, skipping`);
+          continue;
+        }
       }
 
       if (isDuplicate(userId, result.symbol, result.direction)) {
@@ -1426,6 +1432,11 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
       const existingOpenResult = await getOpenResultForUserSymbol(userId, result.symbol);
       if (existingOpenResult) {
         claimedSymbols.add(result.symbol);
+        continue;
+      }
+
+      if (!passesPostFirstTradeFilter({ sessionTradeCount: sessionCount, confidenceScore: result.confidenceScore })) {
+        console.log(`[Scanner] Confidence filter blocked ${result.symbol} (confidence ${result.confidenceScore}, sessionCount ${sessionCount})`);
         continue;
       }
 
@@ -1463,6 +1474,7 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
       savedResults.push(scanResult);
       recentActivity.unshift({
         symbol: scanResult.symbol,
+        direction: scanResult.direction,
         sessionType: scanResult.sessionType,
         status: scanResult.status,
         createdAt: scanResult.createdAt,
