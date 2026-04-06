@@ -26,6 +26,7 @@ const requestedSymbols = new Set<string>();
 const resolvedSymbols = new Map<string, string>();
 const pendingSubscriptions = new Map<string, Promise<string>>();
 let activeSymbolsCache: DerivActiveSymbol[] = [];
+let pendingActiveSymbolsRequest: Promise<DerivActiveSymbol[]> | null = null;
 let waitForOpenPromise: Promise<WebSocket> | null = null;
 let resolveWaitForOpen: ((ws: WebSocket) => void) | null = null;
 let rejectWaitForOpen: ((error: Error) => void) | null = null;
@@ -93,13 +94,23 @@ async function getActiveSymbols(ws: WebSocket) {
     return activeSymbolsCache;
   }
 
-  const response = await sendRequest(ws, {
-    active_symbols: 'brief',
-    product_type: 'basic',
+  if (pendingActiveSymbolsRequest) {
+    return pendingActiveSymbolsRequest;
+  }
+
+  pendingActiveSymbolsRequest = (async () => {
+    const response = await sendRequest(ws, {
+      active_symbols: 'brief',
+      product_type: 'basic',
+    });
+
+    activeSymbolsCache = (response?.active_symbols ?? []) as DerivActiveSymbol[];
+    return activeSymbolsCache;
+  })().finally(() => {
+    pendingActiveSymbolsRequest = null;
   });
 
-  activeSymbolsCache = (response?.active_symbols ?? []) as DerivActiveSymbol[];
-  return activeSymbolsCache;
+  return pendingActiveSymbolsRequest;
 }
 
 function resolveRequestedSymbol(requestedSymbol: string, activeSymbols: DerivActiveSymbol[]) {
@@ -120,17 +131,33 @@ function resolveRequestedSymbol(requestedSymbol: string, activeSymbols: DerivAct
   return normalizedRequested;
 }
 
-async function subscribeSymbol(ws: WebSocket, requestedSymbol: string) {
+async function subscribeSymbol(ws: WebSocket, requestedSymbol: string, retries = 2): Promise<string> {
   const normalizedSymbol = requestedSymbol.trim().toUpperCase();
-  const activeSymbols = await getActiveSymbols(ws);
-  const derivSymbol = resolveRequestedSymbol(normalizedSymbol, activeSymbols);
 
-  registerTrackedDerivSymbol(normalizedSymbol, derivSymbol);
-  resolvedSymbols.set(normalizedSymbol, derivSymbol);
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const activeSymbols = await getActiveSymbols(ws);
+      const derivSymbol = resolveRequestedSymbol(normalizedSymbol, activeSymbols);
 
-  ws.send(JSON.stringify({ ticks: derivSymbol, subscribe: 1 }));
-  console.log(`[deriv-ws] subscribed ${normalizedSymbol} -> ${derivSymbol}`);
-  return derivSymbol;
+      registerTrackedDerivSymbol(normalizedSymbol, derivSymbol);
+      resolvedSymbols.set(normalizedSymbol, derivSymbol);
+
+      ws.send(JSON.stringify({ ticks: derivSymbol, subscribe: 1 }));
+      console.log(`[deriv-ws] subscribed ${normalizedSymbol} -> ${derivSymbol}`);
+      return derivSymbol;
+    } catch (error) {
+      if (attempt < retries) {
+        const delay = 1000 * (attempt + 1);
+        console.warn(`[deriv-ws] subscription attempt ${attempt + 1} failed for ${normalizedSymbol}, retrying in ${delay}ms`);
+        await new Promise<void>((r) => setTimeout(r, delay));
+        ws = await waitForSocketOpen();
+      } else {
+        throw error;
+      }
+    }
+  }
+
+  throw new Error(`Failed to subscribe ${normalizedSymbol} after ${retries + 1} attempts`);
 }
 
 async function subscribeToSymbols(ws: WebSocket, symbols: string[]) {
@@ -213,6 +240,7 @@ function connect(symbols: string[]) {
     console.warn('[deriv-ws] closed');
     socket = null;
     activeSymbolsCache = [];
+    pendingActiveSymbolsRequest = null;
     resolvedSymbols.clear();
     clearPendingRequests(new Error('Deriv websocket closed'));
     rejectWaitForOpen?.(new Error('Deriv websocket closed'));
