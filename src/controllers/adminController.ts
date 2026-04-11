@@ -11,12 +11,14 @@ import {
   getCompletedRevenue,
   getLivePlatformMetrics,
   getPaymentById,
+  getUserById,
   listAllAnalysesPage,
   listActiveAnnouncements,
   listAllPaymentsPage,
   listAnnouncements,
   listPricingPlans,
   listSystemSettings,
+  listTicketsForUser,
   listUsersPage,
   updateAnnouncementRecord,
   updatePricingPlan as updatePricingPlanRecord,
@@ -31,6 +33,7 @@ import {
 } from '../lib/supabase';
 import { serializeAnalysis } from './analysisController';
 import { setBillingStateFromAdmin } from '../services/billing';
+import { getBillingSummaryForUser } from '../services/billing';
 import { setBillingStateFromPayment } from '../services/billing';
 import { processReferralPayment } from '../services/referralService';
 
@@ -187,6 +190,45 @@ export const getUsers = async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Admin users error:', error);
     return res.status(500).json({ error: 'Failed to get users' });
+  }
+};
+
+export const getUserDetails = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const user = await getUserById(id);
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const [billingSummary, ticketData] = await Promise.all([
+      getBillingSummaryForUser(user.id, user.subscription),
+      listTicketsForUser(user.id, 1, 20),
+    ]);
+
+    const openTickets = ticketData.tickets
+      .filter((ticket) => ticket.status !== 'RESOLVED' && ticket.status !== 'CLOSED')
+      .slice(0, 5);
+
+    return res.json({
+      user: {
+        id: user.id,
+        billing: {
+          currentPlan: billingSummary.currentPlan,
+          status: billingSummary.status,
+          expiresAt: billingSummary.expiresAt,
+          lastPaymentAt: billingSummary.lastPaymentAt,
+          canceledAt: billingSummary.canceledAt,
+          recentPayments: billingSummary.recentPayments,
+        },
+        openTickets,
+        openTicketCount: openTickets.length,
+      },
+    });
+  } catch (error) {
+    console.error('Admin user details error:', error);
+    return res.status(500).json({ error: 'Failed to get user details' });
   }
 };
 

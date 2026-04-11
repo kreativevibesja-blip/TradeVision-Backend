@@ -4,6 +4,7 @@ import {
   createPricingPlan,
   getDashboardStats,
   getAdminAnalysisById,
+  getUserDetails,
   getUsers,
   updateUser,
   getAnalysisLogs,
@@ -54,6 +55,7 @@ router.use(authenticate, requireAdmin);
 
 router.get('/dashboard', getDashboardStats);
 router.get('/users', getUsers);
+router.get('/users/:id', getUserDetails);
 router.patch('/users/:id', updateUser);
 router.get('/analyses', getAnalysisLogs);
 router.get('/analyses/:id', getAdminAnalysisById);
