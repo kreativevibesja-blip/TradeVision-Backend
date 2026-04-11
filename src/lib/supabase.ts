@@ -109,6 +109,7 @@ export type AutoMode = 'manual' | 'semi' | 'full';
 
 export const hasPaidSubscription = (subscription: SubscriptionTier | string) => subscription === 'PRO' || subscription === 'TOP_TIER';
 export const hasAutoTraderSubscription = (subscription: SubscriptionTier | string) => subscription === 'TOP_TIER';
+export const getMonthlyAnalysisLimit = (subscription: SubscriptionTier | string) => subscription === 'TOP_TIER' ? config.limits.topTierMonthly : config.limits.proMonthly;
 
 export interface UserRecord {
   id: string;
@@ -212,7 +213,7 @@ const DEFAULT_PRICING_PLANS: Array<Pick<PricingPlanRecord, 'name' | 'tier' | 'pr
     name: 'Top Tier 👑',
     tier: 'TOP_TIER',
     price: 39.95,
-    features: ['300 analyses per month', 'Advanced Smart Money Concepts', 'Priority AI processing', 'One-Tap Trade execution'],
+    features: ['500 analyses per month', 'Advanced Smart Money Concepts', 'Priority AI processing', 'One-Tap Trade execution'],
     dailyLimit: 999999,
     isActive: true,
   },
@@ -558,7 +559,7 @@ export const listUsersPage = async (
                 }
                 return count;
               }, 0),
-              limit: config.limits.proMonthly,
+              limit: getMonthlyAnalysisLimit(user.subscription),
               period: 'month',
             }
           : {

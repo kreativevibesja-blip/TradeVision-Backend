@@ -9,6 +9,7 @@ import {
   countAnalysesForUserSince,
   createAnalysis,
   getAnalysisByIdForUser,
+  getMonthlyAnalysisLimit,
   getUserById,
   listAnalysesForUser,
   releaseUserDailyUsageReservation,
@@ -202,10 +203,11 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
       }
 
       const monthlyUsage = await countAnalysesForUserSince(req.user!.id, getPaidUsageWindowStart(user.lastUsageReset));
-      if (monthlyUsage >= config.limits.proMonthly) {
+      const monthlyLimit = getMonthlyAnalysisLimit(user.subscription);
+      if (monthlyUsage >= monthlyLimit) {
         return res.status(429).json({
           error: 'Monthly fair use limit reached',
-          limit: config.limits.proMonthly,
+          limit: monthlyLimit,
           usage: monthlyUsage,
         });
       }
@@ -318,10 +320,11 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
     // ── PRO PATH: process instantly (no queue) ──────────────────────
     if (user.subscription !== 'FREE') {
       const monthlyUsage = await countAnalysesForUserSince(req.user!.id, getPaidUsageWindowStart(user.lastUsageReset));
-      if (monthlyUsage >= config.limits.proMonthly) {
+      const monthlyLimit = getMonthlyAnalysisLimit(user.subscription);
+      if (monthlyUsage >= monthlyLimit) {
         return res.status(429).json({
           error: 'Monthly fair use limit reached',
-          limit: config.limits.proMonthly,
+          limit: monthlyLimit,
           usage: monthlyUsage,
         });
       }
