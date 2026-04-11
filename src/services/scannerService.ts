@@ -137,6 +137,7 @@ const SCANNER_SYMBOLS_BY_SESSION: Record<SessionType, readonly string[]> = {
 const SCANNER_TIMEFRAME = 'M15';
 const LIVE_RESULT_CACHE_SYNC_MS = 20_000;
 const HIGH_CONFIDENCE_POTENTIAL_THRESHOLD = 90;
+const PREFER_HISTORY_BEFORE_CACHE_SYMBOLS = new Set(['XAUUSD']);
 
 const TIMEFRAME_TO_GRANULARITY: Record<'M15' | 'H1', 900 | 3600> = {
   M15: 900,
@@ -434,6 +435,19 @@ async function loadScannerCandles(symbol: string, timeframe: 'M15' | 'H1', limit
       close: candle.close,
       time: candle.time * 1000,
     }));
+  }
+
+  if (PREFER_HISTORY_BEFORE_CACHE_SYMBOLS.has(symbol)) {
+    const historyCandles = await getDerivHistoryCandles(symbol, granularity, limit);
+    if (historyCandles.length >= minimum) {
+      return historyCandles.map((candle) => ({
+        open: candle.open,
+        high: candle.high,
+        low: candle.low,
+        close: candle.close,
+        time: candle.time * 1000,
+      }));
+    }
   }
 
   const cachedCandles = await getCachedCandles(symbol, timeframe, limit);

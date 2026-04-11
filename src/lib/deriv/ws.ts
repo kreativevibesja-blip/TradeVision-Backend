@@ -73,9 +73,14 @@ function sendRequest(ws: WebSocket, payload: Record<string, unknown>) {
 }
 
 function resolveSymbolCode(configSymbol: DerivScannerSymbolConfig, activeSymbols: DerivActiveSymbol[]) {
-  const aliases = configSymbol.aliases.map(normalize);
+  const aliases = configSymbol.aliases
+    .map(normalize)
+    .filter(Boolean)
+    .sort((left, right) => right.length - left.length);
 
-  return activeSymbols.find((activeSymbol) => {
+  let bestMatch: { symbol: string; score: number } | null = null;
+
+  for (const activeSymbol of activeSymbols) {
     const searchable = [
       activeSymbol.symbol,
       activeSymbol.display_name ?? '',
@@ -85,8 +90,32 @@ function resolveSymbolCode(configSymbol: DerivScannerSymbolConfig, activeSymbols
       .map(normalize)
       .filter(Boolean);
 
-    return aliases.some((alias) => searchable.some((candidate) => candidate.includes(alias) || alias.includes(candidate)));
-  })?.symbol ?? null;
+    let score = -1;
+
+    for (const alias of aliases) {
+      for (const candidate of searchable) {
+        if (candidate === alias) {
+          score = Math.max(score, 1000 + alias.length);
+          continue;
+        }
+
+        if (candidate.startsWith(alias) || alias.startsWith(candidate)) {
+          score = Math.max(score, 700 + Math.min(alias.length, candidate.length));
+          continue;
+        }
+
+        if (candidate.includes(alias)) {
+          score = Math.max(score, 400 + alias.length);
+        }
+      }
+    }
+
+    if (score > (bestMatch?.score ?? -1)) {
+      bestMatch = { symbol: activeSymbol.symbol, score };
+    }
+  }
+
+  return bestMatch?.symbol ?? null;
 }
 
 async function getActiveSymbols(ws: WebSocket) {
