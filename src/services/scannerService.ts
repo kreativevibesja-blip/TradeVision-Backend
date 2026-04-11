@@ -7,6 +7,7 @@ import { scheduleScannerPanelRefreshForAllUsers, scheduleScannerPanelRefreshForU
 import { getCooldownMinutes, isSymbolOnCooldown, allowContinuation, passesPostFirstTradeFilter, type TradeResult } from '../lib/scanner/cooldownEngine';
 import { analyzeMarket, analyzePotentialTrades, detectTrend, findSwingHighsLows, type Candle, type MarketRegime, type PotentialTradeSetup, type TradeConfirmations, type TrendDirection } from './scannerEngine';
 import { sendPushToUser } from './pushService';
+import { generateAndUploadSnapshot } from './tradeSnapshot';
 
 // ── Types ──
 
@@ -48,6 +49,7 @@ export interface ScanResult {
   rank: number | null;
   createdAt: string;
   currentPrice?: number | null;
+  snapshotUrl?: string | null;
 }
 
 export interface ScannerAlert {
@@ -1482,6 +1484,21 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
         closeReason: scanResult.closeReason,
       });
       dailyCount += 1;
+
+      // Fire-and-forget: generate chart snapshot in the background
+      loadScannerCandles(result.symbol, SCANNER_TIMEFRAME, 600)
+        .then((snapshotCandles) =>
+          generateAndUploadSnapshot(scanResult.id, {
+            symbol: result.symbol,
+            direction: result.direction,
+            entry: result.entry,
+            stopLoss: result.stopLoss,
+            takeProfit: result.takeProfit,
+            takeProfit2: result.takeProfit2,
+            candles: snapshotCandles,
+          }),
+        )
+        .catch((err) => console.error(`[Scanner] Snapshot generation failed for ${result.symbol}:`, err));
 
       const directionLabel = result.direction.toUpperCase();
       const modeLabel = sessionType === 'volatility' ? 'Volatility 24/7' : `${sessionType === 'london' ? 'London' : 'New York'} Session`;
