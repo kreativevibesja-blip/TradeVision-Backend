@@ -6,6 +6,7 @@ import {
   getAdminAnalysisById,
   getUserDetails,
   getUsers,
+  resetUserUsage,
   updateUser,
   getAnalysisLogs,
   getPayments,
@@ -56,6 +57,7 @@ router.use(authenticate, requireAdmin);
 router.get('/dashboard', getDashboardStats);
 router.get('/users', getUsers);
 router.get('/users/:id', getUserDetails);
+router.post('/users/:id/reset-usage', resetUserUsage);
 router.patch('/users/:id', updateUser);
 router.get('/analyses', getAnalysisLogs);
 router.get('/analyses/:id', getAdminAnalysisById);

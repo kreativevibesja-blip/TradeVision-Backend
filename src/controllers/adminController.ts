@@ -232,6 +232,28 @@ export const getUserDetails = async (req: Request, res: Response) => {
   }
 };
 
+export const resetUserUsage = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const user = await getUserById(id);
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const now = new Date().toISOString();
+    const updatedUser = await updateUserRecord(id, {
+      lastUsageReset: now,
+      ...(user.subscription === 'FREE' ? { dailyUsage: 0 } : {}),
+    });
+
+    return res.json({ user: updatedUser, resetAt: now });
+  } catch (error) {
+    console.error('Admin reset user usage error:', error);
+    return res.status(500).json({ error: 'Failed to reset user usage' });
+  }
+};
+
 export const updateUser = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;

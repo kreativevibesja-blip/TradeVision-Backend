@@ -551,7 +551,13 @@ export const listUsersPage = async (
       usage:
         hasPaidSubscription(user.subscription)
           ? {
-              current: monthlyAnalysisCountMap[user.id!] || 0,
+              current: analysisRows.reduce((count, row) => {
+                const usageWindowStart = user.lastUsageReset && user.lastUsageReset > monthStartIso ? user.lastUsageReset : monthStartIso;
+                if (row.userId === user.id && row.createdAt >= usageWindowStart) {
+                  return count + 1;
+                }
+                return count;
+              }, 0),
               limit: config.limits.proMonthly,
               period: 'month',
             }

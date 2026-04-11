@@ -101,6 +101,15 @@ const getMonthStartIso = () => {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0)).toISOString();
 };
 
+const getPaidUsageWindowStart = (lastUsageReset?: string | null) => {
+  const monthStartIso = getMonthStartIso();
+  if (lastUsageReset && lastUsageReset > monthStartIso) {
+    return lastUsageReset;
+  }
+
+  return monthStartIso;
+};
+
 export const serializeAnalysis = (analysis: any) => ({
   ...(analysis.rawResponse && typeof analysis.rawResponse === 'object' ? analysis.rawResponse : {}),
   ...analysis,
@@ -192,7 +201,7 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
         return res.status(400).json({ error: 'At least 50 Deriv candles are required for persisted live analysis' });
       }
 
-      const monthlyUsage = await countAnalysesForUserSince(req.user!.id, getMonthStartIso());
+      const monthlyUsage = await countAnalysesForUserSince(req.user!.id, getPaidUsageWindowStart(user.lastUsageReset));
       if (monthlyUsage >= config.limits.proMonthly) {
         return res.status(429).json({
           error: 'Monthly fair use limit reached',
@@ -308,7 +317,7 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
 
     // ── PRO PATH: process instantly (no queue) ──────────────────────
     if (user.subscription !== 'FREE') {
-      const monthlyUsage = await countAnalysesForUserSince(req.user!.id, getMonthStartIso());
+      const monthlyUsage = await countAnalysesForUserSince(req.user!.id, getPaidUsageWindowStart(user.lastUsageReset));
       if (monthlyUsage >= config.limits.proMonthly) {
         return res.status(429).json({
           error: 'Monthly fair use limit reached',
