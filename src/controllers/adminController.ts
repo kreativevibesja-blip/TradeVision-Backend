@@ -11,6 +11,7 @@ import {
   getCompletedRevenue,
   getLivePlatformMetrics,
   getPaymentById,
+  getSystemSetting,
   getUserById,
   listAllAnalysesPage,
   listActiveAnnouncements,
@@ -38,6 +39,8 @@ import { setBillingStateFromPayment } from '../services/billing';
 import { processReferralPayment } from '../services/referralService';
 
 const ANNOUNCEMENT_CONTENT_VERSION = 1;
+const DEFAULT_SUPPORT_WHATSAPP_NUMBER = '18762797956';
+const DEFAULT_SUPPORT_WHATSAPP_MESSAGE = 'Hi TradeVision AI, I need support.';
 
 const VALID_ANNOUNCEMENT_TYPES: AnnouncementType[] = ['update', 'maintenance', 'discount', 'new_feature', 'security', 'event'];
 
@@ -529,6 +532,26 @@ export const updateSystemSetting = async (req: Request, res: Response) => {
     return res.json({ setting });
   } catch (error) {
     return res.status(500).json({ error: 'Failed to update setting' });
+  }
+};
+
+export const getPublicSupportSettings = async (_req: Request, res: Response) => {
+  try {
+    const [numberSetting, messageSetting] = await Promise.all([
+      getSystemSetting('support_whatsapp_number'),
+      getSystemSetting('support_whatsapp_message'),
+    ]);
+
+    return res.json({
+      whatsappNumber: typeof numberSetting?.value === 'string' && numberSetting.value.trim().length > 0
+        ? numberSetting.value.trim()
+        : DEFAULT_SUPPORT_WHATSAPP_NUMBER,
+      whatsappMessage: typeof messageSetting?.value === 'string' && messageSetting.value.trim().length > 0
+        ? messageSetting.value.trim()
+        : DEFAULT_SUPPORT_WHATSAPP_MESSAGE,
+    });
+  } catch (error) {
+    return res.status(500).json({ error: 'Failed to get support settings' });
   }
 };
 
