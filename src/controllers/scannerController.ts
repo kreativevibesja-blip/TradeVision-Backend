@@ -9,6 +9,7 @@ import {
   markAlertsRead,
   getSessionSummary,
   getPotentialTrades,
+  getTradeReplayForUser,
   runSessionScanner,
   checkZoneProximityAlerts,
   getRealtimeScannerPanels,
@@ -159,6 +160,28 @@ export const getPotentials = async (req: AuthRequest, res: Response) => {
   } catch (error: any) {
     console.error('[Scanner] Potential trades error:', error);
     return res.status(500).json({ error: error?.message || 'Failed to get potential trades' });
+  }
+};
+
+// GET /api/scanner/results/:scanResultId/replay
+export const getReplay = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Authentication required' });
+
+    const scanResultId = typeof req.params.scanResultId === 'string' ? req.params.scanResultId : '';
+    if (!scanResultId) {
+      return res.status(400).json({ error: 'scanResultId is required' });
+    }
+
+    const replay = await getTradeReplayForUser(req.user.id, scanResultId);
+    if (!replay) {
+      return res.status(404).json({ error: 'Replay not available for this trade yet' });
+    }
+
+    return res.json({ replay });
+  } catch (error: any) {
+    console.error('[Scanner] Replay error:', error);
+    return res.status(500).json({ error: error?.message || 'Failed to get trade replay' });
   }
 };
 

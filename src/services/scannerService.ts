@@ -17,6 +17,8 @@ type VolatilitySessionBucket = 'asian' | 'london' | 'newyork';
 export type ScanResultStatus = 'active' | 'triggered' | 'closed' | 'invalidated' | 'expired';
 export type AlertType = 'info' | 'trade' | 'warning';
 export type ScanCloseReason = 'tp' | 'sl' | null;
+export type TradeReplayOutcome = 'open' | 'tp' | 'sl';
+export type CompressedReplayCandle = [number, number, number, number, number];
 
 export interface ScannerSession {
   id: string;
@@ -38,6 +40,9 @@ export interface ScanResult {
   slReason?: string | null;
   takeProfit: number;
   takeProfit2: number | null;
+  emaMomentum?: boolean | null;
+  emaStack?: 'bullish' | 'bearish' | 'neutral' | null;
+  emaEntryValid?: boolean | null;
   confidenceScore: number;
   marketRegime: MarketRegime;
   strategy: string | null;
@@ -61,6 +66,26 @@ export interface ScannerAlert {
   type: AlertType;
   read: boolean;
   createdAt: string;
+}
+
+export interface TradeReplay {
+  id: string;
+  scanResultId: string;
+  userId: string;
+  symbol: string;
+  timeframe: string;
+  direction: 'buy' | 'sell';
+  entry: number;
+  stopLoss: number;
+  takeProfit: number;
+  takeProfit2: number | null;
+  triggeredAt: string;
+  closedAt: string | null;
+  outcome: TradeReplayOutcome;
+  preEntryCandles: CompressedReplayCandle[];
+  replayCandles: CompressedReplayCandle[];
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface PotentialTrade {
@@ -99,6 +124,7 @@ type RecentScannerActivity = Pick<ScanResult, 'symbol' | 'direction' | 'sessionT
 const SCANNER_SESSION_TABLE = 'ScannerSession';
 const SCAN_RESULT_TABLE = 'ScanResult';
 const SCANNER_ALERT_TABLE = 'ScannerAlert';
+const TRADE_REPLAY_TABLE = 'TradeReplay';
 
 // ── Session windows (EST / America/New_York) ──
 
@@ -476,6 +502,102 @@ async function loadScannerCandles(symbol: string, timeframe: 'M15' | 'H1', limit
   return [];
 }
 
+function compressReplayCandles(candles: Candle[]): CompressedReplayCandle[] {
+  return candles.map((candle) => [
+    Math.floor(candle.time),
+    candle.open,
+    candle.high,
+    candle.low,
+    candle.close,
+  ]);
+}
+
+function findClosestReplayIndex(candles: Candle[], timestampMs: number): number {
+  let closestIndex = 0;
+  let closestDistance = Number.POSITIVE_INFINITY;
+
+  for (let index = 0; index < candles.length; index++) {
+    const distance = Math.abs(candles[index].time - timestampMs);
+    if (distance < closestDistance) {
+      closestDistance = distance;
+      closestIndex = index;
+    }
+  }
+
+  return closestIndex;
+}
+
+function sliceReplayCandles(
+  candles: Candle[],
+  triggeredAt: string,
+  closedAt?: string | null,
+): { preEntryCandles: Candle[]; replayCandles: Candle[] } {
+  const sorted = [...candles].sort((left, right) => left.time - right.time);
+  const triggeredAtMs = new Date(triggeredAt).getTime();
+  const closedAtMs = closedAt ? new Date(closedAt).getTime() : null;
+
+  if (!Number.isFinite(triggeredAtMs) || sorted.length === 0) {
+    return { preEntryCandles: [], replayCandles: [] };
+  }
+
+  const entryIndex = findClosestReplayIndex(sorted, triggeredAtMs);
+  const closeIndex = closedAtMs != null && Number.isFinite(closedAtMs)
+    ? findClosestReplayIndex(sorted, closedAtMs)
+    : sorted.length - 1;
+  const boundedCloseIndex = Math.max(entryIndex, closeIndex);
+
+  return {
+    preEntryCandles: sorted.slice(Math.max(0, entryIndex - 50), entryIndex),
+    replayCandles: sorted.slice(entryIndex, boundedCloseIndex + 1),
+  };
+}
+
+async function upsertTradeReplay(result: ScanResult, options: {
+  triggeredAt: string;
+  closedAt?: string | null;
+  outcome?: TradeReplayOutcome;
+}): Promise<TradeReplay | null> {
+  const timeframe = result.timeframe === 'H1' ? 'H1' : 'M15';
+  const candles = await loadScannerCandles(result.symbol, timeframe, 400, 80);
+  if (candles.length < 55) {
+    return null;
+  }
+
+  const { preEntryCandles, replayCandles } = sliceReplayCandles(candles, options.triggeredAt, options.closedAt);
+  if (replayCandles.length === 0) {
+    return null;
+  }
+
+  const { data, error } = await supabase
+    .from(TRADE_REPLAY_TABLE)
+    .upsert({
+      scanResultId: result.id,
+      userId: result.userId,
+      symbol: result.symbol,
+      timeframe: result.timeframe,
+      direction: result.direction,
+      entry: result.entry,
+      stopLoss: result.stopLoss,
+      takeProfit: result.takeProfit,
+      takeProfit2: result.takeProfit2,
+      triggeredAt: options.triggeredAt,
+      closedAt: options.closedAt ?? null,
+      outcome: options.outcome ?? 'open',
+      preEntryCandles: compressReplayCandles(preEntryCandles),
+      replayCandles: compressReplayCandles(replayCandles),
+      updatedAt: new Date().toISOString(),
+    }, { onConflict: 'scanResultId' })
+    .select('*')
+    .single();
+
+  if (error) {
+    console.error(`[Scanner] Failed to upsert trade replay for ${result.symbol}:`, error);
+    return null;
+  }
+
+  return data as TradeReplay;
+}
+
 function isTrendAlignedForDirection(direction: 'buy' | 'sell', trend: TrendDirection): boolean {
   return (direction === 'buy' && trend === 'bullish') || (direction === 'sell' && trend === 'bearish');
 }
@@ -588,6 +710,9 @@ function promotePotentialToScanCycleResult(potential: PotentialTradeSetup): Scan
     slReason: potential.slReason ?? null,
     takeProfit: potential.takeProfit,
     takeProfit2: potential.takeProfit2,
+    emaMomentum: potential.emaMomentum,
+    emaStack: potential.emaStack,
+    emaEntryValid: potential.emaEntryValid,
     confidenceScore: potential.confidenceScore,
     marketRegime: potential.marketRegime,
     strategy: potential.strategy.replace(/ Watchlist$/i, ''),
@@ -743,6 +868,48 @@ export async function getScanResults(
   }
 
   return attachLivePricesToResults(scopedResults);
+}
+
+export async function getTradeReplayForUser(userId: string, scanResultId: string): Promise<TradeReplay | null> {
+  const { data: resultData, error: resultError } = await supabase
+    .from(SCAN_RESULT_TABLE)
+    .select('*')
+    .eq('id', scanResultId)
+    .eq('userId', userId)
+    .limit(1)
+    .maybeSingle();
+
+  if (resultError) {
+    throw new Error(resultError.message);
+  }
+
+  const result = resultData as ScanResult | null;
+  if (!result || !result.triggeredAt) {
+    return null;
+  }
+
+  const { data, error } = await supabase
+    .from(TRADE_REPLAY_TABLE)
+    .select('*')
+    .eq('scanResultId', scanResultId)
+    .eq('userId', userId)
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  const replay = data as TradeReplay | null;
+  if (replay && (result.status !== 'closed' || replay.outcome === (result.closeReason ?? 'open'))) {
+    return replay;
+  }
+
+  return upsertTradeReplay(result, {
+    triggeredAt: result.triggeredAt,
+    closedAt: result.closedAt,
+    outcome: result.closeReason ?? 'open',
+  });
 }
 
 export async function getAlertsForUser(
@@ -1014,9 +1181,15 @@ async function processResultLifecycle(
       : highPrice >= result.entry;
 
     if (entryTriggered) {
+      const triggeredAt = new Date().toISOString();
       await updateScanResult(result.id, {
         status: 'triggered',
-        triggeredAt: new Date().toISOString(),
+        triggeredAt,
+      });
+
+      await upsertTradeReplay(result, {
+        triggeredAt,
+        outcome: 'open',
       });
 
       const alert = await insertAlert({
@@ -1082,11 +1255,20 @@ async function processResultLifecycle(
 
     if (hitTakeProfit || hitStopLoss) {
       const closeReason: ScanCloseReason = hitTakeProfit ? 'tp' : 'sl';
+      const closedAt = new Date().toISOString();
       await updateScanResult(result.id, {
         status: 'closed',
         closeReason,
-        closedAt: new Date().toISOString(),
+        closedAt,
       });
+
+      if (result.triggeredAt) {
+        await upsertTradeReplay(result, {
+          triggeredAt: result.triggeredAt,
+          closedAt,
+          outcome: closeReason ?? 'open',
+        });
+      }
 
       const alert = await insertAlert({
         userId: result.userId,
@@ -1251,6 +1433,9 @@ interface ScanCycleResult {
   slReason?: string | null;
   takeProfit: number;
   takeProfit2: number | null;
+  emaMomentum: boolean;
+  emaStack: 'bullish' | 'bearish' | 'neutral';
+  emaEntryValid: boolean;
   confidenceScore: number;
   marketRegime: MarketRegime;
   strategy: string;
@@ -1341,6 +1526,9 @@ async function scanSymbol(symbol: string): Promise<ScanCycleResult | null> {
       slReason: setup.slReason ?? null,
       takeProfit: setup.takeProfit,
       takeProfit2: setup.takeProfit2,
+      emaMomentum: setup.emaMomentum,
+      emaStack: setup.emaStack,
+      emaEntryValid: setup.emaEntryValid,
       confidenceScore: setup.confidenceScore,
       marketRegime: setup.marketRegime,
       strategy: setup.strategy,
@@ -1469,6 +1657,9 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
         stopLoss: result.stopLoss,
         takeProfit: result.takeProfit,
         takeProfit2: result.takeProfit2,
+        emaMomentum: result.emaMomentum,
+        emaStack: result.emaStack,
+        emaEntryValid: result.emaEntryValid,
         confidenceScore: result.confidenceScore,
         marketRegime: result.marketRegime,
         strategy: result.strategy,

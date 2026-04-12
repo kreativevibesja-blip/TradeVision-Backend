@@ -18,6 +18,14 @@ export interface Candle {
 // ── Result types ──
 
 export type TrendDirection = 'bullish' | 'bearish' | 'ranging';
+export type MarketState = 'bullish' | 'bearish' | 'range' | 'chop' | 'unclear';
+export type EmaStackState = 'bullish' | 'bearish' | 'neutral';
+
+export interface MarketConditionAssessment {
+  marketState: MarketState;
+  confidence: number;
+  reason: string;
+}
 
 export interface LiquiditySweep {
   type: 'sweep_high' | 'sweep_low';
@@ -63,6 +71,9 @@ export interface TradeSetup {
   slReason?: 'Zone-based buffered SL' | 'Swing-based ATR fallback SL' | 'EMA200-anchored SL';
   takeProfit: number;
   takeProfit2: number;
+  emaMomentum: boolean;
+  emaStack: EmaStackState;
+  emaEntryValid: boolean;
   score: number;
   confidenceScore: number;
   marketRegime: MarketRegime;
@@ -108,6 +119,9 @@ export interface PotentialTradeSetup {
   slReason?: 'Zone-based buffered SL' | 'Swing-based ATR fallback SL' | 'EMA200-anchored SL';
   takeProfit: number;
   takeProfit2: number;
+  emaMomentum: boolean;
+  emaStack: EmaStackState;
+  emaEntryValid: boolean;
   activationProbability: number;
   confidenceScore: number;
   marketRegime: MarketRegime;
@@ -179,6 +193,206 @@ function detectMacroTrend(candles: Candle[], emaTrend: EmaTrendContext): TrendDi
   return 'ranging';
 }
 
+function detectRecentStructure(candles: Candle[]): TrendDirection {
+  const recent = candles.slice(-Math.min(600, candles.length));
+  const swings = findSwingHighsLows(recent);
+  const highs = swings.filter((swing) => swing.type === 'high').slice(-2);
+  const lows = swings.filter((swing) => swing.type === 'low').slice(-2);
+
+  if (highs.length >= 2 && lows.length >= 2) {
+    if (highs[1].price > highs[0].price && lows[1].price > lows[0].price) return 'bullish';
+    if (highs[1].price < highs[0].price && lows[1].price < lows[0].price) return 'bearish';
+  }
+
+  return detectTrendFromLookback(recent, Math.min(20, Math.max(8, recent.length - 1)), Math.max(4, Math.floor(Math.min(20, Math.max(8, recent.length - 1)) * 0.45)));
+}
+
+function countRecentEmaCrosses(candles: Candle[]): number {
+  if (candles.length < 30) {
+    return 0;
+  }
+
+  const ema50Series = calculateEmaSeries(candles, 50);
+  const ema200Series = calculateEmaSeries(candles, 200);
+  const lookback = Math.min(12, ema50Series.length, ema200Series.length);
+
+  if (lookback < 3) {
+    return 0;
+  }
+
+  let crosses = 0;
+  for (let index = ema50Series.length - lookback + 1; index < ema50Series.length; index++) {
+    const previousDelta = ema50Series[index - 1].value - ema200Series[index - 1].value;
+    const currentDelta = ema50Series[index].value - ema200Series[index].value;
+    if ((previousDelta <= 0 && currentDelta > 0) || (previousDelta >= 0 && currentDelta < 0)) {
+      crosses++;
+    }
+  }
+
+  return crosses;
+}
+
+function isEma50Flat(candles: Candle[], emaTrend: EmaTrendContext): boolean {
+  if (emaTrend.ema50 == null || candles.length < 60) {
+    return false;
+  }
+
+  const ema50Series = calculateEmaSeries(candles, 50);
+  if (ema50Series.length < 12) {
+    return false;
+  }
+
+  const recent = ema50Series.slice(-10);
+  const baselineRange = Math.max(averageRange(candles, 20), 0.0001);
+  const slope = Math.abs(recent[recent.length - 1].value - recent[0].value);
+  return slope <= baselineRange * 1.1;
+}
+
+function countDisplacementMoves(candles: Candle[]): number {
+  if (candles.length < 6) {
+    return 0;
+  }
+
+  const avgBody = Math.max(averageBody(candles, 20), 0.0001);
+  let moves = 0;
+
+  for (let index = Math.max(1, candles.length - 12); index < candles.length; index++) {
+    const current = candles[index];
+    const previous = candles[index - 1];
+    const body = Math.abs(current.close - current.open);
+    const range = Math.max(current.high - current.low, 0.0001);
+    const bullishBreak = current.close > current.open && current.close >= current.low + range * 0.7 && current.close > previous.high;
+    const bearishBreak = current.close < current.open && current.close <= current.high - range * 0.7 && current.close < previous.low;
+
+    if (body >= avgBody * 1.15 && (bullishBreak || bearishBreak)) {
+      moves++;
+    }
+  }
+
+  return moves;
+}
+
+function hasHeavyCandleOverlap(candles: Candle[]): boolean {
+  const recent = candles.slice(-Math.min(20, candles.length));
+  if (recent.length < 6) {
+    return false;
+  }
+
+  let overlappingPairs = 0;
+  for (let index = 1; index < recent.length; index++) {
+    const previous = recent[index - 1];
+    const current = recent[index];
+    const overlap = Math.min(previous.high, current.high) - Math.max(previous.low, current.low);
+    const smallerRange = Math.max(Math.min(previous.high - previous.low, current.high - current.low), 0.0001);
+    if (overlap > 0 && overlap / smallerRange >= 0.55) {
+      overlappingPairs++;
+    }
+  }
+
+  return overlappingPairs / Math.max(recent.length - 1, 1) >= 0.65;
+}
+
+function countFakeBreakouts(candles: Candle[]): number {
+  const recent = candles.slice(-Math.min(24, candles.length));
+  if (recent.length < 10) {
+    return 0;
+  }
+
+  let fakeBreakouts = 0;
+  for (let index = 6; index < recent.length; index++) {
+    const window = recent.slice(Math.max(0, index - 6), index);
+    const resistance = Math.max(...window.map((candle) => candle.high));
+    const support = Math.min(...window.map((candle) => candle.low));
+    const current = recent[index];
+
+    if (current.high > resistance && current.close <= resistance) {
+      fakeBreakouts++;
+      continue;
+    }
+
+    if (current.low < support && current.close >= support) {
+      fakeBreakouts++;
+    }
+  }
+
+  return fakeBreakouts;
+}
+
+export function detectMarketCondition(candles: Candle[], emaTrend: EmaTrendContext): MarketConditionAssessment {
+  if (candles.length < 50 || emaTrend.ema50 == null || emaTrend.ema200 == null) {
+    return {
+      marketState: 'unclear',
+      confidence: 2,
+      reason: 'Not enough structured price or EMA data to classify market conditions.',
+    };
+  }
+
+  const recent = candles.slice(-Math.min(600, candles.length));
+  const currentPrice = recent[recent.length - 1].close;
+  const recentStructure = detectRecentStructure(recent);
+  const range = detectSupportResistanceRange(candles);
+  const ema50Flat = isEma50Flat(candles, emaTrend);
+  const emaCrossCount = countRecentEmaCrosses(candles);
+  const atr = computeAtr(recent, 14);
+  const atrBaseline = Math.max(averageRange(recent, Math.min(50, recent.length)), 0.0001);
+  const lowAtr = atr > 0 && atr <= atrBaseline * 0.85;
+  const heavyOverlap = hasHeavyCandleOverlap(recent);
+  const displacementMoves = countDisplacementMoves(recent);
+  const fakeBreakouts = countFakeBreakouts(recent);
+
+  const bullishTrend = currentPrice > emaTrend.ema200 && emaTrend.ema50 > emaTrend.ema200 && recentStructure === 'bullish';
+  const bearishTrend = currentPrice < emaTrend.ema200 && emaTrend.ema50 < emaTrend.ema200 && recentStructure === 'bearish';
+  const rangeCondition = Boolean(range)
+    && recentStructure === 'ranging'
+    && (ema50Flat || emaCrossCount >= 2);
+  const chopCondition = lowAtr
+    && heavyOverlap
+    && displacementMoves === 0
+    && fakeBreakouts >= 2;
+
+  if (chopCondition) {
+    const confidence = Math.min(10, 6 + Number(lowAtr) + Number(heavyOverlap) + Math.min(fakeBreakouts, 2));
+    return {
+      marketState: 'chop',
+      confidence,
+      reason: `Low ATR, overlapping candles, no displacement, and ${fakeBreakouts} fake breakout${fakeBreakouts === 1 ? '' : 's'} point to chop.`,
+    };
+  }
+
+  if (rangeCondition) {
+    const confidence = Math.min(10, 5 + Number(Boolean(range)) + Number(ema50Flat) + Math.min(emaCrossCount, 3));
+    return {
+      marketState: 'range',
+      confidence,
+      reason: `Price is oscillating between support and resistance without consistent higher highs or lower lows, while EMA50 is flat or crossing EMA200 ${emaCrossCount} time${emaCrossCount === 1 ? '' : 's'}.`,
+    };
+  }
+
+  if (bullishTrend) {
+    const confidence = Math.min(10, 6 + Number(currentPrice > emaTrend.ema200) + Number(emaTrend.ema50 > emaTrend.ema200) + Number(recentStructure === 'bullish'));
+    return {
+      marketState: 'bullish',
+      confidence,
+      reason: 'Price is above EMA200, EMA50 is stacked above EMA200, and recent structure is printing higher highs and higher lows.',
+    };
+  }
+
+  if (bearishTrend) {
+    const confidence = Math.min(10, 6 + Number(currentPrice < emaTrend.ema200) + Number(emaTrend.ema50 < emaTrend.ema200) + Number(recentStructure === 'bearish'));
+    return {
+      marketState: 'bearish',
+      confidence,
+      reason: 'Price is below EMA200, EMA50 is stacked below EMA200, and recent structure is printing lower highs and lower lows.',
+    };
+  }
+
+  return {
+    marketState: 'unclear',
+    confidence: 4,
+    reason: 'Market conditions are mixed: trend structure, range behavior, and chop filters do not align cleanly enough to allow a trade.',
+  };
+}
+
 type TrendFilterLogReason = 'trend-aligned' | 'counter-trend-approved' | 'counter-trend-rejected';
 
 function logTrendFilter(symbol: string, direction: 'buy' | 'sell', reason: TrendFilterLogReason, detail?: string) {
@@ -237,6 +451,14 @@ interface Ema50ExecutionContext {
   ema50Cross: 'bullish' | 'bearish' | null;
 }
 
+interface Ema20EntryContext {
+  emaMomentum: boolean;
+  emaStack: EmaStackState;
+  emaEntryValid: boolean;
+  hasReclaimedEma20: boolean;
+  overextended: boolean;
+}
+
 function analyzeEma50Execution(
   candles: Candle[],
   emaTrend: EmaTrendContext,
@@ -283,6 +505,48 @@ function analyzeEma50Execution(
   }
 
   return { nearEma50, ema50ZoneConfluence, ema50Above200, ema50Cross };
+}
+
+function analyzeEma20EntryContext(
+  direction: 'buy' | 'sell',
+  candles: Candle[],
+  emaTrend: EmaTrendContext,
+  currentPrice: number,
+): Ema20EntryContext {
+  if (emaTrend.ema20 == null || emaTrend.ema50 == null || emaTrend.ema200 == null || candles.length < 21) {
+    return {
+      emaMomentum: false,
+      emaStack: 'neutral',
+      emaEntryValid: false,
+      hasReclaimedEma20: false,
+      overextended: false,
+    };
+  }
+
+  const ema20 = emaTrend.ema20;
+  const ema20Series = calculateEmaSeries(candles, 20);
+  const ema20Reference = ema20Series[Math.max(0, ema20Series.length - 4)]?.value ?? ema20;
+  const ema20SlopeUp = ema20 > ema20Reference;
+  const ema20SlopeDown = ema20 < ema20Reference;
+  const hasReclaimedEma20 = direction === 'buy' ? currentPrice > ema20 : currentPrice < ema20;
+  const emaMomentum = direction === 'buy'
+    ? hasReclaimedEma20 && ema20SlopeUp
+    : hasReclaimedEma20 && ema20SlopeDown;
+  const emaStack: EmaStackState = ema20 > emaTrend.ema50 && emaTrend.ema50 > emaTrend.ema200
+    ? 'bullish'
+    : ema20 < emaTrend.ema50 && emaTrend.ema50 < emaTrend.ema200
+      ? 'bearish'
+      : 'neutral';
+  const atr = computeAtr(candles, 14);
+  const overextended = atr > 0 && Math.abs(currentPrice - ema20) > atr * 1.5;
+
+  return {
+    emaMomentum,
+    emaStack,
+    emaEntryValid: emaMomentum && !overextended,
+    hasReclaimedEma20,
+    overextended,
+  };
 }
 
 // ── 2. Liquidity Sweep Detection ──
@@ -1249,6 +1513,9 @@ function buildSupportResistanceTradeSetup(
     stopLoss,
     takeProfit,
     takeProfit2,
+    emaMomentum: alignedMomentum,
+    emaStack: 'neutral',
+    emaEntryValid: alignedMomentum,
     score: Math.min(9, 4 + confirmationCount),
     confidenceScore,
     marketRegime: 'range',
@@ -1450,6 +1717,9 @@ function buildSupportResistanceRangePotential(
     stopLoss,
     takeProfit,
     takeProfit2,
+    emaMomentum: alignedMomentum,
+    emaStack: 'neutral',
+    emaEntryValid: alignedMomentum,
     activationProbability: Math.min(95, activationProbability),
     confidenceScore,
     marketRegime: 'range',
@@ -2234,6 +2504,7 @@ function buildPotentialCandidate({
   const isReversalSetup = direction === 'buy' ? bullishReversal : bearishReversal;
   // EMA 50 execution context
   const ema50Exec = analyzeEma50Execution(candles, emaTrend, directionalZone, directionalFvg);
+  const ema20Entry = analyzeEma20EntryContext(direction, candles, emaTrend, currentPrice);
   const emaStackAligned = direction === 'buy' ? ema50Exec.ema50Above200 : !ema50Exec.ema50Above200;
   const emaAligned = emaStackAligned;
   const volatilitySymbol = isVolatilitySymbol(symbol);
@@ -2253,6 +2524,8 @@ function buildPotentialCandidate({
   const hasMss = isMssAligned(direction, mss);
   const hasBos = alignedStructure || hasMss;
   const hasLiquiditySweep = alignedSweep || hasEqlSweep;
+  const emaStackSupportsDirection = (direction === 'buy' && ema20Entry.emaStack === 'bullish') || (direction === 'sell' && ema20Entry.emaStack === 'bearish');
+  const awaitingEma20Reclaim = hasLiquiditySweep && freshDisplacement && !ema20Entry.hasReclaimedEma20;
   const hasStrongZone = directionalZone ? isMeaningfulZone(symbol, directionalZone, candles, currentPrice) : false;
   const hasContinuationAreaReaction = nearDirectionalZone || freshReaction || poiReclaim || hasBreaker || hasFvgReaction;
   const macroCounterTrend = macroTrendDirection !== null && macroTrendDirection !== direction;
@@ -2388,6 +2661,20 @@ function buildPotentialCandidate({
     return null;
   }
 
+  if (ema20Entry.overextended) {
+    console.log(`[scanner-engine] Blocked ${symbol} ${direction.toUpperCase()} — Overextended move, poor entry location`);
+    return null;
+  }
+
+  if (!ema20Entry.emaMomentum && !awaitingEma20Reclaim) {
+    console.log(`[scanner-engine] Blocked ${symbol} ${direction.toUpperCase()} — No ${direction === 'buy' ? 'bullish' : 'bearish'} momentum confirmation (EMA20)`);
+    return null;
+  }
+
+  if (emaStackSupportsDirection) {
+    probability += 6;
+  }
+
   const trendPriorityDecision = evaluateTrendPriorityFilter({
     symbol,
     direction,
@@ -2409,6 +2696,20 @@ function buildPotentialCandidate({
   const contextLabels: string[] = [];
 
   contextLabels.push(trendPriorityDecision.reason);
+
+  if (ema20Entry.emaMomentum) {
+    fulfilledConditions.push(direction === 'buy' ? 'EMA20 bullish momentum confirmation is active' : 'EMA20 bearish momentum confirmation is active');
+    contextLabels.push(direction === 'buy' ? 'EMA20 momentum up' : 'EMA20 momentum down');
+  } else if (awaitingEma20Reclaim) {
+    requiredTriggers.unshift(direction === 'buy' ? 'Price reclaim above EMA20 before entry' : 'Price reclaim below EMA20 before entry');
+    contextLabels.push('Awaiting EMA20 reclaim');
+    probability = Math.max(28, probability - 10);
+  }
+
+  if (emaStackSupportsDirection) {
+    fulfilledConditions.push(direction === 'buy' ? 'EMA20 > EMA50 > EMA200 bullish stack' : 'EMA20 < EMA50 < EMA200 bearish stack');
+    contextLabels.push(direction === 'buy' ? 'EMA stack bullish' : 'EMA stack bearish');
+  }
 
   if (mode === 'trend') {
     fulfilledConditions.push(trend === 'bullish' ? 'Bullish trend context' : trend === 'bearish' ? 'Bearish trend context' : 'Range-to-reversal context');
@@ -2649,6 +2950,10 @@ function buildPotentialCandidate({
 
   let cappedConfidenceScore = confirmationScore;
 
+  if (emaStackSupportsDirection) {
+    cappedConfidenceScore = Math.min(10, cappedConfidenceScore + 1);
+  }
+
   if (macroCounterTrend && !hasBos) {
     cappedConfidenceScore = Math.min(cappedConfidenceScore, 7);
   }
@@ -2678,6 +2983,9 @@ function buildPotentialCandidate({
     slReason: stopLossDecision.slReason,
     takeProfit,
     takeProfit2,
+    emaMomentum: ema20Entry.emaMomentum,
+    emaStack: ema20Entry.emaStack,
+    emaEntryValid: !awaitingEma20Reclaim && ema20Entry.emaEntryValid,
     activationProbability: Math.min(95, probability),
     confidenceScore: cappedConfidenceScore,
     marketRegime: mode === 'trend' ? 'trend' : 'reversal',
@@ -3169,6 +3477,7 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   const trend = detectTrend(candles);
   const broaderTrend = detectContextTrend(candles);
   const emaTrend = analyzeEmaTrend(candles);
+  const marketCondition = detectMarketCondition(candles, emaTrend);
   const currentPrice = candles[candles.length - 1].close;
   const range = detectSupportResistanceRange(candles);
   const lookLeftCandles = candles.slice(-Math.min(500, candles.length));
@@ -3181,11 +3490,15 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   const bearishReversal = bearishReversalPattern.matched;
   const macroTrend = detectMacroTrend(candles, emaTrend);
 
-  // Macro ranging → prioritize range trades (buy support, sell resistance)
-  if (macroTrend === 'ranging') {
+  if (marketCondition.marketState === 'chop' || marketCondition.marketState === 'unclear') {
+    console.log(`[scanner-engine] Blocked ${symbol} by market state ${marketCondition.marketState}: ${marketCondition.reason}`);
+    return null;
+  }
+
+  if (marketCondition.marketState === 'range') {
     const rangeTradeSetup = buildSupportResistanceTradeSetup(symbol, candles, broaderTrend, emaTrend);
     if (rangeTradeSetup) return rangeTradeSetup;
-    if (trend === 'ranging' && !bullishReversal && !bearishReversal) return null;
+    return null;
   }
 
   const bullishArea = toPriceArea(findDirectionalZone('buy', zones, currentPrice, candles, symbol) ?? findDirectionalFvg('buy', gaps, candles, symbol));
@@ -3194,25 +3507,7 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   const bearishPoiReclaim = hasPoiReclaim('sell', bearishArea, candles);
 
   let direction: 'buy' | 'sell';
-  if (macroTrend === 'bullish') {
-    direction = bearishReversal && !bullishReversal ? 'sell' : 'buy';
-  } else if (macroTrend === 'bearish') {
-    direction = bullishReversal && !bearishReversal ? 'buy' : 'sell';
-  } else {
-    // Macro ranging — use micro trend / reversal patterns for direction
-    if (trend === 'ranging' && !bullishReversal && !bearishReversal) return null;
-    direction = bullishReversal
-      ? 'buy'
-      : bearishReversal
-        ? 'sell'
-        : currentZone?.type === 'demand' && bullishPoiReclaim
-          ? 'buy'
-          : currentZone?.type === 'supply' && bearishPoiReclaim
-            ? 'sell'
-          : trend === 'bullish'
-            ? 'buy'
-            : 'sell';
-  }
+  direction = marketCondition.marketState === 'bullish' ? 'buy' : 'sell';
 
   // Only count a reversal when it aligns with the chosen direction
   const isReversalSetup = (direction === 'buy' && bullishReversal) || (direction === 'sell' && bearishReversal);
@@ -3222,6 +3517,7 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
 
   // EMA 50 execution analysis
   const ema50Exec = analyzeEma50Execution(candles, emaTrend, directionalZone, directionalFvg);
+  const ema20Entry = analyzeEma20EntryContext(direction, candles, emaTrend, currentPrice);
   const emaStackAligned = direction === 'buy' ? ema50Exec.ema50Above200 : !ema50Exec.ema50Above200;
   const ema50CrossAligned =
     (direction === 'buy' && ema50Exec.ema50Cross === 'bullish') ||
@@ -3267,6 +3563,8 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   const hasMss = isMssAligned(direction, mss);
   const hasBos = alignedStructure || hasMss;
   const hasLiquiditySweep = alignedSweep || hasEqlSweep;
+  const emaStackSupportsDirection = (direction === 'buy' && ema20Entry.emaStack === 'bullish') || (direction === 'sell' && ema20Entry.emaStack === 'bearish');
+  const awaitingEma20Reclaim = hasLiquiditySweep && freshDisplacement && !ema20Entry.hasReclaimedEma20;
   const hasStrongZone = directionalZone ? isMeaningfulZone(symbol, directionalZone, candles, currentPrice) : false;
   const volatilitySymbol = isVolatilitySymbol(symbol);
   const trendDirection = toTradeDirection(trend);
@@ -3355,6 +3653,21 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
     return null;
   }
 
+  if (ema20Entry.overextended) {
+    console.log(`[scanner-engine] Blocked ${symbol} ${direction.toUpperCase()} — Overextended move, poor entry location`);
+    return null;
+  }
+
+  if (awaitingEma20Reclaim) {
+    console.log(`[scanner-engine] Delayed ${symbol} ${direction.toUpperCase()} — waiting for EMA20 reclaim after sweep and displacement`);
+    return null;
+  }
+
+  if (!ema20Entry.emaMomentum) {
+    console.log(`[scanner-engine] Blocked ${symbol} ${direction.toUpperCase()} — No ${direction === 'buy' ? 'bullish' : 'bearish'} momentum confirmation (EMA20)`);
+    return null;
+  }
+
   // EMA 50/200 not stacked for this direction — need extra confirmation
   // EMA 50 cross already confirms intent so it bypasses the stack requirement
   if (!emaAligned && !isReversalSetup && !ema50CrossAligned && directionalConfirmationCount < 3) return null;
@@ -3396,9 +3709,13 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   if (direction === 'sell' && stopLoss <= entry) return null;
 
   const confirmations: SetupConfirmations = { sweep, engulfing, rejection, structure };
-  const cappedConfidenceScore = macroCounterTrend && !hasBos
+  let cappedConfidenceScore = macroCounterTrend && !hasBos
     ? Math.min(confirmationScore, 7)
     : confirmationScore;
+
+  if (emaStackSupportsDirection) {
+    cappedConfidenceScore = Math.min(10, cappedConfidenceScore + 1);
+  }
 
   const candidateSetup: TradeSetup = {
     symbol,
@@ -3408,6 +3725,9 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
     slReason: stopLossDecision.slReason,
     takeProfit,
     takeProfit2,
+    emaMomentum: ema20Entry.emaMomentum,
+    emaStack: ema20Entry.emaStack,
+    emaEntryValid: ema20Entry.emaEntryValid,
     score,
     confidenceScore: cappedConfidenceScore,
     marketRegime: isReversalSetup ? 'reversal' : 'trend',
@@ -3539,6 +3859,7 @@ export function analyzePotentialTrades(
   const trend = context?.trend ?? detectTrend(candles);
   const broaderTrend = context?.broaderTrend ?? detectContextTrend(candles);
   const emaTrend = context?.emaTrend ?? analyzeEmaTrend(candles);
+  const marketCondition = detectMarketCondition(candles, emaTrend);
   const macroTrend = detectMacroTrend(candles, emaTrend);
   const currentPrice = context?.currentPrice ?? candles[candles.length - 1].close;
   const lookLeftCandles = candles.slice(-Math.min(500, candles.length));
@@ -3553,42 +3874,16 @@ export function analyzePotentialTrades(
   const bullishPoiReclaim = context?.bullishPoiReclaim ?? hasPoiReclaim('buy', bullishArea, candles);
   const bearishPoiReclaim = context?.bearishPoiReclaim ?? hasPoiReclaim('sell', bearishArea, candles);
 
-  // Macro ranging → only range candidates (buy support, sell resistance)
-  if (macroTrend === 'ranging') {
-    if (trend === 'ranging' && !bullishReversal && !bearishReversal) {
-      return rangeCandidate ? [rangeCandidate] : [];
-    }
-
-    const candidates: PotentialTradeSetup[] = [];
-    if (rangeCandidate) candidates.push(rangeCandidate);
-
-    // In ranging macro, allow micro-trend direction as a secondary candidate
-    const microDirection = bullishReversal
-      ? 'buy' as const
-      : bearishReversal
-        ? 'sell' as const
-        : trend === 'bullish'
-          ? 'buy' as const
-          : trend === 'bearish'
-            ? 'sell' as const
-            : null;
-
-    if (microDirection) {
-      const microCandidate = buildPotentialCandidate({
-        symbol, candles, trend, broaderTrend, macroTrend, emaTrend, currentPrice,
-        zones, gaps, currentZone, direction: microDirection, mode: 'trend',
-        bullishReversal, bearishReversal, bullishPoiReclaim, bearishPoiReclaim,
-      });
-      if (microCandidate) candidates.push(microCandidate);
-    }
-
-    return candidates
-      .filter((c, i, a) => a.findIndex(x => x.direction === c.direction && x.strategy === c.strategy) === i)
-      .sort((a, b) => b.activationProbability - a.activationProbability);
+  if (marketCondition.marketState === 'chop' || marketCondition.marketState === 'unclear') {
+    console.log(`[scanner-engine] Blocked potential ${symbol} by market state ${marketCondition.marketState}: ${marketCondition.reason}`);
+    return [];
   }
 
-  const macroDirection: 'buy' | 'sell' = macroTrend === 'bullish' ? 'buy' : 'sell';
-  const counterDirection: 'buy' | 'sell' = macroDirection === 'buy' ? 'sell' : 'buy';
+  if (marketCondition.marketState === 'range') {
+    return rangeCandidate ? [rangeCandidate] : [];
+  }
+
+  const macroDirection: 'buy' | 'sell' = marketCondition.marketState === 'bullish' ? 'buy' : 'sell';
 
   const candidates: PotentialTradeSetup[] = [];
 
@@ -3599,22 +3894,7 @@ export function analyzePotentialTrades(
   });
   if (trendCandidate) candidates.push(trendCandidate);
 
-  const counterCandidate = buildPotentialCandidate({
-    symbol, candles, trend, broaderTrend, macroTrend, emaTrend, currentPrice,
-    zones, gaps, currentZone, direction: counterDirection, mode: 'counter',
-    bullishReversal, bearishReversal, bullishPoiReclaim, bearishPoiReclaim,
-  });
-  if (counterCandidate) candidates.push(counterCandidate);
-
   return candidates
     .filter((c, i, a) => a.findIndex(x => x.direction === c.direction && x.strategy === c.strategy) === i)
-    .sort((left, right) => {
-      const leftAligned = left.direction === macroDirection ? 1 : 0;
-      const rightAligned = right.direction === macroDirection ? 1 : 0;
-      if (leftAligned !== rightAligned) {
-        return rightAligned - leftAligned;
-      }
-
-      return right.activationProbability - left.activationProbability;
-    });
+    .sort((left, right) => right.activationProbability - left.activationProbability);
 }

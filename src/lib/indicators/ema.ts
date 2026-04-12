@@ -11,6 +11,7 @@ export interface EmaPoint {
 }
 
 export interface EmaTrendContext {
+  ema20: number | null;
   ema50: number | null;
   ema200: number | null;
   trend: EmaTrendBias;
@@ -35,13 +36,15 @@ export function calculateEmaSeries<T extends EmaInputCandle>(candles: T[], perio
 }
 
 export function analyzeEmaTrend<T extends EmaInputCandle>(candles: T[]): EmaTrendContext {
+  const ema20Series = calculateEmaSeries(candles, 20);
   const ema50Series = calculateEmaSeries(candles, 50);
   const ema200Series = calculateEmaSeries(candles, 200);
+  const ema20 = ema20Series[ema20Series.length - 1]?.value ?? null;
   const ema50 = ema50Series[ema50Series.length - 1]?.value ?? null;
   const ema200 = ema200Series[ema200Series.length - 1]?.value ?? null;
 
   if (ema50 == null || ema200 == null || candles.length === 0) {
-    return { ema50, ema200, trend: 'ranging' };
+    return { ema20, ema50, ema200, trend: 'ranging' };
   }
 
   const close = candles[candles.length - 1].close;
@@ -51,14 +54,14 @@ export function analyzeEmaTrend<T extends EmaInputCandle>(candles: T[]): EmaTren
   const ema200Rising = ema200 >= ema200Reference;
 
   if (close > ema50 && ema50 > ema200 && ema50Rising && ema200Rising) {
-    return { ema50, ema200, trend: 'bullish' };
+    return { ema20, ema50, ema200, trend: 'bullish' };
   }
 
   if (close < ema50 && ema50 < ema200 && !ema50Rising && !ema200Rising) {
-    return { ema50, ema200, trend: 'bearish' };
+    return { ema20, ema50, ema200, trend: 'bearish' };
   }
 
-  return { ema50, ema200, trend: 'ranging' };
+  return { ema20, ema50, ema200, trend: 'ranging' };
 }
 
 export function isEmaDirectionAligned(direction: 'buy' | 'sell', emaTrend: EmaTrendContext): boolean {

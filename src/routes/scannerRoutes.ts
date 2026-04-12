@@ -9,6 +9,7 @@ import {
   markRead,
   getSummary,
   getPotentials,
+  getReplay,
   streamScannerPanels,
   checkProximity,
   expireSession,
@@ -26,6 +27,7 @@ router.get('/alerts', getAlerts);
 router.post('/alerts/read', markRead);
 router.get('/summary', getSummary);
 router.get('/potentials', getPotentials);
+router.get('/results/:scanResultId/replay', getReplay);
 router.get('/stream', streamScannerPanels);
 router.post('/check-proximity', checkProximity);
 router.post('/expire', expireSession);
