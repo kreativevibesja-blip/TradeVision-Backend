@@ -221,9 +221,12 @@ function countRecentEmaCrosses(candles: Candle[]): number {
   }
 
   let crosses = 0;
-  for (let index = ema50Series.length - lookback + 1; index < ema50Series.length; index++) {
-    const previousDelta = ema50Series[index - 1].value - ema200Series[index - 1].value;
-    const currentDelta = ema50Series[index].value - ema200Series[index].value;
+  const ema50Recent = ema50Series.slice(-lookback);
+  const ema200Recent = ema200Series.slice(-lookback);
+
+  for (let index = 1; index < lookback; index++) {
+    const previousDelta = ema50Recent[index - 1].value - ema200Recent[index - 1].value;
+    const currentDelta = ema50Recent[index].value - ema200Recent[index].value;
     if ((previousDelta <= 0 && currentDelta > 0) || (previousDelta >= 0 && currentDelta < 0)) {
       crosses++;
     }
