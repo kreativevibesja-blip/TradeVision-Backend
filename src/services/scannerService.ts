@@ -165,6 +165,7 @@ const SCANNER_TIMEFRAME = 'M15';
 const LIVE_RESULT_CACHE_SYNC_MS = 20_000;
 const HIGH_CONFIDENCE_POTENTIAL_THRESHOLD = 90;
 const PREFER_HISTORY_BEFORE_CACHE_SYMBOLS = new Set(['XAUUSD']);
+const HISTORY_RATE_LIMIT_BACKOFF_MS = 60_000;
 
 const TIMEFRAME_TO_GRANULARITY: Record<'M15' | 'H1', 900 | 3600> = {
   M15: 900,
@@ -176,6 +177,7 @@ type ScanResultScope = 'all' | 'current' | 'history';
 const liveResultCache = new Map<string, Map<string, ScanResult>>();
 let liveResultCacheSyncedAt = 0;
 let liveResultCacheSyncPromise: Promise<void> | null = null;
+const historyRateLimitBackoffUntil = new Map<string, number>();
 
 // ── Potential trade cache ──
 // Potential trades are expensive to recompute every tick.  We cache
@@ -444,6 +446,51 @@ function isDuplicatePotentialAlert(userId: string, potential: Pick<PotentialTrad
   return false;
 }
 
+function getHistoryBackoffKey(symbol: string, timeframe: 'M15' | 'H1', limit: number): string {
+  return `${symbol}:${timeframe}:${limit}`;
+}
+
+function isHistoryRateLimited(symbol: string, timeframe: 'M15' | 'H1', limit: number): boolean {
+  const key = getHistoryBackoffKey(symbol, timeframe, limit);
+  const until = historyRateLimitBackoffUntil.get(key);
+  if (!until) return false;
+  if (until <= Date.now()) {
+    historyRateLimitBackoffUntil.delete(key);
+    return false;
+  }
+  return true;
+}
+
+function isDerivHistoryRateLimitError(error: unknown): boolean {
+  return error instanceof Error && /rate limit.*ticks_history|ticks_history.*rate limit/i.test(error.message);
+}
+
+async function loadHistoryScannerCandles(symbol: string, timeframe: 'M15' | 'H1', granularity: 900 | 3600, limit: number): Promise<Candle[]> {
+  if (isHistoryRateLimited(symbol, timeframe, limit)) {
+    return [];
+  }
+
+  try {
+    const historyCandles = await getDerivHistoryCandles(symbol, granularity, limit);
+    return historyCandles.map((candle) => ({
+      open: candle.open,
+      high: candle.high,
+      low: candle.low,
+      close: candle.close,
+      time: candle.time * 1000,
+    }));
+  } catch (error) {
+    if (isDerivHistoryRateLimitError(error)) {
+      const key = getHistoryBackoffKey(symbol, timeframe, limit);
+      historyRateLimitBackoffUntil.set(key, Date.now() + HISTORY_RATE_LIMIT_BACKOFF_MS);
+      console.warn(`[Scanner] Deriv history rate limited for ${symbol} ${timeframe}; backing off history requests for ${HISTORY_RATE_LIMIT_BACKOFF_MS / 1000}s.`);
+      return [];
+    }
+
+    throw error;
+  }
+}
+
 async function loadScannerCandles(symbol: string, timeframe: 'M15' | 'H1', limit: number, minimum = 200): Promise<Candle[]> {
   const granularity = TIMEFRAME_TO_GRANULARITY[timeframe];
 
@@ -465,15 +512,9 @@ async function loadScannerCandles(symbol: string, timeframe: 'M15' | 'H1', limit
   }
 
   if (PREFER_HISTORY_BEFORE_CACHE_SYMBOLS.has(symbol)) {
-    const historyCandles = await getDerivHistoryCandles(symbol, granularity, limit);
+    const historyCandles = await loadHistoryScannerCandles(symbol, timeframe, granularity, limit);
     if (historyCandles.length >= minimum) {
-      return historyCandles.map((candle) => ({
-        open: candle.open,
-        high: candle.high,
-        low: candle.low,
-        close: candle.close,
-        time: candle.time * 1000,
-      }));
+      return historyCandles;
     }
   }
 
@@ -488,15 +529,9 @@ async function loadScannerCandles(symbol: string, timeframe: 'M15' | 'H1', limit
     }));
   }
 
-  const historyCandles = await getDerivHistoryCandles(symbol, granularity, limit);
+  const historyCandles = await loadHistoryScannerCandles(symbol, timeframe, granularity, limit);
   if (historyCandles.length >= minimum) {
-    return historyCandles.map((candle) => ({
-      open: candle.open,
-      high: candle.high,
-      low: candle.low,
-      close: candle.close,
-      time: candle.time * 1000,
-    }));
+    return historyCandles;
   }
 
   return [];
