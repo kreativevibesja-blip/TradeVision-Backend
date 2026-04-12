@@ -1173,6 +1173,13 @@ async function processResultLifecycle(
       });
       alerts.push(alert);
 
+      sendPushToUser(result.userId, {
+        title: 'Trade Invalidated',
+        body: `${result.symbol} setup was invalidated before entry after price broke the stop loss level.`,
+        tag: `invalidated-${result.id}`,
+        url: '/dashboard/scanner',
+      }).catch((err) => console.error('[Push] Failed to send invalidation notification:', err));
+
       return alerts;
     }
 
