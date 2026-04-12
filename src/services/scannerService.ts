@@ -6,6 +6,8 @@ import { DERIV_SCANNER_SYMBOL_IDS, SESSION_SCANNER_SYMBOL_IDS, VOLATILITY_SCANNE
 import { scheduleScannerPanelRefreshForAllUsers, scheduleScannerPanelRefreshForUser } from '../lib/scanner/panelStream';
 import { getCooldownMinutes, isSymbolOnCooldown, allowContinuation, passesPostFirstTradeFilter, type TradeResult } from '../lib/scanner/cooldownEngine';
 import { analyzeMarket, analyzePotentialTrades, detectTrend, findSwingHighsLows, type Candle, type MarketRegime, type PotentialTradeSetup, type TradeConfirmations, type TrendDirection } from './scannerEngine';
+import { analyzeLiveChartCandles } from './liveChartAnalysis';
+import type { MarketCandle } from './marketData';
 import { sendPushToUser } from './pushService';
 import { generateAndUploadSnapshot } from './tradeSnapshot';
 
@@ -164,6 +166,8 @@ const SCANNER_SYMBOLS_BY_SESSION: Record<SessionType, readonly string[]> = {
 const SCANNER_TIMEFRAME = 'M15';
 const LIVE_RESULT_CACHE_SYNC_MS = 20_000;
 const HIGH_CONFIDENCE_POTENTIAL_THRESHOLD = 90;
+const AI_REVIEW_NEAR_LIVE_THRESHOLD = 86;
+const AI_REVIEW_CACHE_TTL_MS = 10 * 60_000;
 const PREFER_HISTORY_BEFORE_CACHE_SYMBOLS = new Set(['XAUUSD']);
 const HISTORY_RATE_LIMIT_BACKOFF_MS = 60_000;
 
@@ -192,7 +196,14 @@ interface CachedPotential {
   cachedAt: number;
 }
 
+interface CachedAiPotentialReview {
+  fingerprint: string;
+  reviewedPotential: PotentialTradeSetup;
+  cachedAt: number;
+}
+
 const potentialCache = new Map<string, CachedPotential>();
+const aiPotentialReviewCache = new Map<string, CachedAiPotentialReview>();
 
 function buildPotentialFingerprint(potentials: PotentialTradeSetup[]): string {
   if (potentials.length === 0) return 'empty';
@@ -229,6 +240,193 @@ function setCachedPotentials(symbol: string, potentials: PotentialTradeSetup[]):
     fingerprint: buildPotentialFingerprint(potentials),
     cachedAt: Date.now(),
   });
+}
+
+function buildAiReviewFingerprint(potential: PotentialTradeSetup): string {
+  return [
+    potential.direction,
+    potential.strategy,
+    potential.marketRegime,
+    potential.emaStack,
+    potential.entry.toFixed(5),
+    potential.stopLoss.toFixed(5),
+    potential.takeProfit.toFixed(5),
+    Math.round(potential.activationProbability),
+    potential.confidenceScore,
+  ].join(':');
+}
+
+function mapScannerCandlesToMarketCandles(candles: Candle[]): MarketCandle[] {
+  return candles.map((candle) => ({
+    timestamp: new Date(candle.time * 1000).toISOString(),
+    open: candle.open,
+    high: candle.high,
+    low: candle.low,
+    close: candle.close,
+  }));
+}
+
+function averageScannerRange(candles: Candle[], sample = 12): number {
+  const recent = candles.slice(-Math.min(sample, candles.length));
+  if (recent.length === 0) {
+    return 0;
+  }
+
+  const totalRange = recent.reduce((sum, candle) => sum + Math.max(0, candle.high - candle.low), 0);
+  return totalRange / recent.length;
+}
+
+function computeRewardMultiple(direction: 'buy' | 'sell', entry: number, stopLoss: number, takeProfit: number | null): number | null {
+  if (takeProfit == null) {
+    return null;
+  }
+
+  const risk = Math.abs(entry - stopLoss);
+  if (risk <= 0) {
+    return null;
+  }
+
+  const reward = direction === 'buy' ? takeProfit - entry : entry - takeProfit;
+  if (reward <= 0) {
+    return null;
+  }
+
+  return reward / risk;
+}
+
+function projectTargetFromRewardMultiple(direction: 'buy' | 'sell', entry: number, stopLoss: number, rewardMultiple: number | null): number | null {
+  if (rewardMultiple == null || rewardMultiple <= 0) {
+    return null;
+  }
+
+  const risk = Math.abs(entry - stopLoss);
+  return direction === 'buy'
+    ? entry + risk * rewardMultiple
+    : entry - risk * rewardMultiple;
+}
+
+function clonePotentialTrade(potential: PotentialTradeSetup): PotentialTradeSetup {
+  return {
+    ...potential,
+    fulfilledConditions: [...potential.fulfilledConditions],
+    requiredTriggers: [...potential.requiredTriggers],
+    contextLabels: [...potential.contextLabels],
+  };
+}
+
+async function reviewPotentialTradeWithAi(
+  symbol: string,
+  candles: Candle[],
+  potential: PotentialTradeSetup,
+): Promise<PotentialTradeSetup> {
+  const fingerprint = buildAiReviewFingerprint(potential);
+  const cached = aiPotentialReviewCache.get(symbol);
+
+  if (cached && cached.fingerprint === fingerprint && Date.now() - cached.cachedAt <= AI_REVIEW_CACHE_TTL_MS) {
+    return {
+      ...cached.reviewedPotential,
+      currentPrice: potential.currentPrice,
+    };
+  }
+
+  const reviewed = clonePotentialTrade(potential);
+
+  try {
+    const vision = await analyzeLiveChartCandles(symbol, SCANNER_TIMEFRAME, mapScannerCandlesToMarketCandles(candles));
+    const expectedBias = potential.direction === 'buy' ? 'buy' : 'sell';
+    const aiBias = vision.entryPlan.bias !== 'none'
+      ? vision.entryPlan.bias
+      : vision.trend === 'bullish'
+        ? 'buy'
+        : vision.trend === 'bearish'
+          ? 'sell'
+          : 'none';
+    const biasMismatch = aiBias !== 'none' && aiBias !== expectedBias;
+    const reviewRejected = vision.finalVerdict.action === 'avoid' || biasMismatch;
+    const avgRange = Math.max(averageScannerRange(candles, 12), potential.entry * 0.0008);
+    const entryZone = vision.entryPlan.entryZone;
+    const entryTolerance = Math.max(avgRange * 0.6, Math.abs(potential.entry) * 0.0005);
+    const aiZoneMin = entryZone ? Math.min(entryZone.min ?? potential.entry, entryZone.max ?? potential.entry) : null;
+    const aiZoneMax = entryZone ? Math.max(entryZone.min ?? potential.entry, entryZone.max ?? potential.entry) : null;
+    const entryZoneAligned = aiZoneMin != null && aiZoneMax != null
+      ? potential.entry >= aiZoneMin - entryTolerance && potential.entry <= aiZoneMax + entryTolerance
+      : true;
+    const aiPreferredEntry = aiZoneMin != null && aiZoneMax != null ? (aiZoneMin + aiZoneMax) / 2 : null;
+    const aiEntryCloseEnough = aiPreferredEntry != null && Math.abs(aiPreferredEntry - potential.entry) <= entryTolerance;
+
+    reviewed.contextLabels.push('AI live-chart review completed');
+
+    if (reviewRejected) {
+      reviewed.activationProbability = Math.min(AI_REVIEW_NEAR_LIVE_THRESHOLD - 1, Math.max(58, reviewed.activationProbability - 12));
+      reviewed.confidenceScore = Math.max(1, reviewed.confidenceScore - 2);
+      reviewed.requiredTriggers.unshift(
+        biasMismatch
+          ? `AI live-chart review disagrees with the ${potential.direction.toUpperCase()} bias`
+          : 'AI live-chart review marked the current structure as avoid',
+      );
+      reviewed.contextLabels.push(biasMismatch ? 'AI bias conflict' : 'AI rejected setup');
+    } else {
+      reviewed.fulfilledConditions.push(`AI live-chart review supports ${potential.direction.toUpperCase()} bias`);
+      reviewed.contextLabels.push('AI bias confirmed');
+
+      if (vision.quality.confidence >= 70 || vision.finalVerdict.action === 'enter') {
+        reviewed.activationProbability = Math.min(95, reviewed.activationProbability + 2);
+        reviewed.confidenceScore = Math.min(10, reviewed.confidenceScore + 1);
+      }
+
+      if (!entryZoneAligned) {
+        reviewed.activationProbability = Math.min(HIGH_CONFIDENCE_POTENTIAL_THRESHOLD - 1, Math.max(62, reviewed.activationProbability - 8));
+        reviewed.confidenceScore = Math.max(1, reviewed.confidenceScore - 1);
+        if (aiZoneMin != null && aiZoneMax != null) {
+          reviewed.requiredTriggers.unshift(`Entry align with AI zone ${aiZoneMin.toFixed(3)}-${aiZoneMax.toFixed(3)}`);
+        } else {
+          reviewed.requiredTriggers.unshift('AI review wants a cleaner entry location before promotion');
+        }
+        reviewed.contextLabels.push('AI entry mismatch');
+      } else if (entryZone != null) {
+        reviewed.fulfilledConditions.push('AI entry zone overlaps scanner entry');
+        reviewed.contextLabels.push('AI entry confirmed');
+
+        if (aiEntryCloseEnough && aiPreferredEntry != null && Math.abs(aiPreferredEntry - reviewed.entry) > 0.000001) {
+          const tp1Multiple = computeRewardMultiple(reviewed.direction, reviewed.entry, reviewed.stopLoss, reviewed.takeProfit) ?? 2;
+          const tp2Multiple = computeRewardMultiple(reviewed.direction, reviewed.entry, reviewed.stopLoss, reviewed.takeProfit2) ?? 3;
+          reviewed.entry = aiPreferredEntry;
+          reviewed.takeProfit = projectTargetFromRewardMultiple(reviewed.direction, reviewed.entry, reviewed.stopLoss, tp1Multiple) ?? reviewed.takeProfit;
+          reviewed.takeProfit2 = projectTargetFromRewardMultiple(reviewed.direction, reviewed.entry, reviewed.stopLoss, tp2Multiple) ?? reviewed.takeProfit;
+          reviewed.fulfilledConditions.push('Entry nudged into nearby AI-approved zone midpoint');
+          reviewed.contextLabels.push('AI entry refined');
+        }
+      }
+    }
+  } catch (error) {
+    reviewed.contextLabels.push('AI review unavailable');
+    reviewed.requiredTriggers.unshift('AI live-chart review unavailable — using scanner-only validation');
+    console.warn(`[Scanner] AI review skipped for ${symbol}:`, error instanceof Error ? error.message : error);
+  }
+
+  aiPotentialReviewCache.set(symbol, {
+    fingerprint,
+    reviewedPotential: reviewed,
+    cachedAt: Date.now(),
+  });
+
+  return reviewed;
+}
+
+async function maybeReviewNearLivePotentialWithAi(
+  symbol: string,
+  candles: Candle[],
+  potentials: PotentialTradeSetup[],
+): Promise<PotentialTradeSetup[]> {
+  const reviewIndex = potentials.findIndex((potential) => potential.activationProbability >= AI_REVIEW_NEAR_LIVE_THRESHOLD);
+  if (reviewIndex === -1) {
+    return potentials;
+  }
+
+  const reviewedPotential = await reviewPotentialTradeWithAi(symbol, candles, potentials[reviewIndex]);
+  const reviewedPotentials = potentials.map((potential, index) => index === reviewIndex ? reviewedPotential : potential);
+
+  return reviewedPotentials.sort((left, right) => right.activationProbability - left.activationProbability);
 }
 
 function compareOpenResultPriority(left: OpenScanResult, right: OpenScanResult): number {
@@ -1504,6 +1702,7 @@ async function buildPotentialForSymbol(symbol: string): Promise<PotentialTradeSe
     let potentials = freshPotentials;
 
     if (!potentials.some((potential) => potential.activationProbability >= HIGH_CONFIDENCE_POTENTIAL_THRESHOLD)) {
+      potentials = await maybeReviewNearLivePotentialWithAi(symbol, candles, potentials);
       setCachedPotentials(symbol, potentials);
       return potentials;
     }
@@ -1529,6 +1728,8 @@ async function buildPotentialForSymbol(symbol: string): Promise<PotentialTradeSe
         : potential)
       .filter((potential): potential is PotentialTradeSetup => potential !== null);
 
+    potentials = await maybeReviewNearLivePotentialWithAi(symbol, candles, potentials);
+
     setCachedPotentials(symbol, potentials);
     return potentials;
   } catch (err) {
@@ -1552,7 +1753,10 @@ async function scanSymbol(symbol: string): Promise<ScanCycleResult | null> {
       if (h1Candles.length >= 80) {
         const refinedPotential = refinePotentialTradeWithH1(promotablePotential, { h1Candles });
         if (refinedPotential && refinedPotential.activationProbability >= HIGH_CONFIDENCE_POTENTIAL_THRESHOLD) {
-          return promotePotentialToScanCycleResult(refinedPotential);
+          const aiReviewedPotential = await reviewPotentialTradeWithAi(symbol, candles, refinedPotential);
+          if (aiReviewedPotential.activationProbability >= HIGH_CONFIDENCE_POTENTIAL_THRESHOLD) {
+            return promotePotentialToScanCycleResult(aiReviewedPotential);
+          }
         }
       }
     }
