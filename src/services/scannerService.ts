@@ -35,6 +35,7 @@ export interface ScanResult {
   direction: 'buy' | 'sell';
   entry: number;
   stopLoss: number;
+  slReason?: string | null;
   takeProfit: number;
   takeProfit2: number | null;
   confidenceScore: number;
@@ -584,6 +585,7 @@ function promotePotentialToScanCycleResult(potential: PotentialTradeSetup): Scan
     direction: potential.direction,
     entry: potential.entry,
     stopLoss: potential.stopLoss,
+    slReason: potential.slReason ?? null,
     takeProfit: potential.takeProfit,
     takeProfit2: potential.takeProfit2,
     confidenceScore: potential.confidenceScore,
@@ -1246,6 +1248,7 @@ interface ScanCycleResult {
   direction: 'buy' | 'sell';
   entry: number;
   stopLoss: number;
+  slReason?: string | null;
   takeProfit: number;
   takeProfit2: number | null;
   confidenceScore: number;
@@ -1335,6 +1338,7 @@ async function scanSymbol(symbol: string): Promise<ScanCycleResult | null> {
       direction: setup.direction,
       entry: setup.entry,
       stopLoss: setup.stopLoss,
+      slReason: setup.slReason ?? null,
       takeProfit: setup.takeProfit,
       takeProfit2: setup.takeProfit2,
       confidenceScore: setup.confidenceScore,

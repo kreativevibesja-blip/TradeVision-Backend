@@ -60,6 +60,7 @@ export interface TradeSetup {
   direction: 'buy' | 'sell';
   entry: number;
   stopLoss: number;
+  slReason?: 'Zone-based buffered SL' | 'Swing-based ATR fallback SL' | 'EMA200-anchored SL';
   takeProfit: number;
   takeProfit2: number;
   score: number;
@@ -82,6 +83,7 @@ export interface PriceZone {
   bottom: number;
   distanceToPrice: number;
   originIndex?: number;
+  touches?: number;
 }
 
 export interface FairValueGap {
@@ -103,6 +105,7 @@ export interface PotentialTradeSetup {
   currentPrice: number;
   entry: number;
   stopLoss: number;
+  slReason?: 'Zone-based buffered SL' | 'Swing-based ATR fallback SL' | 'EMA200-anchored SL';
   takeProfit: number;
   takeProfit2: number;
   activationProbability: number;
@@ -165,18 +168,56 @@ function detectContextTrend(candles: Candle[]): TrendDirection {
 // Price hugging EMA 200 (within a small buffer) → ranging.
 
 function detectMacroTrend(candles: Candle[], emaTrend: EmaTrendContext): TrendDirection {
-  if (candles.length < 200 || emaTrend.ema200 == null) return 'ranging';
+  if (candles.length < 200 || emaTrend.ema200 == null || emaTrend.ema50 == null) return 'ranging';
 
   const currentPrice = candles[candles.length - 1].close;
   const ema200 = emaTrend.ema200;
+  const ema50 = emaTrend.ema50;
 
-  // Use average range as a buffer so choppy price around EMA 200 reads as ranging
-  const avgRange = averageRange(candles, 20);
-  const buffer = Math.max(avgRange * 2.5, ema200 * 0.003);
-
-  if (currentPrice > ema200 + buffer) return 'bullish';
-  if (currentPrice < ema200 - buffer) return 'bearish';
+  if (currentPrice > ema200 && ema50 > ema200) return 'bullish';
+  if (currentPrice < ema200 && ema50 < ema200) return 'bearish';
   return 'ranging';
+}
+
+type TrendFilterLogReason = 'trend-aligned' | 'counter-trend-approved' | 'counter-trend-rejected';
+
+function logTrendFilter(symbol: string, direction: 'buy' | 'sell', reason: TrendFilterLogReason, detail?: string) {
+  console.log(`[Scanner][filter] ${symbol} ${direction.toUpperCase()} ${reason}${detail ? ` (${detail})` : ''}`);
+}
+
+function evaluateTrendPriorityFilter(input: {
+  symbol: string;
+  direction: 'buy' | 'sell';
+  macroTrend: TrendDirection;
+  confidenceScore: number;
+  hasBos: boolean;
+  hasDisplacement: boolean;
+  hasLiquiditySweep: boolean;
+  hasStrongZone: boolean;
+  hasRejection: boolean;
+}): { allowed: boolean; reason: TrendFilterLogReason } {
+  const isTrendAligned = input.macroTrend !== 'ranging'
+    && ((input.direction === 'buy' && input.macroTrend === 'bullish') || (input.direction === 'sell' && input.macroTrend === 'bearish'));
+
+  if (input.macroTrend === 'ranging') {
+    const allowed = input.hasStrongZone && input.hasRejection;
+    const reason: TrendFilterLogReason = allowed ? 'trend-aligned' : 'counter-trend-rejected';
+    logTrendFilter(input.symbol, input.direction, reason, allowed ? 'range strong zone + rejection confirmed' : 'range lacks strong zone or rejection');
+    return { allowed, reason };
+  }
+
+  if (isTrendAligned) {
+    logTrendFilter(input.symbol, input.direction, 'trend-aligned');
+    return { allowed: true, reason: 'trend-aligned' };
+  }
+
+  if (input.confidenceScore >= 8 && input.hasBos && input.hasDisplacement && input.hasLiquiditySweep) {
+    logTrendFilter(input.symbol, input.direction, 'counter-trend-approved');
+    return { allowed: true, reason: 'counter-trend-approved' };
+  }
+
+  logTrendFilter(input.symbol, input.direction, 'counter-trend-rejected');
+  return { allowed: false, reason: 'counter-trend-rejected' };
 }
 
 // ── 1c. EMA 50 Execution Helpers ──
@@ -756,75 +797,63 @@ function isMeaningfulGap(symbol: string, gap: FairValueGap, candles: Candle[], c
   return originAge >= Math.max(2, profile.minStructuralOriginAge - 2) && gapHeight >= minGapHeight;
 }
 
-function computeStopLoss(symbol: string, direction: 'buy' | 'sell', candles: Candle[]): number {
+function computeStopLoss(symbol: string, direction: 'buy' | 'sell', candles: Candle[]): {
+  stopLoss: number;
+  slReason: 'Zone-based buffered SL' | 'Swing-based ATR fallback SL';
+} {
   const profile = getSymbolRiskProfile(symbol);
   const recent = candles.slice(-profile.structureLookback);
   const last = candles[candles.length - 1];
   const atr = computeAtr(candles, profile.atrPeriod);
-  const averageRange = average(recent.map((c) => c.high - c.low));
   const lookLeftCandles = candles.slice(-Math.min(500, candles.length));
   const zones = buildZones(lookLeftCandles, last.close);
   const gaps = buildFairValueGaps(lookLeftCandles, last.close);
   const directionalZone = findDirectionalZone(direction, zones, last.close, lookLeftCandles, symbol);
   const directionalFvg = findDirectionalFvg(direction, gaps, lookLeftCandles, symbol);
+  const isValidZone = (zone: PriceZone) => {
+    const zoneHeight = Math.abs(zone.top - zone.bottom);
+    const age = getOriginAge(lookLeftCandles.length, zone.originIndex);
+    return zoneHeight > atr * 0.5 && age > 3 && (zone.touches ?? 0) >= 2;
+  };
 
   const zoneBuffer = (areaTop: number, areaBottom: number) => {
     const areaHeight = Math.max(Math.abs(areaTop - areaBottom), 0.0001);
-    return Math.max(
-      atr * 0.18,
-      averageRange * 0.12,
-      areaHeight * 0.18,
-      last.close * Math.max(profile.bufferPriceRatio * 0.35, 0.00008),
-    );
+    return Math.max(atr * 0.2, areaHeight * 0.15);
   };
 
-  if (directionalZone) {
+  if (directionalZone && isValidZone(directionalZone)) {
     const buffer = zoneBuffer(directionalZone.top, directionalZone.bottom);
-    return direction === 'buy'
-      ? directionalZone.bottom - buffer
-      : directionalZone.top + buffer;
+    return {
+      stopLoss: direction === 'buy'
+        ? directionalZone.bottom - buffer
+        : directionalZone.top + buffer,
+      slReason: 'Zone-based buffered SL',
+    };
   }
 
   if (directionalFvg) {
     const buffer = zoneBuffer(directionalFvg.top, directionalFvg.bottom);
-    return direction === 'buy'
-      ? Math.min(directionalFvg.bottom, directionalFvg.top) - buffer
-      : Math.max(directionalFvg.top, directionalFvg.bottom) + buffer;
+    return {
+      stopLoss: direction === 'buy'
+        ? Math.min(directionalFvg.bottom, directionalFvg.top) - buffer
+        : Math.max(directionalFvg.top, directionalFvg.bottom) + buffer,
+      slReason: 'Zone-based buffered SL',
+    };
   }
 
   if (direction === 'buy') {
     const swingLow = Math.min(...recent.map((c) => c.low));
-    const structuralDistance = Math.abs(last.close - swingLow);
-    const minDistance = Math.max(
-      atr * profile.minStopAtrMultiplier,
-      averageRange * profile.minStopRangeMultiplier,
-      last.close * profile.minStopPriceRatio,
-    );
-    const buffer = Math.max(
-      atr * profile.bufferAtrMultiplier,
-      averageRange * profile.bufferRangeMultiplier,
-      last.close * profile.bufferPriceRatio,
-    );
-
-    const stopDistance = Math.max(structuralDistance + buffer, minDistance);
-    return last.close - stopDistance;
+    return {
+      stopLoss: swingLow - atr * 0.2,
+      slReason: 'Swing-based ATR fallback SL',
+    };
   }
 
   const swingHigh = Math.max(...recent.map((c) => c.high));
-  const structuralDistance = Math.abs(swingHigh - last.close);
-  const minDistance = Math.max(
-    atr * profile.minStopAtrMultiplier,
-    averageRange * profile.minStopRangeMultiplier,
-    last.close * profile.minStopPriceRatio,
-  );
-  const buffer = Math.max(
-    atr * profile.bufferAtrMultiplier,
-    averageRange * profile.bufferRangeMultiplier,
-    last.close * profile.bufferPriceRatio,
-  );
-
-  const stopDistance = Math.max(structuralDistance + buffer, minDistance);
-  return last.close + stopDistance;
+  return {
+    stopLoss: swingHigh + atr * 0.2,
+    slReason: 'Swing-based ATR fallback SL',
+  };
 }
 
 /** When the trade is triggered by an EMA 50 cross, anchor the SL above/below the EMA 200
@@ -1303,6 +1332,8 @@ function buildSupportResistanceRangePotential(
   });
   const confidenceScore = countTradeConfirmations(tradeConfirmations);
   const boundaryTouches = direction === 'sell' ? range.resistanceTouches : range.supportTouches;
+  const hasStrongBoundary = boundaryTouches >= 3;
+  const hasRejectionConfirmation = zoneReaction && (alignedRejection || alignedEngulfing || alignedStructure);
   const boundaryLabel = direction === 'sell' ? 'range resistance' : 'range support';
   const oppositeBoundaryLabel = direction === 'sell' ? 'range support' : 'range resistance';
   const entry = currentPrice;
@@ -1315,6 +1346,10 @@ function buildSupportResistanceRangePotential(
   const reward = Math.abs(takeProfit - entry);
 
   if (!Number.isFinite(risk) || risk <= 0 || !Number.isFinite(reward) || reward < risk) {
+    return null;
+  }
+
+  if (!hasStrongBoundary || !hasRejectionConfirmation) {
     return null;
   }
 
@@ -1885,6 +1920,10 @@ export function findSwingHighsLows(candles: Candle[]): SwingPoint[] {
 export function buildZones(candles: Candle[], currentPrice: number): PriceZone[] {
   const swings = findSwingHighsLows(candles);
   const zones: PriceZone[] = [];
+  const countZoneTouches = (top: number, bottom: number) => {
+    const area = { top: Math.max(top, bottom), bottom: Math.min(top, bottom) };
+    return candles.filter((candle) => candleTouchesArea(candle, area)).length;
+  };
 
   for (const swing of swings) {
     const baseCandle = candles[swing.index];
@@ -1898,6 +1937,7 @@ export function buildZones(candles: Candle[], currentPrice: number): PriceZone[]
         bottom,
         distanceToPrice: Math.min(Math.abs(currentPrice - top), Math.abs(currentPrice - bottom)),
         originIndex: swing.index,
+        touches: countZoneTouches(top, bottom),
       });
     }
 
@@ -1910,6 +1950,7 @@ export function buildZones(candles: Candle[], currentPrice: number): PriceZone[]
         bottom,
         distanceToPrice: Math.min(Math.abs(currentPrice - top), Math.abs(currentPrice - bottom)),
         originIndex: swing.index,
+        touches: countZoneTouches(top, bottom),
       });
     }
   }
@@ -2198,6 +2239,7 @@ function buildPotentialCandidate({
   const volatilitySymbol = isVolatilitySymbol(symbol);
   const broaderTrendDirection = toTradeDirection(broaderTrend);
   const trendDirection = toTradeDirection(trend);
+  const macroTrendDirection = toTradeDirection(macroTrend);
   const activeBreaker = findActiveBreakerBlock(direction, currentPrice, candles);
   const hasBreaker = activeBreaker !== null;
   const fvgReaction = detectFvgReaction(direction, candles, gaps);
@@ -2209,7 +2251,13 @@ function buildPotentialCandidate({
   const hasOte = ote !== null && ote.inOteZone;
   const mss = detectMarketStructureShift(candles);
   const hasMss = isMssAligned(direction, mss);
+  const hasBos = alignedStructure || hasMss;
+  const hasLiquiditySweep = alignedSweep || hasEqlSweep;
+  const hasStrongZone = directionalZone ? isMeaningfulZone(symbol, directionalZone, candles, currentPrice) : false;
   const hasContinuationAreaReaction = nearDirectionalZone || freshReaction || poiReclaim || hasBreaker || hasFvgReaction;
+  const macroCounterTrend = macroTrendDirection !== null && macroTrendDirection !== direction;
+  const broaderCounterTrend = broaderTrendDirection !== null && broaderTrendDirection !== direction;
+  const strictReversalConfirmationNeeded = isReversalSetup && (macroCounterTrend || broaderCounterTrend || volatilitySymbol);
   const tradeConfirmations = buildTradeConfirmations({
     alignedSweep: alignedSweep || hasEqlSweep,
     alignedEngulfing,
@@ -2292,6 +2340,14 @@ function buildPotentialCandidate({
     }
   }
 
+  if (strictReversalConfirmationNeeded && (!alignedSweep || !freshDisplacement || !alignedStructure)) {
+    return null;
+  }
+
+  if (isReversalSetup && macroCounterTrend && emaTrend.ema200 != null && !poiReclaim) {
+    return null;
+  }
+
   let probability = mode === 'trend' ? 20 : 16;
 
   if (directionalZone) probability += mode === 'trend' ? 20 : 24;
@@ -2332,9 +2388,27 @@ function buildPotentialCandidate({
     return null;
   }
 
+  const trendPriorityDecision = evaluateTrendPriorityFilter({
+    symbol,
+    direction,
+    macroTrend,
+    confidenceScore: confirmationScore,
+    hasBos,
+    hasDisplacement: freshDisplacement,
+    hasLiquiditySweep,
+    hasStrongZone,
+    hasRejection: alignedRejection || alignedEngulfing || freshReaction,
+  });
+
+  if (!trendPriorityDecision.allowed) {
+    return null;
+  }
+
   const fulfilledConditions: string[] = [];
   const requiredTriggers: string[] = [];
   const contextLabels: string[] = [];
+
+  contextLabels.push(trendPriorityDecision.reason);
 
   if (mode === 'trend') {
     fulfilledConditions.push(trend === 'bullish' ? 'Bullish trend context' : trend === 'bearish' ? 'Bearish trend context' : 'Range-to-reversal context');
@@ -2514,7 +2588,8 @@ function buildPotentialCandidate({
     ote,
     fvgReaction,
   });
-  const stopLoss = computeStopLoss(symbol, direction, candles);
+  const stopLossDecision = computeStopLoss(symbol, direction, candles);
+  const stopLoss = stopLossDecision.stopLoss;
   const { takeProfit, takeProfit2, structuralTargets } = resolveTakeProfitTargets(symbol, direction, entry, stopLoss, candles);
 
   if (isVolatilitySymbol(symbol) && structuralTargets.length === 0) {
@@ -2572,16 +2647,39 @@ function buildPotentialCandidate({
     ? buildCounterTrendNarrative(trend, direction, currentPrice, contextLabels, requiredTriggers.slice(0, 3))
     : buildPotentialNarrative(direction, currentPrice, contextLabels, requiredTriggers.slice(0, 3));
 
+  let cappedConfidenceScore = confirmationScore;
+
+  if (macroCounterTrend && !hasBos) {
+    cappedConfidenceScore = Math.min(cappedConfidenceScore, 7);
+  }
+
+  if (isReversalSetup && !alignedStructure) {
+    cappedConfidenceScore = Math.min(cappedConfidenceScore, 5);
+  }
+
+  if (isReversalSetup && macroCounterTrend) {
+    cappedConfidenceScore = Math.min(cappedConfidenceScore, 4);
+  }
+
+  if (isReversalSetup && !freshDisplacement) {
+    cappedConfidenceScore = Math.min(cappedConfidenceScore, 4);
+  }
+
+  if (isReversalSetup && emaTrend.ema50 != null && emaTrend.ema200 != null && !emaAligned) {
+    cappedConfidenceScore = Math.min(cappedConfidenceScore, 4);
+  }
+
   return {
     symbol,
     direction,
     currentPrice,
     entry,
     stopLoss,
+    slReason: stopLossDecision.slReason,
     takeProfit,
     takeProfit2,
     activationProbability: Math.min(95, probability),
-    confidenceScore: confirmationScore,
+    confidenceScore: cappedConfidenceScore,
     marketRegime: mode === 'trend' ? 'trend' : 'reversal',
     confirmations: tradeConfirmations,
     strategy,
@@ -3095,15 +3193,11 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   const bullishPoiReclaim = hasPoiReclaim('buy', bullishArea, candles);
   const bearishPoiReclaim = hasPoiReclaim('sell', bearishArea, candles);
 
-  // Lock direction to the macro trend.  Counter-trend reversal patterns
-  // that oppose the macro direction are skipped entirely.
   let direction: 'buy' | 'sell';
   if (macroTrend === 'bullish') {
-    if (bearishReversal && !bullishReversal) return null;
-    direction = 'buy';
+    direction = bearishReversal && !bullishReversal ? 'sell' : 'buy';
   } else if (macroTrend === 'bearish') {
-    if (bullishReversal && !bearishReversal) return null;
-    direction = 'sell';
+    direction = bullishReversal && !bearishReversal ? 'buy' : 'sell';
   } else {
     // Macro ranging — use micro trend / reversal patterns for direction
     if (trend === 'ranging' && !bullishReversal && !bearishReversal) return null;
@@ -3171,9 +3265,14 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   const hasOte = ote !== null && ote.inOteZone;
   const mss = detectMarketStructureShift(candles);
   const hasMss = isMssAligned(direction, mss);
+  const hasBos = alignedStructure || hasMss;
+  const hasLiquiditySweep = alignedSweep || hasEqlSweep;
+  const hasStrongZone = directionalZone ? isMeaningfulZone(symbol, directionalZone, candles, currentPrice) : false;
   const volatilitySymbol = isVolatilitySymbol(symbol);
   const trendDirection = toTradeDirection(trend);
   const broaderTrendDirection = toTradeDirection(broaderTrend);
+  const macroTrendDirection = toTradeDirection(macroTrend);
+  const macroCounterTrend = macroTrendDirection !== null && macroTrendDirection !== direction;
   const hasContinuationAreaReaction = nearDirectionalZone || freshReaction || poiReclaim || hasBreaker || hasFvgReaction;
   const tradeConfirmations = buildTradeConfirmations({
     alignedSweep: alignedSweep || hasEqlSweep,
@@ -3240,6 +3339,22 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
     .filter(Boolean)
     .length;
 
+  const trendPriorityDecision = evaluateTrendPriorityFilter({
+    symbol,
+    direction,
+    macroTrend,
+    confidenceScore: confirmationScore,
+    hasBos,
+    hasDisplacement: freshDisplacement,
+    hasLiquiditySweep,
+    hasStrongZone,
+    hasRejection: alignedRejection || alignedEngulfing || freshReaction,
+  });
+
+  if (!trendPriorityDecision.allowed) {
+    return null;
+  }
+
   // EMA 50/200 not stacked for this direction — need extra confirmation
   // EMA 50 cross already confirms intent so it bypasses the stack requirement
   if (!emaAligned && !isReversalSetup && !ema50CrossAligned && directionalConfirmationCount < 3) return null;
@@ -3259,9 +3374,13 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
 
   const entry = last.close;
   // EMA 50 cross: anchor SL to EMA 200 (the macro filter level). Otherwise use structural SL.
-  const stopLoss = ema50CrossAligned && emaTrend.ema200 != null
-    ? computeEma200AnchoredStopLoss(symbol, direction, candles, emaTrend.ema200)
+  const stopLossDecision = ema50CrossAligned && emaTrend.ema200 != null
+    ? {
+        stopLoss: computeEma200AnchoredStopLoss(symbol, direction, candles, emaTrend.ema200),
+        slReason: 'EMA200-anchored SL' as const,
+      }
     : computeStopLoss(symbol, direction, candles);
+  const stopLoss = stopLossDecision.stopLoss;
   const { takeProfit, takeProfit2, structuralTargets } = resolveTakeProfitTargets(symbol, direction, entry, stopLoss, candles);
 
   if (isVolatilitySymbol(symbol) && structuralTargets.length === 0 && !ema50CrossAligned) return null;
@@ -3277,16 +3396,20 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   if (direction === 'sell' && stopLoss <= entry) return null;
 
   const confirmations: SetupConfirmations = { sweep, engulfing, rejection, structure };
+  const cappedConfidenceScore = macroCounterTrend && !hasBos
+    ? Math.min(confirmationScore, 7)
+    : confirmationScore;
 
   const candidateSetup: TradeSetup = {
     symbol,
     direction,
     entry,
     stopLoss,
+    slReason: stopLossDecision.slReason,
     takeProfit,
     takeProfit2,
     score,
-    confidenceScore: confirmationScore,
+    confidenceScore: cappedConfidenceScore,
     marketRegime: isReversalSetup ? 'reversal' : 'trend',
     strategy: isReversalSetup
       ? direction === 'buy'
@@ -3464,9 +3587,8 @@ export function analyzePotentialTrades(
       .sort((a, b) => b.activationProbability - a.activationProbability);
   }
 
-  // Macro trend is clear — only generate candidates in the macro direction.
-  // No counter-trend candidates.
   const macroDirection: 'buy' | 'sell' = macroTrend === 'bullish' ? 'buy' : 'sell';
+  const counterDirection: 'buy' | 'sell' = macroDirection === 'buy' ? 'sell' : 'buy';
 
   const candidates: PotentialTradeSetup[] = [];
 
@@ -3477,7 +3599,22 @@ export function analyzePotentialTrades(
   });
   if (trendCandidate) candidates.push(trendCandidate);
 
+  const counterCandidate = buildPotentialCandidate({
+    symbol, candles, trend, broaderTrend, macroTrend, emaTrend, currentPrice,
+    zones, gaps, currentZone, direction: counterDirection, mode: 'counter',
+    bullishReversal, bearishReversal, bullishPoiReclaim, bearishPoiReclaim,
+  });
+  if (counterCandidate) candidates.push(counterCandidate);
+
   return candidates
     .filter((c, i, a) => a.findIndex(x => x.direction === c.direction && x.strategy === c.strategy) === i)
-    .sort((a, b) => b.activationProbability - a.activationProbability);
+    .sort((left, right) => {
+      const leftAligned = left.direction === macroDirection ? 1 : 0;
+      const rightAligned = right.direction === macroDirection ? 1 : 0;
+      if (leftAligned !== rightAligned) {
+        return rightAligned - leftAligned;
+      }
+
+      return right.activationProbability - left.activationProbability;
+    });
 }
