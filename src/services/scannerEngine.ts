@@ -139,6 +139,7 @@ const MIN_SCANNER_ANALYSIS_CANDLES = 200;
 const DOUBLE_REVERSAL_PATTERN_LOOKBACK = 100;
 const HEAD_SHOULDERS_PATTERN_LOOKBACK = 120;
 const SUPPORT_RESISTANCE_RANGE_LOOKBACK = 120;
+const TREND_DETECTION_INPUT_CANDLES = 150;
 
 // ── 1. Trend Detection ──
 // Counts higher-highs/higher-lows vs lower-highs/lower-lows
@@ -194,7 +195,7 @@ function detectMacroTrend(candles: Candle[], emaTrend: EmaTrendContext): TrendDi
 }
 
 function detectRecentStructure(candles: Candle[]): TrendDirection {
-  const recent = candles.slice(-Math.min(600, candles.length));
+  const recent = candles.slice(-Math.min(TREND_DETECTION_INPUT_CANDLES, candles.length));
   const swings = findSwingHighsLows(recent);
   const highs = swings.filter((swing) => swing.type === 'high').slice(-2);
   const lows = swings.filter((swing) => swing.type === 'low').slice(-2);
@@ -330,7 +331,7 @@ export function detectMarketCondition(candles: Candle[], emaTrend: EmaTrendConte
     };
   }
 
-  const recent = candles.slice(-Math.min(600, candles.length));
+  const recent = candles.slice(-Math.min(TREND_DETECTION_INPUT_CANDLES, candles.length));
   const currentPrice = recent[recent.length - 1].close;
   const recentStructure = detectRecentStructure(recent);
   const range = detectSupportResistanceRange(candles);
@@ -342,23 +343,42 @@ export function detectMarketCondition(candles: Candle[], emaTrend: EmaTrendConte
   const heavyOverlap = hasHeavyCandleOverlap(recent);
   const displacementMoves = countDisplacementMoves(recent);
   const fakeBreakouts = countFakeBreakouts(recent);
+  const trappedBetweenEma20And50 = emaTrend.ema20 != null
+    && ((currentPrice <= emaTrend.ema20 && currentPrice >= emaTrend.ema50)
+      || (currentPrice >= emaTrend.ema20 && currentPrice <= emaTrend.ema50));
+  const strongBullishEmaStack = emaTrend.ema20 != null
+    && currentPrice > emaTrend.ema20
+    && emaTrend.ema20 > emaTrend.ema50
+    && emaTrend.ema50 > emaTrend.ema200
+    && emaTrend.trend === 'bullish';
+  const strongBearishEmaStack = emaTrend.ema20 != null
+    && currentPrice < emaTrend.ema20
+    && emaTrend.ema20 < emaTrend.ema50
+    && emaTrend.ema50 < emaTrend.ema200
+    && emaTrend.trend === 'bearish';
 
-  const bullishTrend = currentPrice > emaTrend.ema200 && emaTrend.ema50 > emaTrend.ema200 && recentStructure === 'bullish';
-  const bearishTrend = currentPrice < emaTrend.ema200 && emaTrend.ema50 < emaTrend.ema200 && recentStructure === 'bearish';
+  const bullishTrend = (currentPrice > emaTrend.ema200 && emaTrend.ema50 > emaTrend.ema200 && recentStructure === 'bullish')
+    || (strongBullishEmaStack && recentStructure !== 'bearish');
+  const bearishTrend = (currentPrice < emaTrend.ema200 && emaTrend.ema50 < emaTrend.ema200 && recentStructure === 'bearish')
+    || (strongBearishEmaStack && recentStructure !== 'bullish');
   const rangeCondition = Boolean(range)
     && recentStructure === 'ranging'
     && (ema50Flat || emaCrossCount >= 2);
-  const chopCondition = lowAtr
+  const chopCondition = trappedBetweenEma20And50 || (lowAtr
     && heavyOverlap
     && displacementMoves === 0
-    && fakeBreakouts >= 2;
+    && fakeBreakouts >= 2);
 
   if (chopCondition) {
-    const confidence = Math.min(10, 6 + Number(lowAtr) + Number(heavyOverlap) + Math.min(fakeBreakouts, 2));
+    const confidence = trappedBetweenEma20And50
+      ? Math.min(10, 7 + Number(lowAtr) + Number(heavyOverlap))
+      : Math.min(10, 6 + Number(lowAtr) + Number(heavyOverlap) + Math.min(fakeBreakouts, 2));
     return {
       marketState: 'chop',
       confidence,
-      reason: `Low ATR, overlapping candles, no displacement, and ${fakeBreakouts} fake breakout${fakeBreakouts === 1 ? '' : 's'} point to chop.`,
+      reason: trappedBetweenEma20And50
+        ? 'Price is trapped between EMA20 and EMA50, so momentum is considered choppy even if EMA200 still biases higher or lower.'
+        : `Low ATR, overlapping candles, no displacement, and ${fakeBreakouts} fake breakout${fakeBreakouts === 1 ? '' : 's'} point to chop.`,
     };
   }
 
@@ -372,20 +392,24 @@ export function detectMarketCondition(candles: Candle[], emaTrend: EmaTrendConte
   }
 
   if (bullishTrend) {
-    const confidence = Math.min(10, 6 + Number(currentPrice > emaTrend.ema200) + Number(emaTrend.ema50 > emaTrend.ema200) + Number(recentStructure === 'bullish'));
+    const confidence = Math.min(10, 6 + Number(currentPrice > emaTrend.ema200) + Number(emaTrend.ema50 > emaTrend.ema200) + Number(recentStructure === 'bullish') + Number(strongBullishEmaStack));
     return {
       marketState: 'bullish',
       confidence,
-      reason: 'Price is above EMA200, EMA50 is stacked above EMA200, and recent structure is printing higher highs and higher lows.',
+      reason: strongBullishEmaStack
+        ? 'Price is holding above a bullish EMA20/EMA50/EMA200 stack, so the market is treated as bullish unless recent structure turns explicitly bearish.'
+        : 'Price is above EMA200, EMA50 is stacked above EMA200, and recent structure is printing higher highs and higher lows.',
     };
   }
 
   if (bearishTrend) {
-    const confidence = Math.min(10, 6 + Number(currentPrice < emaTrend.ema200) + Number(emaTrend.ema50 < emaTrend.ema200) + Number(recentStructure === 'bearish'));
+    const confidence = Math.min(10, 6 + Number(currentPrice < emaTrend.ema200) + Number(emaTrend.ema50 < emaTrend.ema200) + Number(recentStructure === 'bearish') + Number(strongBearishEmaStack));
     return {
       marketState: 'bearish',
       confidence,
-      reason: 'Price is below EMA200, EMA50 is stacked below EMA200, and recent structure is printing lower highs and lower lows.',
+      reason: strongBearishEmaStack
+        ? 'Price is holding below a bearish EMA20/EMA50/EMA200 stack, so the market is treated as bearish unless recent structure turns explicitly bullish.'
+        : 'Price is below EMA200, EMA50 is stacked below EMA200, and recent structure is printing lower highs and lower lows.',
     };
   }
 
