@@ -576,6 +576,60 @@ function analyzeEma20EntryContext(
   };
 }
 
+function hasEma200ReclaimRetest(
+  direction: 'buy' | 'sell',
+  candles: Candle[],
+  emaTrend: EmaTrendContext,
+): boolean {
+  if (emaTrend.ema20 == null || emaTrend.ema50 == null || emaTrend.ema200 == null || candles.length < 5) {
+    return false;
+  }
+
+  const recent = candles.slice(-5);
+  const latest = recent[recent.length - 1];
+  const ema200 = emaTrend.ema200;
+  const retestBuffer = Math.max(averageRange(candles, 12) * 0.3, ema200 * 0.0008);
+
+  let breakoutIndex = -1;
+  for (let index = 1; index < recent.length - 1; index++) {
+    const previous = recent[index - 1];
+    const current = recent[index];
+
+    if (direction === 'buy' && previous.close <= ema200 && current.close > ema200) {
+      breakoutIndex = index;
+      break;
+    }
+
+    if (direction === 'sell' && previous.close >= ema200 && current.close < ema200) {
+      breakoutIndex = index;
+      break;
+    }
+  }
+
+  if (breakoutIndex === -1) {
+    return false;
+  }
+
+  const retestCandles = recent.slice(breakoutIndex + 1, -1);
+  if (retestCandles.length === 0) {
+    return false;
+  }
+
+  const hadRetest = direction === 'buy'
+    ? retestCandles.some((candle) => candle.low <= ema200 + retestBuffer && candle.close >= ema200 - retestBuffer)
+    : retestCandles.some((candle) => candle.high >= ema200 - retestBuffer && candle.close <= ema200 + retestBuffer);
+
+  if (!hadRetest || !hasStrongClosure(direction, recent)) {
+    return false;
+  }
+
+  if (direction === 'buy') {
+    return latest.close > ema200 && latest.close > emaTrend.ema20 && latest.close > emaTrend.ema50;
+  }
+
+  return latest.close < ema200 && latest.close < emaTrend.ema20 && latest.close < emaTrend.ema50;
+}
+
 // ── 2. Liquidity Sweep Detection ──
 // Checks if the latest candle wicked beyond a recent
 // high/low but closed back inside — classic stop hunt.
@@ -2533,6 +2587,9 @@ function buildPotentialCandidate({
   const ema50Exec = analyzeEma50Execution(candles, emaTrend, directionalZone, directionalFvg);
   const ema20Entry = analyzeEma20EntryContext(direction, candles, emaTrend, currentPrice);
   const emaStackAligned = direction === 'buy' ? ema50Exec.ema50Above200 : !ema50Exec.ema50Above200;
+  const ema50CrossAligned =
+    (direction === 'buy' && ema50Exec.ema50Cross === 'bullish')
+    || (direction === 'sell' && ema50Exec.ema50Cross === 'bearish');
   const emaAligned = emaStackAligned;
   const volatilitySymbol = isVolatilitySymbol(symbol);
   const broaderTrendDirection = toTradeDirection(broaderTrend);
@@ -2553,8 +2610,10 @@ function buildPotentialCandidate({
   const hasLiquiditySweep = alignedSweep || hasEqlSweep;
   const emaStackSupportsDirection = (direction === 'buy' && ema20Entry.emaStack === 'bullish') || (direction === 'sell' && ema20Entry.emaStack === 'bearish');
   const awaitingEma20Reclaim = hasLiquiditySweep && freshDisplacement && !ema20Entry.hasReclaimedEma20;
+  const ema200ReclaimRetest = hasEma200ReclaimRetest(direction, candles, emaTrend);
   const hasStrongZone = directionalZone ? isMeaningfulZone(symbol, directionalZone, candles, currentPrice) : false;
-  const hasContinuationAreaReaction = nearDirectionalZone || freshReaction || poiReclaim || hasBreaker || hasFvgReaction;
+  const dynamicTrendTrigger = ema50CrossAligned || ema200ReclaimRetest;
+  const hasContinuationAreaReaction = nearDirectionalZone || freshReaction || poiReclaim || hasBreaker || hasFvgReaction || ema200ReclaimRetest;
   const macroCounterTrend = macroTrendDirection !== null && macroTrendDirection !== direction;
   const broaderCounterTrend = broaderTrendDirection !== null && broaderTrendDirection !== direction;
   const strictReversalConfirmationNeeded = isReversalSetup && (macroCounterTrend || broaderCounterTrend || volatilitySymbol);
@@ -2565,7 +2624,7 @@ function buildPotentialCandidate({
     alignedStructure,
     poiReclaim,
     emaAligned,
-    zoneReaction: nearDirectionalZone || freshReaction,
+    zoneReaction: nearDirectionalZone || freshReaction || ema200ReclaimRetest,
     freshDisplacement,
     alignedMomentum,
     breakerBlock: hasBreaker,
@@ -2658,6 +2717,7 @@ function buildPotentialCandidate({
   if (isReversalSetup) probability += mode === 'counter' ? 24 : 20;
   if (freshReaction) probability += 12;
   if (poiReclaim) probability += 12;
+  if (ema200ReclaimRetest) probability += 18;
   if (freshDisplacement) probability += 8;
   if (alignedSweep) probability += 10;
   if (alignedRejection) probability += 10;
@@ -2763,6 +2823,10 @@ function buildPotentialCandidate({
     if (ema50Exec.ema50ZoneConfluence) {
       fulfilledConditions.push('EMA 50 confluent with structural zone');
       contextLabels.push('EMA 50 + zone confluence');
+    }
+    if (ema200ReclaimRetest) {
+      fulfilledConditions.push(direction === 'buy' ? 'EMA200 reclaim, retest, and strong bullish close above EMA20/EMA50 confirmed' : 'EMA200 reclaim, retest, and strong bearish close below EMA20/EMA50 confirmed');
+      contextLabels.push(direction === 'buy' ? 'EMA200 reclaim continuation' : 'EMA200 rejection continuation');
     }
   }
 
@@ -2916,11 +2980,18 @@ function buildPotentialCandidate({
     ote,
     fvgReaction,
   });
-  const stopLossDecision = computeStopLoss(symbol, direction, candles);
+  const stopLossDecision = dynamicTrendTrigger && emaTrend.ema200 != null
+    ? {
+        stopLoss: computeEma200AnchoredStopLoss(symbol, direction, candles, emaTrend.ema200),
+        slReason: 'EMA200-anchored SL' as const,
+      }
+    : computeStopLoss(symbol, direction, candles);
   const stopLoss = stopLossDecision.stopLoss;
-  const { takeProfit, takeProfit2, structuralTargets } = resolveTakeProfitTargets(symbol, direction, entry, stopLoss, candles);
+  const { takeProfit, takeProfit2, structuralTargets } = resolveTakeProfitTargets(symbol, direction, entry, stopLoss, candles, {
+    useStructuralTargets: !ema200ReclaimRetest,
+  });
 
-  if (isVolatilitySymbol(symbol) && structuralTargets.length === 0) {
+  if (isVolatilitySymbol(symbol) && structuralTargets.length === 0 && !dynamicTrendTrigger) {
     return null;
   }
 
@@ -2953,6 +3024,10 @@ function buildPotentialCandidate({
         ? direction === 'buy'
           ? 'Bullish FVG Fill Continuation'
           : 'Bearish FVG Fill Continuation'
+      : ema200ReclaimRetest
+        ? direction === 'buy'
+          ? 'Bullish EMA200 Reclaim Continuation'
+          : 'Bearish EMA200 Reclaim Continuation'
       : hasEqlSweep
         ? direction === 'buy'
           ? 'Bullish EQL Sweep Reversal'
@@ -3399,10 +3474,21 @@ function findRecentDirectionalTargets(
   return prices;
 }
 
-function resolveTakeProfitTargets(symbol: string, direction: 'buy' | 'sell', entry: number, stopLoss: number, candles: Candle[]) {
+function resolveTakeProfitTargets(
+  symbol: string,
+  direction: 'buy' | 'sell',
+  entry: number,
+  stopLoss: number,
+  candles: Candle[],
+  options?: { useStructuralTargets?: boolean },
+) {
   const fallbackTp1 = computeTakeProfit(direction, entry, stopLoss);
   const fallbackTp2 = computeSecondaryTakeProfit(direction, entry, stopLoss);
   const targets = findRecentDirectionalTargets(symbol, direction, candles, entry, stopLoss);
+
+  if (options?.useStructuralTargets === false) {
+    return { takeProfit: fallbackTp1, takeProfit2: fallbackTp2, structuralTargets: targets };
+  }
 
   const takeProfit = targets[0] ?? fallbackTp1;
   let takeProfit2 = targets[1] ?? fallbackTp2;
@@ -3592,13 +3678,15 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
   const hasLiquiditySweep = alignedSweep || hasEqlSweep;
   const emaStackSupportsDirection = (direction === 'buy' && ema20Entry.emaStack === 'bullish') || (direction === 'sell' && ema20Entry.emaStack === 'bearish');
   const awaitingEma20Reclaim = hasLiquiditySweep && freshDisplacement && !ema20Entry.hasReclaimedEma20;
+  const ema200ReclaimRetest = hasEma200ReclaimRetest(direction, candles, emaTrend);
   const hasStrongZone = directionalZone ? isMeaningfulZone(symbol, directionalZone, candles, currentPrice) : false;
   const volatilitySymbol = isVolatilitySymbol(symbol);
   const trendDirection = toTradeDirection(trend);
   const broaderTrendDirection = toTradeDirection(broaderTrend);
   const macroTrendDirection = toTradeDirection(macroTrend);
   const macroCounterTrend = macroTrendDirection !== null && macroTrendDirection !== direction;
-  const hasContinuationAreaReaction = nearDirectionalZone || freshReaction || poiReclaim || hasBreaker || hasFvgReaction;
+  const dynamicTrendTrigger = ema50CrossAligned || ema200ReclaimRetest;
+  const hasContinuationAreaReaction = nearDirectionalZone || freshReaction || poiReclaim || hasBreaker || hasFvgReaction || ema200ReclaimRetest;
   const tradeConfirmations = buildTradeConfirmations({
     alignedSweep: alignedSweep || hasEqlSweep,
     alignedEngulfing,
@@ -3606,7 +3694,7 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
     alignedStructure,
     poiReclaim,
     emaAligned,
-    zoneReaction: nearDirectionalZone || freshReaction,
+    zoneReaction: nearDirectionalZone || freshReaction || ema200ReclaimRetest,
     freshDisplacement,
     alignedMomentum,
     breakerBlock: hasBreaker,
@@ -3632,24 +3720,24 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
 
   // Core zone requirement — EMA 50 cross setups can bypass zone presence
   // because the cross itself is the execution trigger from a dynamic level
-  if (!hasZonePresence && !ema50CrossAligned) return null;
-  if (isVolatilitySymbol(symbol) && !directionalZone && !hasBreaker && !hasFvgReaction && !ema50CrossAligned) return null;
-  if (stretchedFromArea && !freshDisplacement && !ema50CrossAligned) return null;
+  if (!hasZonePresence && !dynamicTrendTrigger) return null;
+  if (isVolatilitySymbol(symbol) && !directionalZone && !hasBreaker && !hasFvgReaction && !ema200ReclaimRetest && !ema50CrossAligned) return null;
+  if (stretchedFromArea && !freshDisplacement && !dynamicTrendTrigger) return null;
 
   // Sniper entry: when macro trend is clear, enforce the full sequence:
   // 1) Price in zone  2) Liquidity sweep  3) Rejection/engulfing  4) EMA stack aligned
   // Exception: EMA 50 cross aligned with macro direction is a standalone trigger
   if (macroTrend !== 'ranging') {
-    if (!emaStackAligned && !isReversalSetup && !ema50CrossAligned) return null;
+    if (!emaStackAligned && !isReversalSetup && !dynamicTrendTrigger) return null;
 
     // Price must be at or reacting from a zone/FVG — or triggering off EMA 50 cross
-    if (!nearDirectionalZone && !freshReaction && !poiReclaim && !hasBreaker && !hasFvgReaction && !isReversalSetup && !ema50CrossAligned) return null;
+    if (!nearDirectionalZone && !freshReaction && !poiReclaim && !hasBreaker && !hasFvgReaction && !isReversalSetup && !dynamicTrendTrigger) return null;
 
     // Need sweep + entry candle confirmation for the cleanest entries — EMA 50 cross counts as execution confirmation
-    if (!hasSweepConfirmation && !hasEntryConfirmation && !isReversalSetup && !hasBreaker && !hasFvgReaction && !(alignedStructure || hasMss) && !ema50CrossAligned) return null;
+    if (!hasSweepConfirmation && !hasEntryConfirmation && !isReversalSetup && !hasBreaker && !hasFvgReaction && !(alignedStructure || hasMss) && !dynamicTrendTrigger) return null;
   }
 
-  if (volatilitySymbol && trendDirection === direction && !isReversalSetup && !hasContinuationAreaReaction && !ema50CrossAligned) return null;
+  if (volatilitySymbol && trendDirection === direction && !isReversalSetup && !hasContinuationAreaReaction && !dynamicTrendTrigger) return null;
 
   // When macro is ranging, apply the stricter micro counter-trend gates
   if (macroTrend === 'ranging') {
@@ -3660,7 +3748,7 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
     if (volatilitySymbol && broaderTrendDirection && direction !== broaderTrendDirection && !isReversalSetup) return null;
   }
 
-  const directionalConfirmationCount = [hasSweepConfirmation, alignedEngulfing, alignedRejection, alignedStructure || hasMss, alignedMomentum, poiReclaim]
+  const directionalConfirmationCount = [hasSweepConfirmation, alignedEngulfing, alignedRejection, alignedStructure || hasMss, alignedMomentum, poiReclaim, ema200ReclaimRetest]
     .filter(Boolean)
     .length;
 
@@ -3697,33 +3785,35 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
 
   // EMA 50/200 not stacked for this direction — need extra confirmation
   // EMA 50 cross already confirms intent so it bypasses the stack requirement
-  if (!emaAligned && !isReversalSetup && !ema50CrossAligned && directionalConfirmationCount < 3) return null;
+  if (!emaAligned && !isReversalSetup && !dynamicTrendTrigger && directionalConfirmationCount < 3) return null;
 
-  if (directionalConfirmationCount < 2 && !isReversalSetup && !hasBreaker && !hasFvgReaction && !ema50CrossAligned) return null;
-  if (!alignedEngulfing && !alignedRejection && !(alignedStructure || hasMss) && !poiReclaim && !isReversalSetup && !hasBreaker && !hasFvgReaction && !ema50CrossAligned) return null;
+  if (directionalConfirmationCount < 2 && !isReversalSetup && !hasBreaker && !hasFvgReaction && !dynamicTrendTrigger) return null;
+  if (!alignedEngulfing && !alignedRejection && !(alignedStructure || hasMss) && !poiReclaim && !isReversalSetup && !hasBreaker && !hasFvgReaction && !dynamicTrendTrigger) return null;
 
   // Liquidity sweeps need actual reversal confirmation before the scanner fires.
   if ((alignedSweep || hasEqlSweep) && !alignedEngulfing && !(alignedStructure || hasMss) && !isReversalSetup && !hasBreaker) return null;
 
   // If the local tape is still moving against the setup, do not force an entry from the higher-level trend.
-  if (!alignedMomentum && !(alignedStructure || hasMss) && !alignedEngulfing && !poiReclaim && !isReversalSetup && !hasBreaker && !hasFvgReaction && !ema50CrossAligned) return null;
+  if (!alignedMomentum && !(alignedStructure || hasMss) && !alignedEngulfing && !poiReclaim && !isReversalSetup && !hasBreaker && !hasFvgReaction && !dynamicTrendTrigger) return null;
 
   // Favor the same setup family shown in the winning examples: reaction from a clean area, then displacement.
-  if (!freshReaction && !poiReclaim && !alignedSweep && !hasEqlSweep && !alignedRejection && !alignedEngulfing && !isReversalSetup && !hasBreaker && !hasFvgReaction && !ema50CrossAligned) return null;
-  if (!freshDisplacement && !(alignedStructure || hasMss) && !alignedEngulfing && !poiReclaim && !isReversalSetup && !hasBreaker && !hasFvgReaction && !ema50CrossAligned) return null;
+  if (!freshReaction && !poiReclaim && !alignedSweep && !hasEqlSweep && !alignedRejection && !alignedEngulfing && !isReversalSetup && !hasBreaker && !hasFvgReaction && !dynamicTrendTrigger) return null;
+  if (!freshDisplacement && !(alignedStructure || hasMss) && !alignedEngulfing && !poiReclaim && !isReversalSetup && !hasBreaker && !hasFvgReaction && !dynamicTrendTrigger) return null;
 
   const entry = last.close;
   // EMA 50 cross: anchor SL to EMA 200 (the macro filter level). Otherwise use structural SL.
-  const stopLossDecision = ema50CrossAligned && emaTrend.ema200 != null
+  const stopLossDecision = dynamicTrendTrigger && emaTrend.ema200 != null
     ? {
         stopLoss: computeEma200AnchoredStopLoss(symbol, direction, candles, emaTrend.ema200),
         slReason: 'EMA200-anchored SL' as const,
       }
     : computeStopLoss(symbol, direction, candles);
   const stopLoss = stopLossDecision.stopLoss;
-  const { takeProfit, takeProfit2, structuralTargets } = resolveTakeProfitTargets(symbol, direction, entry, stopLoss, candles);
+  const { takeProfit, takeProfit2, structuralTargets } = resolveTakeProfitTargets(symbol, direction, entry, stopLoss, candles, {
+    useStructuralTargets: !ema200ReclaimRetest,
+  });
 
-  if (isVolatilitySymbol(symbol) && structuralTargets.length === 0 && !ema50CrossAligned) return null;
+  if (isVolatilitySymbol(symbol) && structuralTargets.length === 0 && !dynamicTrendTrigger) return null;
 
   // Sanity: TP must be in the right direction
   if (direction === 'buy' && takeProfit <= entry) return null;
@@ -3778,6 +3868,10 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
         ? direction === 'buy'
           ? 'Bullish FVG Fill Continuation'
           : 'Bearish FVG Fill Continuation'
+      : ema200ReclaimRetest
+        ? direction === 'buy'
+          ? 'Bullish EMA200 Reclaim Continuation'
+          : 'Bearish EMA200 Reclaim Continuation'
       : hasEqlSweep
         ? direction === 'buy'
           ? 'Bullish EQL Sweep Reversal'
@@ -3802,6 +3896,11 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
         : []),
       ...(macroTrend !== 'ranging'
         ? [direction === 'buy' ? 'Price above EMA 200 — macro bullish filter' : 'Price below EMA 200 — macro bearish filter']
+        : []),
+      ...(ema200ReclaimRetest
+        ? [direction === 'buy'
+          ? 'EMA200 reclaim, retest, and strong close above EMA20/EMA50 confirmed'
+          : 'EMA200 reclaim, retest, and strong close below EMA20/EMA50 confirmed']
         : []),
       ...(ema50Exec.nearEma50
         ? [direction === 'buy' ? 'Pullback to EMA 50 dynamic support' : 'Pullback to EMA 50 dynamic resistance']
