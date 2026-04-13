@@ -205,6 +205,27 @@ interface CachedAiPotentialReview {
 const potentialCache = new Map<string, CachedPotential>();
 const aiPotentialReviewCache = new Map<string, CachedAiPotentialReview>();
 
+function usesFixedIndexPoints(symbol: string): boolean {
+  return ['NAS100', 'US30'].includes(symbol.trim().toUpperCase());
+}
+
+function applyFixedIndexRisk(potential: PotentialTradeSetup): PotentialTradeSetup {
+  if (!usesFixedIndexPoints(potential.symbol)) {
+    return potential;
+  }
+
+  const stopLoss = potential.direction === 'buy' ? potential.entry - 50 : potential.entry + 50;
+  const takeProfit = potential.direction === 'buy' ? potential.entry + 100 : potential.entry - 100;
+
+  return {
+    ...potential,
+    stopLoss,
+    slReason: 'Fixed index points',
+    takeProfit,
+    takeProfit2: takeProfit,
+  };
+}
+
 function buildPotentialFingerprint(potentials: PotentialTradeSetup[]): string {
   if (potentials.length === 0) return 'empty';
   return potentials
@@ -391,8 +412,16 @@ async function reviewPotentialTradeWithAi(
           const tp1Multiple = computeRewardMultiple(reviewed.direction, reviewed.entry, reviewed.stopLoss, reviewed.takeProfit) ?? 2;
           const tp2Multiple = computeRewardMultiple(reviewed.direction, reviewed.entry, reviewed.stopLoss, reviewed.takeProfit2) ?? 3;
           reviewed.entry = aiPreferredEntry;
-          reviewed.takeProfit = projectTargetFromRewardMultiple(reviewed.direction, reviewed.entry, reviewed.stopLoss, tp1Multiple) ?? reviewed.takeProfit;
-          reviewed.takeProfit2 = projectTargetFromRewardMultiple(reviewed.direction, reviewed.entry, reviewed.stopLoss, tp2Multiple) ?? reviewed.takeProfit;
+          if (usesFixedIndexPoints(reviewed.symbol)) {
+            const fixedRiskReviewed = applyFixedIndexRisk(reviewed);
+            reviewed.stopLoss = fixedRiskReviewed.stopLoss;
+            reviewed.slReason = fixedRiskReviewed.slReason;
+            reviewed.takeProfit = fixedRiskReviewed.takeProfit;
+            reviewed.takeProfit2 = fixedRiskReviewed.takeProfit2;
+          } else {
+            reviewed.takeProfit = projectTargetFromRewardMultiple(reviewed.direction, reviewed.entry, reviewed.stopLoss, tp1Multiple) ?? reviewed.takeProfit;
+            reviewed.takeProfit2 = projectTargetFromRewardMultiple(reviewed.direction, reviewed.entry, reviewed.stopLoss, tp2Multiple) ?? reviewed.takeProfit;
+          }
           reviewed.fulfilledConditions.push('Entry nudged into nearby AI-approved zone midpoint');
           reviewed.contextLabels.push('AI entry refined');
         }
@@ -911,6 +940,13 @@ function refinePotentialTradeWithH1(
 
   if (!alignedH1 && opposedH1) {
     return null;
+  }
+
+  if (usesFixedIndexPoints(nextPotential.symbol)) {
+    const fixedRiskPotential = applyFixedIndexRisk(nextPotential);
+    fixedRiskPotential.fulfilledConditions.push('Fixed NAS100/US30 TP/SL applied');
+    fixedRiskPotential.contextLabels.push('Fixed index risk');
+    return fixedRiskPotential;
   }
 
   const risk = Math.abs(nextPotential.entry - nextPotential.stopLoss);

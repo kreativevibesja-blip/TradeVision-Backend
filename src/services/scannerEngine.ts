@@ -68,7 +68,7 @@ export interface TradeSetup {
   direction: 'buy' | 'sell';
   entry: number;
   stopLoss: number;
-  slReason?: 'Zone-based buffered SL' | 'Swing-based ATR fallback SL' | 'EMA200-anchored SL';
+  slReason?: 'Zone-based buffered SL' | 'Swing-based ATR fallback SL' | 'EMA200-anchored SL' | 'Fixed index points';
   takeProfit: number;
   takeProfit2: number;
   emaMomentum: boolean;
@@ -116,7 +116,7 @@ export interface PotentialTradeSetup {
   currentPrice: number;
   entry: number;
   stopLoss: number;
-  slReason?: 'Zone-based buffered SL' | 'Swing-based ATR fallback SL' | 'EMA200-anchored SL';
+  slReason?: 'Zone-based buffered SL' | 'Swing-based ATR fallback SL' | 'EMA200-anchored SL' | 'Fixed index points';
   takeProfit: number;
   takeProfit2: number;
   emaMomentum: boolean;
@@ -887,6 +887,26 @@ function isVolatilitySymbol(symbol: string): boolean {
 
 function isForexSymbol(symbol: string): boolean {
   return /^[A-Z]{6}$/.test(symbol) && !['XAUUSD', 'XAGUSD', 'BTCUSD', 'ETHUSD', 'SOLUSD', 'XRPUSD', 'ADAUSD', 'LTCUSD', 'NAS100', 'SPX500'].includes(symbol);
+}
+
+function usesFixedIndexPoints(symbol: string): boolean {
+  return ['NAS100', 'US30'].includes(symbol.trim().toUpperCase());
+}
+
+function getFixedIndexRiskTargets(symbol: string, direction: 'buy' | 'sell', entry: number) {
+  if (!usesFixedIndexPoints(symbol)) {
+    return null;
+  }
+
+  const stopLoss = direction === 'buy' ? entry - 50 : entry + 50;
+  const takeProfit = direction === 'buy' ? entry + 100 : entry - 100;
+
+  return {
+    stopLoss,
+    takeProfit,
+    takeProfit2: takeProfit,
+    slReason: 'Fixed index points' as const,
+  };
 }
 
 function average(values: number[]): number {
@@ -2980,16 +3000,24 @@ function buildPotentialCandidate({
     ote,
     fvgReaction,
   });
-  const stopLossDecision = dynamicTrendTrigger && emaTrend.ema200 != null
+  const fixedIndexRisk = getFixedIndexRiskTargets(symbol, direction, entry);
+  const stopLossDecision = fixedIndexRisk
+    ? {
+        stopLoss: fixedIndexRisk.stopLoss,
+        slReason: fixedIndexRisk.slReason,
+      }
+    : dynamicTrendTrigger && emaTrend.ema200 != null
     ? {
         stopLoss: computeEma200AnchoredStopLoss(symbol, direction, candles, emaTrend.ema200),
         slReason: 'EMA200-anchored SL' as const,
       }
     : computeStopLoss(symbol, direction, candles);
   const stopLoss = stopLossDecision.stopLoss;
-  const { takeProfit, takeProfit2, structuralTargets } = resolveTakeProfitTargets(symbol, direction, entry, stopLoss, candles, {
-    useStructuralTargets: !ema200ReclaimRetest,
-  });
+  const { takeProfit, takeProfit2, structuralTargets } = fixedIndexRisk
+    ? { takeProfit: fixedIndexRisk.takeProfit, takeProfit2: fixedIndexRisk.takeProfit2, structuralTargets: [] as number[] }
+    : resolveTakeProfitTargets(symbol, direction, entry, stopLoss, candles, {
+        useStructuralTargets: !ema200ReclaimRetest,
+      });
 
   if (isVolatilitySymbol(symbol) && structuralTargets.length === 0 && !dynamicTrendTrigger) {
     return null;
@@ -3802,16 +3830,24 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
 
   const entry = last.close;
   // EMA 50 cross: anchor SL to EMA 200 (the macro filter level). Otherwise use structural SL.
-  const stopLossDecision = dynamicTrendTrigger && emaTrend.ema200 != null
+  const fixedIndexRisk = getFixedIndexRiskTargets(symbol, direction, entry);
+  const stopLossDecision = fixedIndexRisk
+    ? {
+        stopLoss: fixedIndexRisk.stopLoss,
+        slReason: fixedIndexRisk.slReason,
+      }
+    : dynamicTrendTrigger && emaTrend.ema200 != null
     ? {
         stopLoss: computeEma200AnchoredStopLoss(symbol, direction, candles, emaTrend.ema200),
         slReason: 'EMA200-anchored SL' as const,
       }
     : computeStopLoss(symbol, direction, candles);
   const stopLoss = stopLossDecision.stopLoss;
-  const { takeProfit, takeProfit2, structuralTargets } = resolveTakeProfitTargets(symbol, direction, entry, stopLoss, candles, {
-    useStructuralTargets: !ema200ReclaimRetest,
-  });
+  const { takeProfit, takeProfit2, structuralTargets } = fixedIndexRisk
+    ? { takeProfit: fixedIndexRisk.takeProfit, takeProfit2: fixedIndexRisk.takeProfit2, structuralTargets: [] as number[] }
+    : resolveTakeProfitTargets(symbol, direction, entry, stopLoss, candles, {
+        useStructuralTargets: !ema200ReclaimRetest,
+      });
 
   if (isVolatilitySymbol(symbol) && structuralTargets.length === 0 && !dynamicTrendTrigger) return null;
 
