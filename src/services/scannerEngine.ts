@@ -898,8 +898,8 @@ function getFixedIndexRiskTargets(symbol: string, direction: 'buy' | 'sell', ent
     return null;
   }
 
-  const stopLoss = direction === 'buy' ? entry - 50 : entry + 50;
-  const takeProfit = direction === 'buy' ? entry + 100 : entry - 100;
+  const stopLoss = direction === 'buy' ? entry - 100 : entry + 100;
+  const takeProfit = direction === 'buy' ? entry + 200 : entry - 200;
 
   return {
     stopLoss,
@@ -1498,6 +1498,33 @@ function candidateMatchesRegime(candidate: PotentialTradeSetup, regime: MarketRe
   return strategy.includes('reversal') || strategy.includes('countertrend');
 }
 
+function hasStrongCountertrendRangeConfirmation(input: {
+  direction: 'buy' | 'sell';
+  broaderTrend: TrendDirection;
+  emaAligned: boolean;
+  alignedStructure: boolean;
+  alignedMomentum: boolean;
+  freshDisplacement: boolean;
+  alignedSweep: boolean;
+  hasEdgeBase: boolean;
+}): boolean {
+  const broaderTrendOpposesDirection = input.broaderTrend !== 'ranging'
+    && ((input.direction === 'buy' && input.broaderTrend === 'bearish')
+      || (input.direction === 'sell' && input.broaderTrend === 'bullish'));
+
+  if (!broaderTrendOpposesDirection || input.emaAligned) {
+    return true;
+  }
+
+  // Do not fade a non-ranging macro move from the boundary alone.
+  // Require an actual rotation sequence: break, momentum shift, displacement,
+  // plus either a sweep failure or a clear edge base before release.
+  return input.alignedStructure
+    && input.alignedMomentum
+    && input.freshDisplacement
+    && (input.alignedSweep || input.hasEdgeBase);
+}
+
 function buildSupportResistanceTradeSetup(
   symbol: string,
   candles: Candle[],
@@ -1539,6 +1566,16 @@ function buildSupportResistanceTradeSetup(
   const emaAligned = isEmaDirectionAligned(direction, emaTrend);
   const edgePrice = direction === 'sell' ? range.resistance : range.support;
   const hasEdgeBase = detectEdgeConsolidationBase(candles, direction, edgePrice, range.baselineRange);
+  const countertrendRangeConfirmed = hasStrongCountertrendRangeConfirmation({
+    direction,
+    broaderTrend,
+    emaAligned,
+    alignedStructure,
+    alignedMomentum,
+    freshDisplacement,
+    alignedSweep,
+    hasEdgeBase,
+  });
 
   const confirmationCount = [
     zoneReaction,
@@ -1561,6 +1598,10 @@ function buildSupportResistanceTradeSetup(
   }
 
   if (confirmationCount < 3) {
+    return null;
+  }
+
+  if (!countertrendRangeConfirmed) {
     return null;
   }
 
@@ -1686,6 +1727,16 @@ function buildSupportResistanceRangePotential(
   const emaAligned = isEmaDirectionAligned(direction, emaTrend);
   const edgePrice = direction === 'sell' ? range.resistance : range.support;
   const hasEdgeBase = detectEdgeConsolidationBase(candles, direction, edgePrice, range.baselineRange);
+  const countertrendRangeConfirmed = hasStrongCountertrendRangeConfirmation({
+    direction,
+    broaderTrend,
+    emaAligned,
+    alignedStructure,
+    alignedMomentum,
+    freshDisplacement,
+    alignedSweep,
+    hasEdgeBase,
+  });
   const tradeConfirmations = buildTradeConfirmations({
     alignedSweep,
     alignedEngulfing,
@@ -1718,6 +1769,10 @@ function buildSupportResistanceRangePotential(
   }
 
   if (!hasStrongBoundary || !hasRejectionConfirmation) {
+    return null;
+  }
+
+  if (!countertrendRangeConfirmed) {
     return null;
   }
 

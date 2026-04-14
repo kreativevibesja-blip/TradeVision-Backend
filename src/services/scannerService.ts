@@ -214,8 +214,8 @@ function applyFixedIndexRisk(potential: PotentialTradeSetup): PotentialTradeSetu
     return potential;
   }
 
-  const stopLoss = potential.direction === 'buy' ? potential.entry - 50 : potential.entry + 50;
-  const takeProfit = potential.direction === 'buy' ? potential.entry + 100 : potential.entry - 100;
+  const stopLoss = potential.direction === 'buy' ? potential.entry - 100 : potential.entry + 100;
+  const takeProfit = potential.direction === 'buy' ? potential.entry + 200 : potential.entry - 200;
 
   return {
     ...potential,
