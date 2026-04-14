@@ -1,7 +1,7 @@
 import path from 'path';
 import fs from 'fs/promises';
 import { randomUUID } from 'crypto';
-import { Response } from 'express';
+import { Request, Response } from 'express';
 import { AuthRequest } from '../middleware/auth';
 import { config } from '../config';
 import { inferAssetClass } from '../utils/volatilityDetector';
@@ -17,6 +17,8 @@ import {
   createQueueJob,
   countActiveQueueJobs,
   countRecentQueueJobs,
+  logUploadError,
+  type UploadErrorType,
 } from '../lib/supabase';
 import { runAnalysisPipeline } from '../services/analysis/runAnalysisPipeline';
 import { getCachedCandles } from '../lib/db/saveCandles';
@@ -109,6 +111,70 @@ const getPaidUsageWindowStart = (lastUsageReset?: string | null) => {
   }
 
   return monthStartIso;
+};
+
+const classifyUploadFailure = (value: unknown): UploadErrorType => {
+  const message = value instanceof Error ? value.message.toUpperCase() : String(value ?? '').toUpperCase();
+
+  if (message.includes('INVALID_TYPE')) return 'INVALID_TYPE';
+  if (message.includes('FILE_TOO_LARGE')) return 'FILE_TOO_LARGE';
+  if (message.includes('EMPTY_IMAGE')) return 'EMPTY_IMAGE';
+  if (message.includes('CORRUPTED')) return 'CORRUPTED_FILE';
+  return 'READ_ERROR';
+};
+
+const getUploadFailureMessage = (errorType: UploadErrorType) => {
+  switch (errorType) {
+    case 'INVALID_TYPE':
+      return 'That file type isn’t supported. Please upload a PNG or JPG screenshot.';
+    case 'FILE_TOO_LARGE':
+      return 'File is too large. Please upload an image under 5MB.';
+    case 'CORRUPTED_FILE':
+      return 'We couldn’t process that image. Try taking a fresh screenshot.';
+    case 'EMPTY_IMAGE':
+      return 'The image appears blank or unclear. Please upload a clearer chart.';
+    case 'READ_ERROR':
+    default:
+      return 'There was an issue reading the file. Please try again.';
+  }
+};
+
+const readUploadedChartFile = async (filename: string, mimeType?: string | null) => {
+  try {
+    const fileBuffer = await fs.readFile(path.join(process.cwd(), config.upload.dir, filename));
+    if (!fileBuffer.length) {
+      throw new Error('EMPTY_IMAGE');
+    }
+
+    return {
+      base64Image: fileBuffer.toString('base64'),
+      mimeType: mimeType || 'image/jpeg',
+    };
+  } catch (error) {
+    const errorType = classifyUploadFailure(error);
+    throw new Error(errorType === 'READ_ERROR' ? 'CORRUPTED_FILE' : errorType);
+  }
+};
+
+export const recordUploadError = async (req: Request, res: Response) => {
+  try {
+    const errorType = classifyUploadFailure(req.body?.errorType);
+    await logUploadError({
+      userId: typeof req.body?.userId === 'string' ? req.body.userId : null,
+      errorType,
+      fileType: typeof req.body?.fileType === 'string' ? req.body.fileType : null,
+      fileSize: typeof req.body?.fileSize === 'number' ? req.body.fileSize : Number(req.body?.fileSize ?? NaN),
+      source: typeof req.body?.source === 'string' ? req.body.source : 'chart-upload-client',
+      stage: typeof req.body?.stage === 'string' ? req.body.stage : 'frontend',
+      message: typeof req.body?.message === 'string' ? req.body.message : getUploadFailureMessage(errorType),
+      metadata: req.body?.metadata && typeof req.body.metadata === 'object' ? req.body.metadata : null,
+    });
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Upload error logging failed:', error);
+    return res.status(500).json({ error: 'Failed to log upload error' });
+  }
 };
 
 export const serializeAnalysis = (analysis: any) => ({
@@ -295,14 +361,24 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
 
     // Read image data up-front (needed for both instant and queued paths)
     const primaryImage = chartFile
-      ? {
-          base64Image: (await fs.readFile(path.join(process.cwd(), config.upload.dir, chartFile.filename))).toString('base64'),
-          mimeType: chartFile.mimetype || 'image/jpeg',
-        }
+      ? await readUploadedChartFile(chartFile.filename, chartFile.mimetype)
       : {
           base64Image: inlineImage!.base64Image,
           mimeType: inlineImage!.mimeType,
         };
+
+    if (!primaryImage.base64Image.trim()) {
+      await logUploadError({
+        userId: req.user?.id ?? null,
+        errorType: 'EMPTY_IMAGE',
+        fileType: chartFile?.mimetype || inlineImage?.mimeType || null,
+        fileSize: chartFile?.size ?? null,
+        source: 'chart-upload-api',
+        stage: 'controller-validation',
+        message: 'Primary chart image was empty after upload read.',
+      });
+      return res.status(400).json({ error: getUploadFailureMessage('EMPTY_IMAGE'), errorType: 'EMPTY_IMAGE' });
+    }
 
     const imageUrl = chartFile ? `/uploads/${chartFile.filename}` : 'inline-upload';
     const analysisId = randomUUID();
@@ -310,8 +386,7 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
     // Build secondary image data if present
     const secondaryImage = chart2File
       ? {
-          base64Image: (await fs.readFile(path.join(process.cwd(), config.upload.dir, chart2File.filename))).toString('base64'),
-          mimeType: chart2File.mimetype || 'image/jpeg',
+          ...(await readUploadedChartFile(chart2File.filename, chart2File.mimetype)),
           imageUrl: `/uploads/${chart2File.filename}`,
           timeframe: timeframe2!,
         }
@@ -416,6 +491,24 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
     }
 
     console.error('Analyze chart error:', error);
+    const uploadErrorType = classifyUploadFailure(error);
+
+    if (uploadErrorType !== 'READ_ERROR' || String(error instanceof Error ? error.message : '').toUpperCase().includes('READ')) {
+      await logUploadError({
+        userId: req.user?.id ?? null,
+        errorType: uploadErrorType,
+        fileType: null,
+        fileSize: null,
+        source: 'chart-upload-api',
+        stage: 'analysis-controller',
+        message: error instanceof Error ? error.message : 'Unknown chart upload failure',
+      }).catch(() => {});
+
+      if (uploadErrorType !== 'READ_ERROR' || error instanceof Error) {
+        return res.status(400).json({ error: getUploadFailureMessage(uploadErrorType), errorType: uploadErrorType });
+      }
+    }
+
     return res.status(500).json({ error: 'Failed to analyze chart' });
   }
 };

@@ -11,6 +11,7 @@ import {
   getAnalysisLogs,
   getPayments,
   updatePaymentStatus,
+  sendPaymentReminder,
   getAnalytics,
   getPricingPlans,
   getPublicPricingPlans,
@@ -65,6 +66,7 @@ router.get('/analyses', getAnalysisLogs);
 router.get('/analyses/:id', getAdminAnalysisById);
 router.get('/payments', getPayments);
 router.patch('/payments/:id', updatePaymentStatus);
+router.post('/payments/:id/send-reminder', sendPaymentReminder);
 router.get('/analytics', getAnalytics);
 router.get('/pricing-plans', getPricingPlans);
 router.post('/pricing-plans', createPricingPlan);

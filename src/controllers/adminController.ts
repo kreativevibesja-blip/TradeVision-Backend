@@ -37,6 +37,7 @@ import { setBillingStateFromAdmin } from '../services/billing';
 import { getBillingSummaryForUser } from '../services/billing';
 import { setBillingStateFromPayment } from '../services/billing';
 import { processReferralPayment } from '../services/referralService';
+import { sendPaymentReminderEmail } from '../services/paymentReminderEmail';
 
 const ANNOUNCEMENT_CONTENT_VERSION = 1;
 const DEFAULT_SUPPORT_WHATSAPP_NUMBER = '18762797956';
@@ -317,7 +318,7 @@ export const getPayments = async (req: Request, res: Response) => {
   try {
     const page = parseInt(req.query.page as string) || 1;
     const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
-    const scope = req.query.scope === 'COMPLETED_CHECKOUTS' || req.query.scope === 'BANK_TRANSFERS'
+    const scope = req.query.scope === 'COMPLETED_CHECKOUTS' || req.query.scope === 'BANK_TRANSFERS' || req.query.scope === 'ALL_PAYMENTS'
       ? req.query.scope
       : undefined;
     const plan = req.query.plan === 'FREE' || req.query.plan === 'PRO' || req.query.plan === 'TOP_TIER' ? req.query.plan : undefined;
@@ -330,7 +331,7 @@ export const getPayments = async (req: Request, res: Response) => {
     const dateRange = typeof req.query.dateRange === 'string' ? req.query.dateRange : 'all';
 
     const status = scope === 'COMPLETED_CHECKOUTS' ? 'COMPLETED' : requestedStatus;
-    const paymentMethod = scope === 'BANK_TRANSFERS' ? 'BANK_TRANSFER' : requestedPaymentMethod;
+    const paymentMethod = scope === 'BANK_TRANSFERS' ? 'BANK_TRANSFER' : scope === 'ALL_PAYMENTS' ? undefined : requestedPaymentMethod;
     const paymentMethods = scope === 'COMPLETED_CHECKOUTS' ? ['PAYPAL', 'CARD'] as PaymentMethod[] : undefined;
 
     const createdAfter = (() => {
@@ -394,6 +395,46 @@ export const updatePaymentStatus = async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Admin payment update error:', error);
     return res.status(500).json({ error: 'Failed to update payment' });
+  }
+};
+
+export const sendPaymentReminder = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { couponCode, discountLabel } = req.body as { couponCode?: string; discountLabel?: string };
+
+    const payment = await getPaymentById(id);
+    if (!payment) {
+      return res.status(404).json({ error: 'Payment not found' });
+    }
+
+    if (payment.status !== 'PENDING') {
+      return res.status(400).json({ error: 'Can only send reminders for pending payments' });
+    }
+
+    const user = await getUserById(payment.userId);
+    if (!user?.email) {
+      return res.status(400).json({ error: 'User email not found' });
+    }
+
+    const result = await sendPaymentReminderEmail({
+      to: user.email,
+      userName: user.name || 'Trader',
+      plan: payment.plan,
+      amount: payment.amount,
+      couponCode: couponCode || undefined,
+      discountLabel: discountLabel || undefined,
+      isBankTransfer: payment.paymentMethod === 'BANK_TRANSFER',
+    });
+
+    if (!result.ok) {
+      return res.status(502).json({ error: result.error || 'Failed to send email' });
+    }
+
+    return res.json({ success: true, message: `Reminder sent to ${user.email}` });
+  } catch (error) {
+    console.error('Admin send payment reminder error:', error);
+    return res.status(500).json({ error: 'Failed to send reminder' });
   }
 };
 
