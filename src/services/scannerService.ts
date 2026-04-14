@@ -1066,6 +1066,18 @@ async function hasTakeProfitOneAlert(scanResultId: string): Promise<boolean> {
   return (count ?? 0) > 0;
 }
 
+async function hasBreakevenAlert(scanResultId: string): Promise<boolean> {
+  const { count, error } = await supabase
+    .from(SCANNER_ALERT_TABLE)
+    .select('id', { count: 'exact', head: true })
+    .eq('scanResultId', scanResultId)
+    .eq('type', 'trade')
+    .like('message', '%breakeven%');
+
+  if (error) throw new Error(error.message);
+  return (count ?? 0) > 0;
+}
+
 function getStartOfNewYorkDay(): string {
   const now = new Date();
   const zonedNow = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
@@ -1416,7 +1428,7 @@ async function insertAlert(alert: { userId: string; scanResultId?: string; messa
 }
 
 function getFinalTakeProfit(result: ScanResult): number {
-  return result.takeProfit;
+  return hasSecondaryTakeProfit(result) ? result.takeProfit2 ?? result.takeProfit : result.takeProfit;
 }
 
 function hasSecondaryTakeProfit(result: ScanResult): boolean {
@@ -1519,6 +1531,16 @@ async function processResultLifecycle(
 
   if (result.status === 'triggered') {
     const finalTakeProfit = getFinalTakeProfit(result);
+    const risk = Math.abs(result.entry - result.stopLoss);
+    const finalReward = Math.abs(finalTakeProfit - result.entry);
+    const halfwayToFinalTarget = finalReward * 0.5;
+    const breakevenMoveRequirement = Math.max(halfwayToFinalTarget, risk * 1.1);
+    const breakevenTriggerPrice = result.direction === 'buy'
+      ? result.entry + breakevenMoveRequirement
+      : result.entry - breakevenMoveRequirement;
+    const hitBreakevenProtectZone = result.direction === 'buy'
+      ? highPrice >= breakevenTriggerPrice
+      : lowPrice <= breakevenTriggerPrice;
     const hitTakeProfitOne = result.direction === 'buy'
       ? highPrice >= result.takeProfit
       : lowPrice <= result.takeProfit;
@@ -1529,6 +1551,28 @@ async function processResultLifecycle(
     const hitStopLoss = result.direction === 'buy'
       ? lowPrice <= result.stopLoss
       : highPrice >= result.stopLoss;
+
+    if (Number.isFinite(risk)
+      && risk > 0
+      && Number.isFinite(finalReward)
+      && finalReward > 0
+      && hitBreakevenProtectZone
+      && !(await hasBreakevenAlert(result.id))) {
+      const alert = await insertAlert({
+        userId: result.userId,
+        scanResultId: result.id,
+        message: `${result.symbol} breakeven protect zone reached — consider moving SL to entry at ${result.entry.toFixed(decimals)}`,
+        type: 'trade',
+      });
+      alerts.push(alert);
+
+      sendPushToUser(result.userId, {
+        title: 'Move SL To Breakeven',
+        body: `${result.symbol} reached the breakeven protect zone. Consider moving stop loss to entry at ${result.entry.toFixed(decimals)}.`,
+        tag: `breakeven-${result.id}`,
+        url: '/dashboard/scanner',
+      }).catch((err) => console.error('[Push] Failed to send breakeven notification:', err));
+    }
 
     if (hasSecondaryTakeProfit(result) && hitTakeProfitOne && !hitTakeProfit && !(await hasTakeProfitOneAlert(result.id))) {
       const alert = await insertAlert({
