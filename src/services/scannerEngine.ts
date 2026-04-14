@@ -68,7 +68,7 @@ export interface TradeSetup {
   direction: 'buy' | 'sell';
   entry: number;
   stopLoss: number;
-  slReason?: 'Zone-based buffered SL' | 'Swing-based ATR fallback SL' | 'EMA200-anchored SL' | 'Fixed index points';
+  slReason?: 'Zone-based buffered SL' | 'Swing-based ATR fallback SL' | 'EMA200-anchored SL' | 'Fixed index points' | 'Fixed JPY pip targets';
   takeProfit: number;
   takeProfit2: number;
   emaMomentum: boolean;
@@ -116,7 +116,7 @@ export interface PotentialTradeSetup {
   currentPrice: number;
   entry: number;
   stopLoss: number;
-  slReason?: 'Zone-based buffered SL' | 'Swing-based ATR fallback SL' | 'EMA200-anchored SL' | 'Fixed index points';
+  slReason?: 'Zone-based buffered SL' | 'Swing-based ATR fallback SL' | 'EMA200-anchored SL' | 'Fixed index points' | 'Fixed JPY pip targets';
   takeProfit: number;
   takeProfit2: number;
   emaMomentum: boolean;
@@ -893,20 +893,37 @@ function usesFixedIndexPoints(symbol: string): boolean {
   return ['NAS100', 'US30'].includes(symbol.trim().toUpperCase());
 }
 
-function getFixedIndexRiskTargets(symbol: string, direction: 'buy' | 'sell', entry: number) {
-  if (!usesFixedIndexPoints(symbol)) {
-    return null;
+function usesFixedJpyPipTargets(symbol: string): boolean {
+  const normalized = symbol.trim().toUpperCase();
+  return isForexSymbol(normalized) && normalized.endsWith('JPY');
+}
+
+function getFixedSymbolRiskTargets(symbol: string, direction: 'buy' | 'sell', entry: number) {
+  if (usesFixedIndexPoints(symbol)) {
+    const stopLoss = direction === 'buy' ? entry - 100 : entry + 100;
+    const takeProfit = direction === 'buy' ? entry + 200 : entry - 200;
+
+    return {
+      stopLoss,
+      takeProfit,
+      takeProfit2: takeProfit,
+      slReason: 'Fixed index points' as const,
+    };
   }
 
-  const stopLoss = direction === 'buy' ? entry - 100 : entry + 100;
-  const takeProfit = direction === 'buy' ? entry + 200 : entry - 200;
+  if (usesFixedJpyPipTargets(symbol)) {
+    const stopLoss = direction === 'buy' ? entry - 0.30 : entry + 0.30;
+    const takeProfit = direction === 'buy' ? entry + 0.60 : entry - 0.60;
 
-  return {
-    stopLoss,
-    takeProfit,
-    takeProfit2: takeProfit,
-    slReason: 'Fixed index points' as const,
-  };
+    return {
+      stopLoss,
+      takeProfit,
+      takeProfit2: takeProfit,
+      slReason: 'Fixed JPY pip targets' as const,
+    };
+  }
+
+  return null;
 }
 
 function average(values: number[]): number {
@@ -3055,11 +3072,11 @@ function buildPotentialCandidate({
     ote,
     fvgReaction,
   });
-  const fixedIndexRisk = getFixedIndexRiskTargets(symbol, direction, entry);
-  const stopLossDecision = fixedIndexRisk
+  const fixedSymbolRisk = getFixedSymbolRiskTargets(symbol, direction, entry);
+  const stopLossDecision = fixedSymbolRisk
     ? {
-        stopLoss: fixedIndexRisk.stopLoss,
-        slReason: fixedIndexRisk.slReason,
+        stopLoss: fixedSymbolRisk.stopLoss,
+        slReason: fixedSymbolRisk.slReason,
       }
     : dynamicTrendTrigger && emaTrend.ema200 != null
     ? {
@@ -3068,8 +3085,8 @@ function buildPotentialCandidate({
       }
     : computeStopLoss(symbol, direction, candles);
   const stopLoss = stopLossDecision.stopLoss;
-  const { takeProfit, takeProfit2, structuralTargets } = fixedIndexRisk
-    ? { takeProfit: fixedIndexRisk.takeProfit, takeProfit2: fixedIndexRisk.takeProfit2, structuralTargets: [] as number[] }
+  const { takeProfit, takeProfit2, structuralTargets } = fixedSymbolRisk
+    ? { takeProfit: fixedSymbolRisk.takeProfit, takeProfit2: fixedSymbolRisk.takeProfit2, structuralTargets: [] as number[] }
     : resolveTakeProfitTargets(symbol, direction, entry, stopLoss, candles, {
         useStructuralTargets: !ema200ReclaimRetest,
       });
@@ -3885,11 +3902,11 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
 
   const entry = last.close;
   // EMA 50 cross: anchor SL to EMA 200 (the macro filter level). Otherwise use structural SL.
-  const fixedIndexRisk = getFixedIndexRiskTargets(symbol, direction, entry);
-  const stopLossDecision = fixedIndexRisk
+  const fixedSymbolRisk = getFixedSymbolRiskTargets(symbol, direction, entry);
+  const stopLossDecision = fixedSymbolRisk
     ? {
-        stopLoss: fixedIndexRisk.stopLoss,
-        slReason: fixedIndexRisk.slReason,
+        stopLoss: fixedSymbolRisk.stopLoss,
+        slReason: fixedSymbolRisk.slReason,
       }
     : dynamicTrendTrigger && emaTrend.ema200 != null
     ? {
@@ -3898,8 +3915,8 @@ export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | n
       }
     : computeStopLoss(symbol, direction, candles);
   const stopLoss = stopLossDecision.stopLoss;
-  const { takeProfit, takeProfit2, structuralTargets } = fixedIndexRisk
-    ? { takeProfit: fixedIndexRisk.takeProfit, takeProfit2: fixedIndexRisk.takeProfit2, structuralTargets: [] as number[] }
+  const { takeProfit, takeProfit2, structuralTargets } = fixedSymbolRisk
+    ? { takeProfit: fixedSymbolRisk.takeProfit, takeProfit2: fixedSymbolRisk.takeProfit2, structuralTargets: [] as number[] }
     : resolveTakeProfitTargets(symbol, direction, entry, stopLoss, candles, {
         useStructuralTargets: !ema200ReclaimRetest,
       });

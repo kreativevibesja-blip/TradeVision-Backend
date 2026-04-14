@@ -209,21 +209,39 @@ function usesFixedIndexPoints(symbol: string): boolean {
   return ['NAS100', 'US30'].includes(symbol.trim().toUpperCase());
 }
 
-function applyFixedIndexRisk(potential: PotentialTradeSetup): PotentialTradeSetup {
-  if (!usesFixedIndexPoints(potential.symbol)) {
-    return potential;
+function usesFixedJpyPipTargets(symbol: string): boolean {
+  const normalized = symbol.trim().toUpperCase();
+  return /^[A-Z]{6}$/.test(normalized) && normalized.endsWith('JPY');
+}
+
+function applyFixedSymbolRisk(potential: PotentialTradeSetup): PotentialTradeSetup {
+  if (usesFixedIndexPoints(potential.symbol)) {
+    const stopLoss = potential.direction === 'buy' ? potential.entry - 100 : potential.entry + 100;
+    const takeProfit = potential.direction === 'buy' ? potential.entry + 200 : potential.entry - 200;
+
+    return {
+      ...potential,
+      stopLoss,
+      slReason: 'Fixed index points',
+      takeProfit,
+      takeProfit2: takeProfit,
+    };
   }
 
-  const stopLoss = potential.direction === 'buy' ? potential.entry - 100 : potential.entry + 100;
-  const takeProfit = potential.direction === 'buy' ? potential.entry + 200 : potential.entry - 200;
+  if (usesFixedJpyPipTargets(potential.symbol)) {
+    const stopLoss = potential.direction === 'buy' ? potential.entry - 0.30 : potential.entry + 0.30;
+    const takeProfit = potential.direction === 'buy' ? potential.entry + 0.60 : potential.entry - 0.60;
 
-  return {
-    ...potential,
-    stopLoss,
-    slReason: 'Fixed index points',
-    takeProfit,
-    takeProfit2: takeProfit,
-  };
+    return {
+      ...potential,
+      stopLoss,
+      slReason: 'Fixed JPY pip targets',
+      takeProfit,
+      takeProfit2: takeProfit,
+    };
+  }
+
+  return potential;
 }
 
 function buildPotentialFingerprint(potentials: PotentialTradeSetup[]): string {
@@ -412,8 +430,8 @@ async function reviewPotentialTradeWithAi(
           const tp1Multiple = computeRewardMultiple(reviewed.direction, reviewed.entry, reviewed.stopLoss, reviewed.takeProfit) ?? 2;
           const tp2Multiple = computeRewardMultiple(reviewed.direction, reviewed.entry, reviewed.stopLoss, reviewed.takeProfit2) ?? 3;
           reviewed.entry = aiPreferredEntry;
-          if (usesFixedIndexPoints(reviewed.symbol)) {
-            const fixedRiskReviewed = applyFixedIndexRisk(reviewed);
+          if (usesFixedIndexPoints(reviewed.symbol) || usesFixedJpyPipTargets(reviewed.symbol)) {
+            const fixedRiskReviewed = applyFixedSymbolRisk(reviewed);
             reviewed.stopLoss = fixedRiskReviewed.stopLoss;
             reviewed.slReason = fixedRiskReviewed.slReason;
             reviewed.takeProfit = fixedRiskReviewed.takeProfit;
@@ -942,10 +960,10 @@ function refinePotentialTradeWithH1(
     return null;
   }
 
-  if (usesFixedIndexPoints(nextPotential.symbol)) {
-    const fixedRiskPotential = applyFixedIndexRisk(nextPotential);
-    fixedRiskPotential.fulfilledConditions.push('Fixed NAS100/US30 TP/SL applied');
-    fixedRiskPotential.contextLabels.push('Fixed index risk');
+  if (usesFixedIndexPoints(nextPotential.symbol) || usesFixedJpyPipTargets(nextPotential.symbol)) {
+    const fixedRiskPotential = applyFixedSymbolRisk(nextPotential);
+    fixedRiskPotential.fulfilledConditions.push(usesFixedIndexPoints(nextPotential.symbol) ? 'Fixed NAS100/US30 TP/SL applied' : 'Fixed JPY pair TP/SL applied');
+    fixedRiskPotential.contextLabels.push(usesFixedIndexPoints(nextPotential.symbol) ? 'Fixed index risk' : 'Fixed JPY pip risk');
     return fixedRiskPotential;
   }
 
