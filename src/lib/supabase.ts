@@ -90,6 +90,7 @@ const VISITOR_PRESENCE_TABLE = 'VisitorPresence';
 const VISITOR_DAILY_TABLE = 'VisitorDaily';
 const TRADE_SIGNAL_TABLE = 'TradeSignal';
 const RISK_SETTINGS_TABLE = 'RiskSettings';
+const UPLOAD_ERROR_TABLE = 'upload_errors';
 
 export type SubscriptionTier = 'FREE' | 'PRO' | 'TOP_TIER';
 export type UserRole = 'USER' | 'ADMIN';
@@ -100,6 +101,7 @@ export type AnalysisStatus = 'QUEUED' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
 export type TicketStatus = 'OPEN' | 'IN_PROGRESS' | 'WAITING_ON_USER' | 'RESOLVED' | 'CLOSED';
 export type TicketPriority = 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT';
 export type TicketCategory = 'ACCOUNT' | 'BILLING' | 'ANALYSIS' | 'BUG' | 'FEATURE' | 'GENERAL';
+export type UploadErrorType = 'INVALID_TYPE' | 'FILE_TOO_LARGE' | 'CORRUPTED_FILE' | 'READ_ERROR' | 'EMPTY_IMAGE';
 
 export type SignalDirection = 'buy' | 'sell';
 export type SignalConfidence = 'A+' | 'A' | 'B' | 'avoid';
@@ -441,6 +443,32 @@ const deleteSingle = async (context: string, table: string, apply: (query: any) 
   const { error } = await apply(supabase.from(table).delete());
   if (error) {
     logDbError(context, error);
+  }
+};
+
+export const logUploadError = async (values: {
+  userId?: string | null;
+  errorType: UploadErrorType;
+  fileType?: string | null;
+  fileSize?: number | null;
+  source?: string | null;
+  stage?: string | null;
+  message?: string | null;
+  metadata?: Record<string, unknown> | null;
+}) => {
+  const { error } = await supabase.from(UPLOAD_ERROR_TABLE).insert({
+    userId: values.userId ?? null,
+    error_type: values.errorType,
+    file_type: values.fileType ?? null,
+    file_size: values.fileSize ?? null,
+    source: values.source ?? 'chart-upload',
+    stage: values.stage ?? null,
+    message: values.message ?? null,
+    metadata: values.metadata ?? null,
+  });
+
+  if (error) {
+    console.warn('[upload-errors] Failed to log upload error:', error.message);
   }
 };
 
