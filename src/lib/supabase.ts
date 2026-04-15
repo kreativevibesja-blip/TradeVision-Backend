@@ -96,7 +96,7 @@ const AUTO_TRADE_TABLE = 'AutoTrade';
 const AUTO_TRADE_LOG_TABLE = 'AutoTradeLog';
 const AUTO_PERFORMANCE_TABLE = 'AutoPerformance';
 
-export type SubscriptionTier = 'FREE' | 'PRO' | 'TOP_TIER';
+export type SubscriptionTier = 'FREE' | 'PRO' | 'TOP_TIER' | 'VIP_AUTO_TRADER';
 export type UserRole = 'USER' | 'ADMIN';
 export type PaymentStatus = 'PENDING' | 'COMPLETED' | 'FAILED' | 'REFUNDED';
 export type PaymentMethod = 'PAYPAL' | 'CARD' | 'BANK_TRANSFER' | 'COUPON';
@@ -117,9 +117,10 @@ export type AutoTradeStatus = 'pending' | 'executed' | 'closed' | 'rejected';
 export type AutoTradeResult = 'win' | 'loss' | 'breakeven';
 export type AutoTradeLogAction = 'signal_received' | 'executed' | 'rejected' | 'closed' | 'emergency_stop' | 'breakeven';
 
-export const hasPaidSubscription = (subscription: SubscriptionTier | string) => subscription === 'PRO' || subscription === 'TOP_TIER';
-export const hasAutoTraderSubscription = (subscription: SubscriptionTier | string) => subscription === 'TOP_TIER';
-export const getMonthlyAnalysisLimit = (subscription: SubscriptionTier | string) => subscription === 'TOP_TIER' ? config.limits.topTierMonthly : config.limits.proMonthly;
+export const hasPaidSubscription = (subscription: SubscriptionTier | string) => subscription === 'PRO' || subscription === 'TOP_TIER' || subscription === 'VIP_AUTO_TRADER';
+export const hasAutoTraderSubscription = (subscription: SubscriptionTier | string) => subscription === 'VIP_AUTO_TRADER';
+export const hasTopTierAccess = (subscription: SubscriptionTier | string) => subscription === 'TOP_TIER' || subscription === 'VIP_AUTO_TRADER';
+export const getMonthlyAnalysisLimit = (subscription: SubscriptionTier | string) => (subscription === 'TOP_TIER' || subscription === 'VIP_AUTO_TRADER') ? config.limits.topTierMonthly : config.limits.proMonthly;
 
 export interface UserRecord {
   id: string;
