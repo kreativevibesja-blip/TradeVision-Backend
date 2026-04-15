@@ -174,7 +174,7 @@ export const getUsers = async (req: Request, res: Response) => {
     const search = req.query.search as string;
     const page = parseInt(req.query.page as string) || 1;
     const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
-    const subscription = req.query.subscription === 'FREE' || req.query.subscription === 'PRO' || req.query.subscription === 'TOP_TIER'
+    const subscription = req.query.subscription === 'FREE' || req.query.subscription === 'PRO' || req.query.subscription === 'TOP_TIER' || req.query.subscription === 'VIP_AUTO_TRADER'
       ? req.query.subscription
       : undefined;
     const createdFrom = typeof req.query.createdFrom === 'string' && req.query.createdFrom.trim().length > 0
@@ -269,7 +269,7 @@ export const updateUser = async (req: Request, res: Response) => {
       ...(role && { role }),
     });
 
-    if (subscription === 'FREE' || subscription === 'PRO' || subscription === 'TOP_TIER') {
+    if (subscription === 'FREE' || subscription === 'PRO' || subscription === 'TOP_TIER' || subscription === 'VIP_AUTO_TRADER') {
       await setBillingStateFromAdmin(id, subscription);
       user = {
         ...user,
@@ -321,7 +321,7 @@ export const getPayments = async (req: Request, res: Response) => {
     const scope = req.query.scope === 'COMPLETED_CHECKOUTS' || req.query.scope === 'BANK_TRANSFERS' || req.query.scope === 'ALL_PAYMENTS'
       ? req.query.scope
       : undefined;
-    const plan = req.query.plan === 'FREE' || req.query.plan === 'PRO' || req.query.plan === 'TOP_TIER' ? req.query.plan : undefined;
+    const plan = req.query.plan === 'FREE' || req.query.plan === 'PRO' || req.query.plan === 'TOP_TIER' || req.query.plan === 'VIP_AUTO_TRADER' ? req.query.plan : undefined;
     const requestedStatus = req.query.status === 'PENDING' || req.query.status === 'COMPLETED' || req.query.status === 'FAILED' || req.query.status === 'REFUNDED'
       ? req.query.status
       : undefined;
