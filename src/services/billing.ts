@@ -51,7 +51,12 @@ const isBillingState = (value: unknown): value is BillingState => {
 
   const candidate = value as Record<string, unknown>;
   return (
-    (candidate.currentPlan === 'FREE' || candidate.currentPlan === 'PRO' || candidate.currentPlan === 'TOP_TIER') &&
+    (
+      candidate.currentPlan === 'FREE' ||
+      candidate.currentPlan === 'PRO' ||
+      candidate.currentPlan === 'TOP_TIER' ||
+      candidate.currentPlan === 'VIP_AUTO_TRADER'
+    ) &&
     typeof candidate.status === 'string' &&
     'expiresAt' in candidate &&
     'lastPaymentAt' in candidate &&
