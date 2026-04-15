@@ -1,9 +1,11 @@
 import { Router } from 'express';
-import { authenticate, requireTopTier } from '../middleware/auth';
+import { authenticate, requireVipAutoTrader } from '../middleware/auth';
 import {
   getAutoSettings,
   updateAutoSettings,
+  getOAuthUrl,
   connectCTrader,
+  selectCTraderAccount,
   disconnectCTrader,
   getBalance,
   getTrades,
@@ -22,15 +24,17 @@ import {
 
 const router = Router();
 
-// ── User endpoints (TOP_TIER required) ──
-router.use(authenticate, requireTopTier);
+// ── User endpoints (VIP Auto Trader required) ──
+router.use(authenticate, requireVipAutoTrader);
 
 // Settings
 router.get('/settings', getAutoSettings);
 router.patch('/settings', updateAutoSettings);
 
-// cTrader connection
+// cTrader connection (OAuth)
+router.get('/oauth-url', getOAuthUrl);
 router.post('/connect', connectCTrader);
+router.post('/select-account', selectCTraderAccount);
 router.post('/disconnect', disconnectCTrader);
 router.get('/balance', getBalance);
 

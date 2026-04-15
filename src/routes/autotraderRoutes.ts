@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { authenticate, requireTopTier } from '../middleware/auth';
+import { authenticate, requireVipAutoTrader } from '../middleware/auth';
 import {
   createSignal,
   getSignals,
@@ -14,7 +14,7 @@ import {
 
 const router = Router();
 
-router.use(authenticate, requireTopTier);
+router.use(authenticate, requireVipAutoTrader);
 
 // Trade Signals
 router.post('/signals', createSignal);
