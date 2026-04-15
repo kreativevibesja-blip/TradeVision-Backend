@@ -1,4 +1,5 @@
 import { decrypt } from '../lib/encryption';
+import { config } from '../config';
 
 // ── Types ──
 
@@ -35,9 +36,26 @@ export interface CTraderAccountInfo {
   currency: string;
 }
 
+export interface CTraderTokenResponse {
+  access_token: string;
+  refresh_token: string;
+  token_type: string;
+  expires_in: number;
+}
+
+export interface CTraderTradingAccount {
+  accountId: string;
+  accountNumber: number;
+  live: boolean;
+  brokerName: string;
+  balance: number;
+  currency: string;
+}
+
 // ── cTrader API Client ──
 
-const CTRADER_API_BASE = process.env.CTRADER_API_URL || 'https://openapi.ctrader.com';
+const CTRADER_API_BASE = config.ctrader.apiUrl;
+const CTRADER_AUTH_BASE = config.ctrader.authUrl;
 
 const makeHeaders = (apiToken: string) => ({
   'Content-Type': 'application/json',
@@ -119,4 +137,45 @@ export const getOpenTrades = async (
   });
   const data = await handleResponse<{ positions: CTraderPosition[] }>(response, 'getOpenTrades');
   return data.positions ?? [];
+};
+
+// ── OAuth ──
+
+export const exchangeCodeForTokens = async (code: string): Promise<CTraderTokenResponse> => {
+  const response = await fetch(`${CTRADER_AUTH_BASE}/connect/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'authorization_code',
+      code,
+      client_id: config.ctrader.clientId,
+      client_secret: config.ctrader.clientSecret,
+      redirect_uri: config.ctrader.redirectUri,
+    }),
+  });
+  return handleResponse<CTraderTokenResponse>(response, 'exchangeCodeForTokens');
+};
+
+export const refreshAccessToken = async (encryptedRefreshToken: string): Promise<CTraderTokenResponse> => {
+  const refreshToken = decrypt(encryptedRefreshToken);
+  const response = await fetch(`${CTRADER_AUTH_BASE}/connect/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken,
+      client_id: config.ctrader.clientId,
+      client_secret: config.ctrader.clientSecret,
+    }),
+  });
+  return handleResponse<CTraderTokenResponse>(response, 'refreshAccessToken');
+};
+
+export const getTradingAccounts = async (accessToken: string): Promise<CTraderTradingAccount[]> => {
+  const response = await fetch(`${CTRADER_API_BASE}/v2/trading-accounts`, {
+    method: 'GET',
+    headers: makeHeaders(accessToken),
+  });
+  const data = await handleResponse<{ accounts: CTraderTradingAccount[] }>(response, 'getTradingAccounts');
+  return data.accounts ?? [];
 };

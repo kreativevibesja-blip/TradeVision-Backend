@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import { AuthRequest } from '../middleware/auth';
 import { encrypt } from '../lib/encryption';
+import { config } from '../config';
 import {
   getAutoTradeSettings,
   upsertAutoTradeSettings,
@@ -21,7 +22,7 @@ import {
   type AutoTradeStatus,
 } from '../lib/supabase';
 import { processSignal, executeTrade, emergencyStop, updatePerformanceAfterClose } from '../services/autoTraderEngine';
-import { connectAccount, getAccountBalance, getOpenTrades } from '../services/ctraderService';
+import { connectAccount, getAccountBalance, getOpenTrades, exchangeCodeForTokens, getTradingAccounts } from '../services/ctraderService';
 
 // ── Settings ──
 
@@ -124,29 +125,68 @@ export const updateAutoSettings = async (req: AuthRequest, res: Response) => {
   }
 };
 
-// ── cTrader Connection ──
+// ── cTrader Connection (OAuth) ──
+
+export const getOAuthUrl = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!config.ctrader.clientId || !config.ctrader.redirectUri) {
+      return res.status(500).json({ error: 'cTrader OAuth not configured' });
+    }
+    const params = new URLSearchParams({
+      client_id: config.ctrader.clientId,
+      redirect_uri: config.ctrader.redirectUri,
+      response_type: 'code',
+      scope: 'trading',
+    });
+    const url = `https://id.ctrader.com/connect/authorize?${params}`;
+    return res.json({ url });
+  } catch (error) {
+    console.error('[autoTrading] getOAuthUrl error:', error);
+    return res.status(500).json({ error: 'Failed to generate OAuth URL' });
+  }
+};
 
 export const connectCTrader = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    const { apiToken, accountId } = req.body;
+    const { code, accountId } = req.body;
 
-    if (!apiToken || typeof apiToken !== 'string' || apiToken.length < 10) {
-      return res.status(400).json({ error: 'Invalid API token' });
-    }
-    if (!accountId || typeof accountId !== 'string') {
-      return res.status(400).json({ error: 'Invalid account ID' });
+    if (!code || typeof code !== 'string') {
+      return res.status(400).json({ error: 'Missing authorization code' });
     }
 
-    // Encrypt token before storage
-    const encrypted = encrypt(apiToken);
+    // Exchange code for tokens
+    const tokens = await exchangeCodeForTokens(code);
+    const encryptedAccess = encrypt(tokens.access_token);
+    const encryptedRefresh = encrypt(tokens.refresh_token);
+
+    // If no accountId provided, fetch available accounts so user can pick
+    if (!accountId) {
+      const accounts = await getTradingAccounts(tokens.access_token);
+      return res.json({
+        success: true,
+        needsAccountSelection: true,
+        accounts: accounts.map((a) => ({
+          accountId: String(a.accountId),
+          accountNumber: a.accountNumber,
+          live: a.live,
+          brokerName: a.brokerName,
+          balance: a.balance,
+          currency: a.currency,
+        })),
+        // Temporarily store encrypted tokens so the next request can use them
+        tempAccessToken: encryptedAccess,
+        tempRefreshToken: encryptedRefresh,
+      });
+    }
 
     // Verify connection works
     try {
-      const account = await connectAccount(encrypted, accountId);
+      const account = await connectAccount(encryptedAccess, accountId);
       await upsertAutoTradeSettings(userId, {
         ctraderAccountId: accountId,
-        apiTokenEncrypted: encrypted,
+        apiTokenEncrypted: encryptedAccess,
+        refreshTokenEncrypted: encryptedRefresh,
       });
       return res.json({ success: true, balance: account.balance, currency: account.currency });
     } catch {
@@ -158,12 +198,43 @@ export const connectCTrader = async (req: AuthRequest, res: Response) => {
   }
 };
 
+export const selectCTraderAccount = async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { accountId, encryptedAccessToken, encryptedRefreshToken } = req.body;
+
+    if (!accountId || typeof accountId !== 'string') {
+      return res.status(400).json({ error: 'Invalid account ID' });
+    }
+    if (!encryptedAccessToken || !encryptedRefreshToken) {
+      return res.status(400).json({ error: 'Missing token data' });
+    }
+
+    // Verify connection with selected account
+    try {
+      const account = await connectAccount(encryptedAccessToken, accountId);
+      await upsertAutoTradeSettings(userId, {
+        ctraderAccountId: accountId,
+        apiTokenEncrypted: encryptedAccessToken,
+        refreshTokenEncrypted: encryptedRefreshToken,
+      });
+      return res.json({ success: true, balance: account.balance, currency: account.currency });
+    } catch {
+      return res.status(400).json({ error: 'Failed to connect to the selected account.' });
+    }
+  } catch (error) {
+    console.error('[autoTrading] selectCTraderAccount error:', error);
+    return res.status(500).json({ error: 'Failed to select account' });
+  }
+};
+
 export const disconnectCTrader = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
     await upsertAutoTradeSettings(userId, {
       ctraderAccountId: null,
       apiTokenEncrypted: null,
+      refreshTokenEncrypted: null,
       isActive: false,
       autoMode: 'off' as AutoTradeMode,
     });

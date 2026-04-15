@@ -375,6 +375,7 @@ export interface AutoTradeSettingsRecord {
   userId: string;
   ctraderAccountId: string | null;
   apiTokenEncrypted: string | null;
+  refreshTokenEncrypted: string | null;
   autoMode: AutoTradeMode;
   riskPerTrade: number;
   maxDailyLoss: number;
