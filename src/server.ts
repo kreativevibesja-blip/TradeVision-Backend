@@ -13,6 +13,8 @@ import referralRoutes from './routes/referralRoutes';
 import queueRoutes from './routes/queueRoutes';
 import presenceRoutes from './routes/presenceRoutes';
 import autotraderRoutes from './routes/autotraderRoutes';
+import autoTradingRoutes from './routes/autoTradingRoutes';
+import adminAutoTradingRoutes from './routes/adminAutoTradingRoutes';
 import scannerRoutes from './routes/scannerRoutes';
 import notificationRoutes from './routes/notificationRoutes';
 import { startQueueWorker } from './workers/queueWorker';
@@ -75,6 +77,8 @@ app.use('/api/admin', adminRoutes);
 app.use('/api', queueRoutes);
 app.use('/api', presenceRoutes);
 app.use('/api/autotrader', autotraderRoutes);
+app.use('/api/auto-trading', autoTradingRoutes);
+app.use('/api/admin/auto-trading', adminAutoTradingRoutes);
 app.use('/api/scanner', scannerRoutes);
 app.use('/api/notifications', notificationRoutes);
 

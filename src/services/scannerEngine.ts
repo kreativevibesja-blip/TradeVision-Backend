@@ -68,7 +68,7 @@ export interface TradeSetup {
   direction: 'buy' | 'sell';
   entry: number;
   stopLoss: number;
-  slReason?: 'Zone-based buffered SL' | 'Swing-based ATR fallback SL' | 'EMA200-anchored SL' | 'Fixed index points' | 'Fixed JPY pip targets';
+  slReason?: 'Zone-based buffered SL' | 'Swing-based ATR fallback SL' | 'EMA200-anchored SL' | 'Fixed index points' | 'Fixed JPY pip targets' | 'Fixed forex pip targets';
   takeProfit: number;
   takeProfit2: number;
   emaMomentum: boolean;
@@ -116,7 +116,7 @@ export interface PotentialTradeSetup {
   currentPrice: number;
   entry: number;
   stopLoss: number;
-  slReason?: 'Zone-based buffered SL' | 'Swing-based ATR fallback SL' | 'EMA200-anchored SL' | 'Fixed index points' | 'Fixed JPY pip targets';
+  slReason?: 'Zone-based buffered SL' | 'Swing-based ATR fallback SL' | 'EMA200-anchored SL' | 'Fixed index points' | 'Fixed JPY pip targets' | 'Fixed forex pip targets';
   takeProfit: number;
   takeProfit2: number;
   emaMomentum: boolean;
@@ -898,6 +898,11 @@ function usesFixedJpyPipTargets(symbol: string): boolean {
   return isForexSymbol(normalized) && normalized.endsWith('JPY');
 }
 
+function usesFixedForexPipTargets(symbol: string): boolean {
+  const normalized = symbol.trim().toUpperCase();
+  return isForexSymbol(normalized) && !normalized.endsWith('JPY');
+}
+
 function getFixedSymbolRiskTargets(symbol: string, direction: 'buy' | 'sell', entry: number) {
   if (usesFixedIndexPoints(symbol)) {
     const stopLoss = direction === 'buy' ? entry - 100 : entry + 100;
@@ -920,6 +925,21 @@ function getFixedSymbolRiskTargets(symbol: string, direction: 'buy' | 'sell', en
       takeProfit,
       takeProfit2: takeProfit,
       slReason: 'Fixed JPY pip targets' as const,
+    };
+  }
+
+  if (usesFixedForexPipTargets(symbol)) {
+    // Standard forex: 1 pip = 0.0001, SL = 20 pips, TP = 50 pips
+    const slPips = 0.0020;
+    const tpPips = 0.0050;
+    const stopLoss = direction === 'buy' ? entry - slPips : entry + slPips;
+    const takeProfit = direction === 'buy' ? entry + tpPips : entry - tpPips;
+
+    return {
+      stopLoss,
+      takeProfit,
+      takeProfit2: takeProfit,
+      slReason: 'Fixed forex pip targets' as const,
     };
   }
 

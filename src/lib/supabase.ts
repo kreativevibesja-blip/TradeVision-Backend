@@ -91,6 +91,10 @@ const VISITOR_DAILY_TABLE = 'VisitorDaily';
 const TRADE_SIGNAL_TABLE = 'TradeSignal';
 const RISK_SETTINGS_TABLE = 'RiskSettings';
 const UPLOAD_ERROR_TABLE = 'upload_errors';
+const AUTO_TRADE_SETTINGS_TABLE = 'AutoTradeSettings';
+const AUTO_TRADE_TABLE = 'AutoTrade';
+const AUTO_TRADE_LOG_TABLE = 'AutoTradeLog';
+const AUTO_PERFORMANCE_TABLE = 'AutoPerformance';
 
 export type SubscriptionTier = 'FREE' | 'PRO' | 'TOP_TIER';
 export type UserRole = 'USER' | 'ADMIN';
@@ -108,6 +112,10 @@ export type SignalConfidence = 'A+' | 'A' | 'B' | 'avoid';
 export type SignalStatus = 'pending' | 'ready' | 'executed' | 'cancelled' | 'expired';
 export type SignalMarketState = 'trending' | 'ranging' | 'choppy' | 'reversal';
 export type AutoMode = 'manual' | 'semi' | 'full';
+export type AutoTradeMode = 'off' | 'assisted' | 'semi' | 'full';
+export type AutoTradeStatus = 'pending' | 'executed' | 'closed' | 'rejected';
+export type AutoTradeResult = 'win' | 'loss' | 'breakeven';
+export type AutoTradeLogAction = 'signal_received' | 'executed' | 'rejected' | 'closed' | 'emergency_stop' | 'breakeven';
 
 export const hasPaidSubscription = (subscription: SubscriptionTier | string) => subscription === 'PRO' || subscription === 'TOP_TIER';
 export const hasAutoTraderSubscription = (subscription: SubscriptionTier | string) => subscription === 'TOP_TIER';
@@ -360,6 +368,64 @@ export interface RiskSettingsRecord {
   killSwitch: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface AutoTradeSettingsRecord {
+  id: string;
+  userId: string;
+  ctraderAccountId: string | null;
+  apiTokenEncrypted: string | null;
+  autoMode: AutoTradeMode;
+  riskPerTrade: number;
+  maxDailyLoss: number;
+  maxTradesPerDay: number;
+  allowedSessions: string[];
+  goldOnly: boolean;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AutoTradeRecord {
+  id: string;
+  userId: string;
+  symbol: string;
+  direction: 'buy' | 'sell';
+  entryPrice: number;
+  sl: number;
+  tp: number;
+  lotSize: number;
+  status: AutoTradeStatus;
+  result: AutoTradeResult | null;
+  profit: number | null;
+  ctraderOrderId: string | null;
+  scanResultId: string | null;
+  confidence: string | null;
+  marketState: string | null;
+  createdAt: string;
+  closedAt: string | null;
+}
+
+export interface AutoTradeLogRecord {
+  id: string;
+  userId: string;
+  tradeId: string | null;
+  action: AutoTradeLogAction;
+  reason: string | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+export interface AutoPerformanceRecord {
+  id: string;
+  userId: string;
+  totalTrades: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  totalProfit: number;
+  drawdown: number;
+  lastUpdated: string;
 }
 
 export interface LivePlatformMetrics {
@@ -1756,4 +1822,135 @@ export const toggleKillSwitch = async (userId: string, enabled: boolean) => {
     autoMode: 'manual',
     killSwitch: enabled,
   });
+};
+
+// ── Auto Trading: Settings ──
+
+export const getAutoTradeSettings = (userId: string) =>
+  maybeSingle<AutoTradeSettingsRecord>('getAutoTradeSettings', supabase.from(AUTO_TRADE_SETTINGS_TABLE).select('*').eq('userId', userId).maybeSingle());
+
+export const upsertAutoTradeSettings = async (userId: string, values: Partial<Omit<AutoTradeSettingsRecord, 'id' | 'userId' | 'createdAt' | 'updatedAt'>>) => {
+  const existing = await getAutoTradeSettings(userId);
+  if (existing) {
+    return updateSingle<AutoTradeSettingsRecord>('upsertAutoTradeSettings:update', AUTO_TRADE_SETTINGS_TABLE, {
+      ...values,
+      updatedAt: new Date().toISOString(),
+    }, (q) => q.eq('id', existing.id));
+  }
+  return insertSingle<AutoTradeSettingsRecord>('upsertAutoTradeSettings:insert', AUTO_TRADE_SETTINGS_TABLE, {
+    userId,
+    autoMode: 'off',
+    riskPerTrade: 1.0,
+    maxDailyLoss: 5.0,
+    maxTradesPerDay: 3,
+    allowedSessions: ['london', 'newyork'],
+    goldOnly: true,
+    isActive: false,
+    ...values,
+  });
+};
+
+export const getAllActiveAutoTradeSettings = () =>
+  many<AutoTradeSettingsRecord & { User?: { email: string; name: string | null } }>(
+    'getAllActiveAutoTradeSettings',
+    supabase.from(AUTO_TRADE_SETTINGS_TABLE).select('*, User:userId(email, name)').eq('isActive', true),
+  );
+
+export const getAllAutoTradeSettings = () =>
+  many<AutoTradeSettingsRecord & { User?: { email: string; name: string | null } }>(
+    'getAllAutoTradeSettings',
+    supabase.from(AUTO_TRADE_SETTINGS_TABLE).select('*, User:userId(email, name)').order('updatedAt', { ascending: false }),
+  );
+
+export const disableAutoTradeForUser = (userId: string) =>
+  upsertAutoTradeSettings(userId, { autoMode: 'off' as AutoTradeMode, isActive: false });
+
+// ── Auto Trading: Trades ──
+
+export const createAutoTrade = (values: Omit<AutoTradeRecord, 'id' | 'createdAt' | 'closedAt' | 'result' | 'profit'> & { result?: AutoTradeResult | null; profit?: number | null }) =>
+  insertSingle<AutoTradeRecord>('createAutoTrade', AUTO_TRADE_TABLE, values);
+
+export const getAutoTradeById = (id: string) =>
+  maybeSingle<AutoTradeRecord>('getAutoTradeById', supabase.from(AUTO_TRADE_TABLE).select('*').eq('id', id).maybeSingle());
+
+export const listAutoTradesForUser = async (userId: string, status?: AutoTradeStatus, limit = 50) => {
+  let query = supabase.from(AUTO_TRADE_TABLE).select('*').eq('userId', userId).order('createdAt', { ascending: false }).limit(limit);
+  if (status) query = query.eq('status', status);
+  return many<AutoTradeRecord>('listAutoTradesForUser', query);
+};
+
+export const updateAutoTrade = (id: string, values: Partial<AutoTradeRecord>) =>
+  updateSingle<AutoTradeRecord>('updateAutoTrade', AUTO_TRADE_TABLE, values, (q) => q.eq('id', id));
+
+export const countTodayAutoTrades = async (userId: string, todayStartIso: string) =>
+  countRows('countTodayAutoTrades', AUTO_TRADE_TABLE, (q) =>
+    q.eq('userId', userId).in('status', ['executed', 'closed']).gte('createdAt', todayStartIso));
+
+export const getTodayAutoTradesProfit = async (userId: string, todayStartIso: string): Promise<number> => {
+  const trades = await many<AutoTradeRecord>('getTodayAutoTradesProfit',
+    supabase.from(AUTO_TRADE_TABLE).select('profit').eq('userId', userId).eq('status', 'closed').gte('createdAt', todayStartIso));
+  return trades.reduce((sum, t) => sum + (t.profit ?? 0), 0);
+};
+
+export const getOpenAutoTrades = (userId: string) =>
+  many<AutoTradeRecord>('getOpenAutoTrades',
+    supabase.from(AUTO_TRADE_TABLE).select('*').eq('userId', userId).in('status', ['pending', 'executed']).order('createdAt', { ascending: false }));
+
+export const getPendingAutoTrades = (userId: string) =>
+  many<AutoTradeRecord>('getPendingAutoTrades',
+    supabase.from(AUTO_TRADE_TABLE).select('*').eq('userId', userId).eq('status', 'pending').order('createdAt', { ascending: false }));
+
+// ── Auto Trading: Logs ──
+
+export const createAutoTradeLog = (values: Omit<AutoTradeLogRecord, 'id' | 'createdAt'>) =>
+  insertSingle<AutoTradeLogRecord>('createAutoTradeLog', AUTO_TRADE_LOG_TABLE, values);
+
+export const listAutoTradeLogsForUser = (userId: string, limit = 100) =>
+  many<AutoTradeLogRecord>('listAutoTradeLogsForUser',
+    supabase.from(AUTO_TRADE_LOG_TABLE).select('*').eq('userId', userId).order('createdAt', { ascending: false }).limit(limit));
+
+export const listAllAutoTradeLogs = (limit = 200) =>
+  many<AutoTradeLogRecord>('listAllAutoTradeLogs',
+    supabase.from(AUTO_TRADE_LOG_TABLE).select('*').order('createdAt', { ascending: false }).limit(limit));
+
+// ── Auto Trading: Performance ──
+
+export const getAutoPerformance = (userId: string) =>
+  maybeSingle<AutoPerformanceRecord>('getAutoPerformance', supabase.from(AUTO_PERFORMANCE_TABLE).select('*').eq('userId', userId).maybeSingle());
+
+export const updateAutoPerformance = async (userId: string, values: Partial<Omit<AutoPerformanceRecord, 'id' | 'userId'>>) => {
+  const existing = await getAutoPerformance(userId);
+  if (existing) {
+    return updateSingle<AutoPerformanceRecord>('updateAutoPerformance:update', AUTO_PERFORMANCE_TABLE, {
+      ...values,
+      lastUpdated: new Date().toISOString(),
+    }, (q) => q.eq('id', existing.id));
+  }
+  return insertSingle<AutoPerformanceRecord>('updateAutoPerformance:insert', AUTO_PERFORMANCE_TABLE, {
+    userId,
+    totalTrades: 0,
+    wins: 0,
+    losses: 0,
+    winRate: 0,
+    totalProfit: 0,
+    drawdown: 0,
+    ...values,
+    lastUpdated: new Date().toISOString(),
+  });
+};
+
+export const getAllAutoPerformance = () =>
+  many<AutoPerformanceRecord>('getAllAutoPerformance',
+    supabase.from(AUTO_PERFORMANCE_TABLE).select('*').order('totalProfit', { ascending: false }));
+
+// ── Admin: Auto Trading aggregates ──
+
+export const countTodayAllAutoTrades = async (todayStartIso: string) =>
+  countRows('countTodayAllAutoTrades', AUTO_TRADE_TABLE, (q) =>
+    q.in('status', ['executed', 'closed']).gte('createdAt', todayStartIso));
+
+export const getTodayAllAutoTradesProfit = async (todayStartIso: string): Promise<number> => {
+  const trades = await many<AutoTradeRecord>('getTodayAllAutoTradesProfit',
+    supabase.from(AUTO_TRADE_TABLE).select('profit').eq('status', 'closed').gte('createdAt', todayStartIso));
+  return trades.reduce((sum, t) => sum + (t.profit ?? 0), 0);
 };
