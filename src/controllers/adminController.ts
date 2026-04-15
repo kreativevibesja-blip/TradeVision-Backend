@@ -147,10 +147,11 @@ const getExpiryFromRequest = (durationValue: unknown, durationUnit: unknown) => 
 export const getDashboardStats = async (_req: Request, res: Response) => {
   try {
     const jamaicaToday = getJamaicaTodayDate();
-    const [totalUsers, proSubscribers, topTierSubscribers, totalAnalyses, payments, liveMetrics] = await Promise.all([
+    const [totalUsers, proSubscribers, topTierSubscribers, vipAutoTraderSubscribers, totalAnalyses, payments, liveMetrics] = await Promise.all([
       countUsers(),
       countUsers('PRO'),
       countUsers('TOP_TIER'),
+      countUsers('VIP_AUTO_TRADER'),
       countAnalyses(),
       getCompletedRevenue(),
       getLivePlatformMetrics(jamaicaToday, getJamaicaDayStartIso(jamaicaToday), getActiveVisitorSinceIso()),
@@ -158,7 +159,7 @@ export const getDashboardStats = async (_req: Request, res: Response) => {
 
     return res.json({
       totalUsers,
-      activeSubscribers: proSubscribers + topTierSubscribers,
+      activeSubscribers: proSubscribers + topTierSubscribers + vipAutoTraderSubscribers,
       totalAnalyses,
       totalRevenue: payments || 0,
       liveMetrics,
