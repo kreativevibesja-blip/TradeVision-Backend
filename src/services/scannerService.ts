@@ -1175,11 +1175,11 @@ export async function getScanResults(
   if (scope === 'history') {
     const prioritizedHistory = [...scopedResults]
       .sort((left, right) => {
-        const leftOpen = left.status === 'active' || left.status === 'triggered';
-        const rightOpen = right.status === 'active' || right.status === 'triggered';
+        const leftCarryOver = left.status === 'triggered';
+        const rightCarryOver = right.status === 'triggered';
 
-        if (leftOpen !== rightOpen) {
-          return leftOpen ? -1 : 1;
+        if (leftCarryOver !== rightCarryOver) {
+          return leftCarryOver ? -1 : 1;
         }
 
         return new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime();
