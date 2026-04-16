@@ -92,6 +92,7 @@ const TRADE_SIGNAL_TABLE = 'TradeSignal';
 const RISK_SETTINGS_TABLE = 'RiskSettings';
 const UPLOAD_ERROR_TABLE = 'upload_errors';
 const AUTO_TRADE_SETTINGS_TABLE = 'AutoTradeSettings';
+const USER_TRADING_SETTINGS_TABLE = 'user_trading_settings';
 const AUTO_TRADE_TABLE = 'AutoTrade';
 const AUTO_TRADE_LOG_TABLE = 'AutoTradeLog';
 const AUTO_PERFORMANCE_TABLE = 'AutoPerformance';
@@ -113,9 +114,37 @@ export type SignalStatus = 'pending' | 'ready' | 'executed' | 'cancelled' | 'exp
 export type SignalMarketState = 'trending' | 'ranging' | 'choppy' | 'reversal';
 export type AutoMode = 'manual' | 'semi' | 'full';
 export type AutoTradeMode = 'off' | 'assisted' | 'semi' | 'full';
+export type StrategyMode = 'standard' | 'gold_scalper';
+export type SmartStrategyMode = 'standard' | 'gold_scalper' | 'spike_reaction';
+export type TradingPersonality = 'conservative' | 'balanced' | 'aggressive';
+export type AllowedTradingSession = 'london' | 'newyork';
+export type AllowedTradingAsset = 'gold' | 'indices' | 'forex';
 export type AutoTradeStatus = 'pending' | 'executed' | 'closed' | 'rejected';
 export type AutoTradeResult = 'win' | 'loss' | 'breakeven';
 export type AutoTradeLogAction = 'signal_received' | 'executed' | 'rejected' | 'closed' | 'emergency_stop' | 'breakeven';
+
+export interface UserTradingSettingsRecord {
+  user_id: string;
+  strategy_mode: SmartStrategyMode;
+  personality: TradingPersonality;
+  min_confidence: number;
+  allowed_sessions: AllowedTradingSession[];
+  allowed_assets: AllowedTradingAsset[];
+  auto_pause_enabled: boolean;
+  max_losses_in_row: number;
+  created_at: string;
+  updated_at: string;
+}
+
+const DEFAULT_USER_TRADING_SETTINGS: Omit<UserTradingSettingsRecord, 'user_id' | 'created_at' | 'updated_at'> = {
+  strategy_mode: 'standard',
+  personality: 'balanced',
+  min_confidence: 6,
+  allowed_sessions: ['london', 'newyork'],
+  allowed_assets: ['gold', 'forex'],
+  auto_pause_enabled: true,
+  max_losses_in_row: 2,
+};
 
 export const hasPaidSubscription = (subscription: SubscriptionTier | string) => subscription === 'PRO' || subscription === 'TOP_TIER' || subscription === 'VIP_AUTO_TRADER';
 export const hasAutoTraderSubscription = (subscription: SubscriptionTier | string) => subscription === 'VIP_AUTO_TRADER';
@@ -378,6 +407,7 @@ export interface AutoTradeSettingsRecord {
   apiTokenEncrypted: string | null;
   refreshTokenEncrypted: string | null;
   autoMode: AutoTradeMode;
+  strategyMode: StrategyMode;
   riskPerTrade: number;
   maxDailyLoss: number;
   maxTradesPerDay: number;
@@ -558,14 +588,18 @@ export const getUserByEmail = (email: string) =>
 export const getUserById = (id: string) =>
   maybeSingle<UserRecord>('getUserById', supabase.from(USER_TABLE).select('*').eq('id', id).maybeSingle());
 
-export const createUser = (values: Partial<UserRecord> & Pick<UserRecord, 'email' | 'role'>) =>
-  insertSingle<UserRecord>('createUser', USER_TABLE, {
+export const createUser = async (values: Partial<UserRecord> & Pick<UserRecord, 'email' | 'role'>) => {
+  const user = await insertSingle<UserRecord>('createUser', USER_TABLE, {
     subscription: 'FREE',
     dailyUsage: 0,
     lastUsageReset: new Date().toISOString(),
     banned: false,
     ...values,
   });
+
+  await ensureUserTradingSettings(user.id);
+  return user;
+};
 
 export const updateUser = (id: string, values: Partial<UserRecord>) =>
   updateSingle<UserRecord>('updateUser', USER_TABLE, values, (query) => query.eq('id', id));
@@ -1830,6 +1864,37 @@ export const toggleKillSwitch = async (userId: string, enabled: boolean) => {
 
 export const getAutoTradeSettings = (userId: string) =>
   maybeSingle<AutoTradeSettingsRecord>('getAutoTradeSettings', supabase.from(AUTO_TRADE_SETTINGS_TABLE).select('*').eq('userId', userId).maybeSingle());
+
+export const getUserTradingSettings = (userId: string) =>
+  maybeSingle<UserTradingSettingsRecord>('getUserTradingSettings', supabase.from(USER_TRADING_SETTINGS_TABLE).select('*').eq('user_id', userId).maybeSingle());
+
+export const upsertUserTradingSettings = async (
+  userId: string,
+  values: Partial<Omit<UserTradingSettingsRecord, 'user_id' | 'created_at' | 'updated_at'>>,
+) => {
+  const existing = await getUserTradingSettings(userId);
+  if (existing) {
+    return updateSingle<UserTradingSettingsRecord>('upsertUserTradingSettings:update', USER_TRADING_SETTINGS_TABLE, {
+      ...values,
+      updated_at: new Date().toISOString(),
+    }, (q) => q.eq('user_id', userId));
+  }
+
+  return insertSingle<UserTradingSettingsRecord>('upsertUserTradingSettings:insert', USER_TRADING_SETTINGS_TABLE, {
+    user_id: userId,
+    ...DEFAULT_USER_TRADING_SETTINGS,
+    ...values,
+  });
+};
+
+export const ensureUserTradingSettings = async (userId: string) => {
+  const existing = await getUserTradingSettings(userId);
+  if (existing) {
+    return existing;
+  }
+
+  return upsertUserTradingSettings(userId, DEFAULT_USER_TRADING_SETTINGS);
+};
 
 export const upsertAutoTradeSettings = async (userId: string, values: Partial<Omit<AutoTradeSettingsRecord, 'id' | 'userId' | 'createdAt' | 'updatedAt'>>) => {
   const existing = await getAutoTradeSettings(userId);

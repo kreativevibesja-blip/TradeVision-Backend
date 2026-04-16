@@ -4,7 +4,9 @@ import { encrypt } from '../lib/encryption';
 import { config } from '../config';
 import {
   getAutoTradeSettings,
+  ensureUserTradingSettings,
   upsertAutoTradeSettings,
+  upsertUserTradingSettings,
   listAutoTradesForUser,
   getAutoTradeById,
   updateAutoTrade,
@@ -20,6 +22,10 @@ import {
   disableAutoTradeForUser,
   type AutoTradeMode,
   type AutoTradeStatus,
+  type StrategyMode,
+  type TradingPersonality,
+  type AllowedTradingAsset,
+  type AllowedTradingSession,
 } from '../lib/supabase';
 import { processSignal, executeTrade, emergencyStop, updatePerformanceAfterClose } from '../services/autoTraderEngine';
 import { connectAccount, getAccountBalance, getOpenTrades, exchangeCodeForTokens, getTradingAccounts } from '../services/ctraderService';
@@ -29,20 +35,29 @@ import { connectAccount, getAccountBalance, getOpenTrades, exchangeCodeForTokens
 export const getAutoSettings = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    const settings = await getAutoTradeSettings(userId);
+    const [settings, smartSettings] = await Promise.all([
+      getAutoTradeSettings(userId),
+      ensureUserTradingSettings(userId),
+    ]);
     const performance = await getAutoPerformance(userId);
     return res.json({
-      settings: settings ? {
-        autoMode: settings.autoMode,
-        riskPerTrade: settings.riskPerTrade,
-        maxDailyLoss: settings.maxDailyLoss,
-        maxTradesPerDay: settings.maxTradesPerDay,
-        allowedSessions: settings.allowedSessions,
-        goldOnly: settings.goldOnly,
-        isActive: settings.isActive,
-        connected: Boolean(settings.ctraderAccountId && settings.apiTokenEncrypted),
-        ctraderAccountId: settings.ctraderAccountId,
-      } : null,
+      settings: {
+        autoMode: settings?.autoMode ?? 'off',
+        strategyMode: settings?.strategyMode ?? (smartSettings.strategy_mode === 'gold_scalper' ? 'gold_scalper' : 'standard'),
+        riskPerTrade: settings?.riskPerTrade ?? 1,
+        maxDailyLoss: settings?.maxDailyLoss ?? 5,
+        maxTradesPerDay: settings?.maxTradesPerDay ?? 3,
+        allowedSessions: smartSettings.allowed_sessions,
+        allowedAssets: smartSettings.allowed_assets,
+        personality: smartSettings.personality,
+        minConfidence: smartSettings.min_confidence,
+        autoPauseEnabled: smartSettings.auto_pause_enabled,
+        maxLossesInRow: smartSettings.max_losses_in_row,
+        goldOnly: smartSettings.allowed_assets.length === 1 && smartSettings.allowed_assets[0] === 'gold',
+        isActive: settings?.isActive ?? false,
+        connected: Boolean(settings?.ctraderAccountId && settings?.apiTokenEncrypted),
+        ctraderAccountId: settings?.ctraderAccountId ?? null,
+      },
       performance: performance ? {
         totalTrades: performance.totalTrades,
         wins: performance.wins,
@@ -63,22 +78,43 @@ export const updateAutoSettings = async (req: AuthRequest, res: Response) => {
     const userId = req.user!.id;
     const {
       autoMode,
+      strategyMode,
       riskPerTrade,
       maxDailyLoss,
       maxTradesPerDay,
       allowedSessions,
+      allowedAssets,
+      personality,
+      minConfidence,
+      autoPauseEnabled,
+      maxLossesInRow,
       goldOnly,
       isActive,
     } = req.body;
 
     const validModes: AutoTradeMode[] = ['off', 'assisted', 'semi', 'full'];
-    const update: Record<string, unknown> = {};
+    const validStrategyModes: StrategyMode[] = ['standard', 'gold_scalper'];
+    const validPersonalities: TradingPersonality[] = ['conservative', 'balanced', 'aggressive'];
+    const validSessions: AllowedTradingSession[] = ['london', 'newyork'];
+    const validAssets: AllowedTradingAsset[] = ['gold', 'indices', 'forex'];
+    const autoSettingsUpdate: Record<string, unknown> = {};
+    const smartSettingsUpdate: Record<string, unknown> = {};
+
+    const currentSmartSettings = await ensureUserTradingSettings(userId);
 
     if (autoMode !== undefined) {
       if (!validModes.includes(autoMode)) {
         return res.status(400).json({ error: 'Invalid auto mode' });
       }
-      update.autoMode = autoMode;
+      autoSettingsUpdate.autoMode = autoMode;
+    }
+
+    if (strategyMode !== undefined) {
+      if (!validStrategyModes.includes(strategyMode)) {
+        return res.status(400).json({ error: 'Invalid strategy mode' });
+      }
+      autoSettingsUpdate.strategyMode = strategyMode;
+      smartSettingsUpdate.strategy_mode = strategyMode;
     }
 
     if (riskPerTrade !== undefined) {
@@ -86,7 +122,7 @@ export const updateAutoSettings = async (req: AuthRequest, res: Response) => {
       if (!Number.isFinite(risk) || risk < 0.1 || risk > 10) {
         return res.status(400).json({ error: 'Risk per trade must be 0.1-10%' });
       }
-      update.riskPerTrade = risk;
+      autoSettingsUpdate.riskPerTrade = risk;
     }
 
     if (maxDailyLoss !== undefined) {
@@ -94,7 +130,7 @@ export const updateAutoSettings = async (req: AuthRequest, res: Response) => {
       if (!Number.isFinite(loss) || loss < 1 || loss > 50) {
         return res.status(400).json({ error: 'Max daily loss must be 1-50%' });
       }
-      update.maxDailyLoss = loss;
+      autoSettingsUpdate.maxDailyLoss = loss;
     }
 
     if (maxTradesPerDay !== undefined) {
@@ -102,23 +138,99 @@ export const updateAutoSettings = async (req: AuthRequest, res: Response) => {
       if (!Number.isFinite(max) || max < 1 || max > 20) {
         return res.status(400).json({ error: 'Max trades per day must be 1-20' });
       }
-      update.maxTradesPerDay = max;
+      autoSettingsUpdate.maxTradesPerDay = max;
     }
 
     if (allowedSessions !== undefined) {
       if (!Array.isArray(allowedSessions)) {
         return res.status(400).json({ error: 'Allowed sessions must be an array' });
       }
-      const valid = ['london', 'newyork'];
-      const filtered = allowedSessions.filter((s: string) => valid.includes(s));
-      update.allowedSessions = filtered;
+      const filtered = allowedSessions.filter((session: string): session is AllowedTradingSession => validSessions.includes(session as AllowedTradingSession));
+      if (filtered.length === 0) {
+        return res.status(400).json({ error: 'Select at least one trading session' });
+      }
+      smartSettingsUpdate.allowed_sessions = filtered;
+      autoSettingsUpdate.allowedSessions = filtered;
     }
 
-    if (typeof goldOnly === 'boolean') update.goldOnly = goldOnly;
-    if (typeof isActive === 'boolean') update.isActive = isActive;
+    if (allowedAssets !== undefined) {
+      if (!Array.isArray(allowedAssets)) {
+        return res.status(400).json({ error: 'Allowed assets must be an array' });
+      }
+      const filtered = allowedAssets.filter((asset: string): asset is AllowedTradingAsset => validAssets.includes(asset as AllowedTradingAsset));
+      if (filtered.length === 0) {
+        return res.status(400).json({ error: 'Select at least one asset group' });
+      }
+      smartSettingsUpdate.allowed_assets = filtered;
+      autoSettingsUpdate.goldOnly = filtered.length === 1 && filtered[0] === 'gold';
+    }
 
-    const settings = await upsertAutoTradeSettings(userId, update);
-    return res.json({ settings });
+    if (personality !== undefined) {
+      if (!validPersonalities.includes(personality)) {
+        return res.status(400).json({ error: 'Invalid trading personality' });
+      }
+      smartSettingsUpdate.personality = personality;
+    }
+
+    if (minConfidence !== undefined) {
+      const parsed = Math.floor(Number(minConfidence));
+      if (!Number.isFinite(parsed) || parsed < 1 || parsed > 10) {
+        return res.status(400).json({ error: 'Minimum confidence must be between 1 and 10' });
+      }
+      smartSettingsUpdate.min_confidence = parsed;
+    }
+
+    if (autoPauseEnabled !== undefined) {
+      if (typeof autoPauseEnabled !== 'boolean') {
+        return res.status(400).json({ error: 'Auto pause must be true or false' });
+      }
+      smartSettingsUpdate.auto_pause_enabled = autoPauseEnabled;
+    }
+
+    if (maxLossesInRow !== undefined) {
+      const parsed = Math.floor(Number(maxLossesInRow));
+      if (!Number.isFinite(parsed) || parsed < 1 || parsed > 10) {
+        return res.status(400).json({ error: 'Max losses before pause must be between 1 and 10' });
+      }
+      smartSettingsUpdate.max_losses_in_row = parsed;
+    }
+
+    if (typeof goldOnly === 'boolean') {
+      const nextAssets = goldOnly
+        ? ['gold']
+        : (currentSmartSettings.allowed_assets.length === 1 && currentSmartSettings.allowed_assets[0] === 'gold'
+          ? ['gold', 'forex']
+          : currentSmartSettings.allowed_assets);
+      smartSettingsUpdate.allowed_assets = nextAssets;
+      autoSettingsUpdate.goldOnly = goldOnly;
+    }
+
+    if (typeof isActive === 'boolean') autoSettingsUpdate.isActive = isActive;
+
+    const [autoSettings, smartSettings] = await Promise.all([
+      Object.keys(autoSettingsUpdate).length > 0 ? upsertAutoTradeSettings(userId, autoSettingsUpdate) : getAutoTradeSettings(userId),
+      Object.keys(smartSettingsUpdate).length > 0 ? upsertUserTradingSettings(userId, smartSettingsUpdate) : Promise.resolve(currentSmartSettings),
+    ]);
+
+    const mergedSettings = {
+      autoMode: autoSettings?.autoMode ?? 'off',
+      strategyMode: autoSettings?.strategyMode ?? (smartSettings.strategy_mode === 'gold_scalper' ? 'gold_scalper' : 'standard'),
+      riskPerTrade: autoSettings?.riskPerTrade ?? 1,
+      maxDailyLoss: autoSettings?.maxDailyLoss ?? 5,
+      maxTradesPerDay: autoSettings?.maxTradesPerDay ?? 3,
+      allowedSessions: smartSettings.allowed_sessions,
+      allowedAssets: smartSettings.allowed_assets,
+      personality: smartSettings.personality,
+      minConfidence: smartSettings.min_confidence,
+      autoPauseEnabled: smartSettings.auto_pause_enabled,
+      maxLossesInRow: smartSettings.max_losses_in_row,
+      goldOnly: smartSettings.allowed_assets.length === 1 && smartSettings.allowed_assets[0] === 'gold',
+      isActive: autoSettings?.isActive ?? false,
+      connected: Boolean(autoSettings?.ctraderAccountId && autoSettings?.apiTokenEncrypted),
+      ctraderAccountId: autoSettings?.ctraderAccountId ?? null,
+    };
+
+    return res.json({ settings: mergedSettings });
   } catch (error) {
     console.error('[autoTrading] updateAutoSettings error:', error);
     return res.status(500).json({ error: 'Failed to update settings' });
@@ -310,6 +422,7 @@ export const approvePendingTrade = async (req: AuthRequest, res: Response) => {
     }
 
     const settings = await getAutoTradeSettings(userId);
+    const smartSettings = await ensureUserTradingSettings(userId);
     if (!settings) {
       return res.status(400).json({ error: 'Auto trade settings not configured' });
     }
@@ -327,6 +440,7 @@ export const approvePendingTrade = async (req: AuthRequest, res: Response) => {
         scanResultId: trade.scanResultId ?? undefined,
       },
       settings,
+      smartSettings,
     );
 
     if (result.action === 'executed') {

@@ -15,6 +15,14 @@ export interface MarketDataResult {
   currentPrice: number;
 }
 
+export interface LiveMarketQuote {
+  symbol: string;
+  price: number;
+  bid: number;
+  ask: number;
+  spread: number;
+}
+
 export interface LiveChartSymbolDefinition {
   id: string;
   label: string;
@@ -38,6 +46,19 @@ interface ParsedMarketDataRow {
   low: number | null;
   close: number | null;
 }
+
+interface TwelveDataQuotePayload {
+  symbol?: string;
+  close?: string | number;
+  price?: string | number;
+  bid?: string | number;
+  ask?: string | number;
+  message?: string;
+  status?: string;
+}
+
+const QUOTE_CACHE_TTL_MS = 5_000;
+const quoteCache = new Map<string, { quote: LiveMarketQuote; cachedAt: number }>();
 
 const LIVE_CHART_SYMBOLS: LiveChartSymbolDefinition[] = [
   { id: 'EURUSD', label: 'EUR/USD', tvSymbol: 'OANDA:EURUSD', dataSymbol: 'EUR/USD', category: 'forex-major' },
@@ -103,6 +124,56 @@ export const resolveLiveChartSymbol = (symbol: string) => {
 };
 
 export const isSupportedLiveChartTimeframe = (timeframe: string) => Boolean(TIMEFRAME_INTERVALS[timeframe]);
+
+export const fetchLiveQuoteForSymbol = async (symbol: string): Promise<LiveMarketQuote> => {
+  const resolvedSymbol = resolveLiveChartSymbol(symbol);
+  if (!resolvedSymbol) {
+    throw new Error('Unsupported live quote symbol');
+  }
+
+  const cached = quoteCache.get(resolvedSymbol.id);
+  if (cached && Date.now() - cached.cachedAt < QUOTE_CACHE_TTL_MS) {
+    return cached.quote;
+  }
+
+  if (!config.marketData.twelveDataApiKey.trim()) {
+    throw new Error('Market data is not configured. Set TWELVEDATA_API_KEY.');
+  }
+
+  const url = new URL('/quote', config.marketData.twelveDataBaseUrl);
+  url.searchParams.set('symbol', resolvedSymbol.dataSymbol);
+  url.searchParams.set('apikey', config.marketData.twelveDataApiKey);
+
+  const response = await fetch(url.toString(), { method: 'GET' });
+  const payload = await response.json().catch(() => null) as TwelveDataQuotePayload | null;
+
+  if (!response.ok) {
+    throw new Error(payload?.message || `Market quote request failed with status ${response.status}`);
+  }
+
+  if (typeof payload?.status === 'string' && payload.status.toLowerCase() === 'error') {
+    throw new Error(payload?.message || 'Market quote provider returned an error');
+  }
+
+  const bid = toNumeric(payload?.bid);
+  const ask = toNumeric(payload?.ask);
+  const price = toNumeric(payload?.price) ?? toNumeric(payload?.close);
+
+  if (bid == null || ask == null || price == null) {
+    throw new Error(`Live quote for ${resolvedSymbol.id} did not include bid/ask pricing`);
+  }
+
+  const quote: LiveMarketQuote = {
+    symbol: resolvedSymbol.id,
+    price,
+    bid,
+    ask,
+    spread: Math.abs(ask - bid),
+  };
+
+  quoteCache.set(resolvedSymbol.id, { quote, cachedAt: Date.now() });
+  return quote;
+};
 
 export const fetchMarketDataForLiveChart = async (symbol: string, timeframe: string): Promise<MarketDataResult> => {
   const resolvedSymbol = resolveLiveChartSymbol(symbol);

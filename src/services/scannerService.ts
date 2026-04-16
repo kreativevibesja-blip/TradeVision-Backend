@@ -1,4 +1,5 @@
-import { supabase } from '../lib/supabase';
+import { fetchLiveQuoteForSymbol } from './marketData';
+import { supabase, getAutoTradeSettings, type StrategyMode } from '../lib/supabase';
 import { getCachedCandles } from '../lib/db/saveCandles';
 import { getRuntimeCandles } from '../lib/deriv/activeCandles';
 import { ensureDerivSubscription, getDerivHistoryCandles } from '../lib/deriv/ws';
@@ -6,6 +7,7 @@ import { DERIV_SCANNER_SYMBOL_IDS, SESSION_SCANNER_SYMBOL_IDS, VOLATILITY_SCANNE
 import { scheduleScannerPanelRefreshForAllUsers, scheduleScannerPanelRefreshForUser } from '../lib/scanner/panelStream';
 import { getCooldownMinutes, isSymbolOnCooldown, allowContinuation, passesPostFirstTradeFilter, type TradeResult } from '../lib/scanner/cooldownEngine';
 import { analyzeMarket, analyzePotentialTrades, detectTrend, findSwingHighsLows, type Candle, type MarketRegime, type PotentialTradeSetup, type TradeConfirmations, type TrendDirection } from './scannerEngine';
+import { analyzeGoldScalper } from './scannerEngines/goldScalper';
 import { analyzeLiveChartCandles } from './liveChartAnalysis';
 import type { MarketCandle } from './marketData';
 import { sendPushToUser } from './pushService';
@@ -165,6 +167,7 @@ const SCANNER_SYMBOLS_BY_SESSION: Record<SessionType, readonly string[]> = {
 };
 
 const SCANNER_TIMEFRAME = 'M15';
+const GOLD_SCALPER_SPREAD_THRESHOLD = 0.6;
 const LIVE_RESULT_CACHE_SYNC_MS = 20_000;
 const HIGH_CONFIDENCE_POTENTIAL_THRESHOLD = 90;
 const AI_REVIEW_NEAR_LIVE_THRESHOLD = 86;
@@ -172,7 +175,9 @@ const AI_REVIEW_CACHE_TTL_MS = 10 * 60_000;
 const PREFER_HISTORY_BEFORE_CACHE_SYMBOLS = new Set(['XAUUSD']);
 const HISTORY_RATE_LIMIT_BACKOFF_MS = 60_000;
 
-const TIMEFRAME_TO_GRANULARITY: Record<'M15' | 'H1', 900 | 3600> = {
+const TIMEFRAME_TO_GRANULARITY: Record<'M1' | 'M5' | 'M15' | 'H1', 60 | 300 | 900 | 3600> = {
+  M1: 60,
+  M5: 300,
   M15: 900,
   H1: 3600,
 };
@@ -692,11 +697,11 @@ function isDuplicatePotentialAlert(userId: string, potential: Pick<PotentialTrad
   return false;
 }
 
-function getHistoryBackoffKey(symbol: string, timeframe: 'M15' | 'H1', limit: number): string {
+function getHistoryBackoffKey(symbol: string, timeframe: 'M1' | 'M5' | 'M15' | 'H1', limit: number): string {
   return `${symbol}:${timeframe}:${limit}`;
 }
 
-function isHistoryRateLimited(symbol: string, timeframe: 'M15' | 'H1', limit: number): boolean {
+function isHistoryRateLimited(symbol: string, timeframe: 'M1' | 'M5' | 'M15' | 'H1', limit: number): boolean {
   const key = getHistoryBackoffKey(symbol, timeframe, limit);
   const until = historyRateLimitBackoffUntil.get(key);
   if (!until) return false;
@@ -711,7 +716,7 @@ function isDerivHistoryRateLimitError(error: unknown): boolean {
   return error instanceof Error && /rate limit.*ticks_history|ticks_history.*rate limit/i.test(error.message);
 }
 
-async function loadHistoryScannerCandles(symbol: string, timeframe: 'M15' | 'H1', granularity: 900 | 3600, limit: number): Promise<Candle[]> {
+async function loadHistoryScannerCandles(symbol: string, timeframe: 'M1' | 'M5' | 'M15' | 'H1', granularity: 60 | 300 | 900 | 3600, limit: number): Promise<Candle[]> {
   if (isHistoryRateLimited(symbol, timeframe, limit)) {
     return [];
   }
@@ -737,7 +742,7 @@ async function loadHistoryScannerCandles(symbol: string, timeframe: 'M15' | 'H1'
   }
 }
 
-async function loadScannerCandles(symbol: string, timeframe: 'M15' | 'H1', limit: number, minimum = 200): Promise<Candle[]> {
+async function loadScannerCandles(symbol: string, timeframe: 'M1' | 'M5' | 'M15' | 'H1', limit: number, minimum = 200): Promise<Candle[]> {
   const granularity = TIMEFRAME_TO_GRANULARITY[timeframe];
 
   try {
@@ -1524,6 +1529,10 @@ async function processResultLifecycle(
         tp: result.takeProfit,
         confidence: result.confidenceScore >= 80 ? 'A+' : result.confidenceScore >= 65 ? 'A' : 'B',
         marketState: result.marketRegime,
+        strategy: result.strategy ?? undefined,
+        session: result.strategy === 'gold_scalper'
+          ? `${result.sessionType}_killzone`
+          : result.sessionType,
         scanResultId: result.id,
       }).catch((err) => console.error('[AutoTrader] Failed to process signal:', err));
 
@@ -1850,8 +1859,55 @@ async function buildPotentialForSymbol(symbol: string): Promise<PotentialTradeSe
   }
 }
 
-async function scanSymbol(symbol: string): Promise<ScanCycleResult | null> {
+async function scanSymbol(symbol: string, strategyMode: StrategyMode = 'standard'): Promise<ScanCycleResult | null> {
   try {
+    if (strategyMode === 'gold_scalper') {
+      if (symbol !== 'XAUUSD') {
+        return null;
+      }
+
+      const [m1Candles, m5Candles, liveQuote] = await Promise.all([
+        loadScannerCandles(symbol, 'M1', 120, 50),
+        loadScannerCandles(symbol, 'M5', 120, 30),
+        fetchLiveQuoteForSymbol(symbol).catch((error) => {
+          console.error(`[Scanner][gold_scalper] Failed to fetch live quote for ${symbol}:`, error);
+          return null;
+        }),
+      ]);
+
+      if (!liveQuote) {
+        return null;
+      }
+
+      const goldScalper = analyzeGoldScalper(symbol, m1Candles, m5Candles, {
+        spread: liveQuote.spread,
+        config: { maxSpread: GOLD_SCALPER_SPREAD_THRESHOLD },
+      });
+
+      if (goldScalper.rejectionReason) {
+        console.log(`[Scanner][gold_scalper] ${symbol} rejected in ${goldScalper.session}: ${goldScalper.rejectionReason}`);
+        return null;
+      }
+
+      return {
+        symbol: goldScalper.symbol,
+        direction: goldScalper.type,
+        entry: goldScalper.entry,
+        stopLoss: goldScalper.sl,
+        slReason: 'Swing-based ATR fallback SL',
+        takeProfit: goldScalper.tp,
+        takeProfit2: null,
+        emaMomentum: true,
+        emaStack: goldScalper.type === 'buy' ? 'bullish' : 'bearish',
+        emaEntryValid: true,
+        confidenceScore: goldScalper.confidence,
+        marketRegime: goldScalper.marketRegime,
+        strategy: goldScalper.strategy,
+        confirmations: goldScalper.confirmations,
+        score: goldScalper.score,
+      };
+    }
+
     const candles = await loadScannerCandles(symbol, 'M15', 600);
     if (candles.length < 200) {
       return null;
@@ -1900,6 +1956,9 @@ async function scanSymbol(symbol: string): Promise<ScanCycleResult | null> {
 }
 
 export async function runSessionScanner(userId: string): Promise<{ results: ScanResult[]; alerts: ScannerAlert[] }> {
+  const autoTradeSettings = await getAutoTradeSettings(userId);
+  const strategyMode = autoTradeSettings?.strategyMode ?? 'standard';
+
   // Get user's enabled sessions
   const userSessions = await getActiveSessionsForUser(userId);
   const enabledTypes = new Set(
@@ -1924,6 +1983,10 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
   const claimedSymbols = new Set<string>();
 
   for (const sessionType of relevantSessions) {
+    if (strategyMode === 'gold_scalper' && sessionType === 'volatility') {
+      continue;
+    }
+
     if (isSessionInReassessmentCooldown(recentActivity, sessionType)) {
       continue;
     }
@@ -1956,7 +2019,11 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
       break;
     }
 
-    const rawResults = await Promise.all(SCANNER_SYMBOLS_BY_SESSION[sessionType].map((symbol) => scanSymbol(symbol)));
+    const symbolsToScan = strategyMode === 'gold_scalper'
+      ? ['XAUUSD']
+      : [...SCANNER_SYMBOLS_BY_SESSION[sessionType]];
+
+    const rawResults = await Promise.all(symbolsToScan.map((symbol) => scanSymbol(symbol, strategyMode)));
     const validResults = rawResults
       .filter((r): r is ScanCycleResult => r !== null)
       .sort((a, b) => b.score - a.score || b.confidenceScore - a.confidenceScore)

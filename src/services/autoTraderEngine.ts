@@ -1,13 +1,20 @@
 import {
   getAutoTradeSettings,
+  ensureUserTradingSettings,
+  upsertAutoTradeSettings,
   createAutoTrade,
   createAutoTradeLog,
   countTodayAutoTrades,
   getAutoPerformance,
   updateAutoPerformance,
   getTodayAutoTradesProfit,
+  listAutoTradeLogsForUser,
+  listAutoTradesForUser,
   type AutoTradeSettingsRecord,
   type AutoTradeRecord,
+  type AllowedTradingAsset,
+  type TradingPersonality,
+  type UserTradingSettingsRecord,
 } from '../lib/supabase';
 import { placeTrade, getAccountBalance, closeTrade, getOpenTrades } from './ctraderService';
 import { sendPushToUser } from './pushService';
@@ -23,6 +30,8 @@ export interface ScannerSignal {
   tp: number;
   confidence: string;
   marketState: string;
+  strategy?: string;
+  session?: string;
   scanResultId?: string;
 }
 
@@ -33,19 +42,35 @@ export type RejectionReason =
   | 'gold_only_filter'
   | 'chop_market'
   | 'low_confidence'
+  | 'confidence_locked'
   | 'max_trades_exceeded'
   | 'daily_loss_exceeded'
   | 'session_not_allowed'
+  | 'asset_not_allowed'
+  | 'strategy_mismatch'
   | 'duplicate_symbol'
   | 'sl_too_small'
   | 'no_bos'
-  | 'kill_switch';
+  | 'kill_switch'
+  | 'gold_scalper_session_limit'
+  | 'strategy_cooldown'
+  | 'personality_session_limit'
+  | 'auto_paused';
 
 // ── Safety checks ──
 
 const MIN_SL_DISTANCE: Record<string, number> = {
   XAUUSD: 1.0,
   DEFAULT: 0.0005,
+};
+const GOLD_SCALPER_MAX_TRADES_PER_SESSION = 2;
+const GOLD_SCALPER_COOLDOWN_MS = 60 * 60_000;
+
+const CONFIDENCE_SCORE: Record<string, number> = {
+  'A+': 10,
+  A: 8,
+  B: 6,
+  avoid: 1,
 };
 
 const getCurrentSession = (): string => {
@@ -60,6 +85,52 @@ const isSessionAllowed = (allowedSessions: string[]): boolean => {
   return allowedSessions.includes(current);
 };
 
+const getNormalizedSignalSession = (signal: ScannerSignal): string => {
+  const rawSession = signal.session?.toLowerCase() ?? '';
+  if (rawSession.includes('london')) return 'london';
+  if (rawSession.includes('newyork') || rawSession.includes('new_york')) return 'newyork';
+  return getCurrentSession();
+};
+
+const getConfidenceScore = (confidence: string): number => CONFIDENCE_SCORE[confidence] ?? 0;
+
+const getAssetClassForSymbol = (symbol: string): AllowedTradingAsset => {
+  if (symbol === 'XAUUSD') {
+    return 'gold';
+  }
+
+  if (/^(US30|NAS100|SPX500|GER40|UK100|USTEC|US500)/i.test(symbol)) {
+    return 'indices';
+  }
+
+  return 'forex';
+};
+
+const getPersonalityMinConfidence = (personality: TradingPersonality): number => {
+  if (personality === 'conservative') return 7;
+  if (personality === 'aggressive') return 5;
+  return 0;
+};
+
+const getPersonalitySessionTradeLimit = (personality: TradingPersonality): number | null => {
+  if (personality === 'conservative') return 2;
+  if (personality === 'aggressive') return 5;
+  return null;
+};
+
+const countConsecutiveLosses = (trades: AutoTradeRecord[]): number => {
+  let losses = 0;
+
+  for (const trade of trades) {
+    if (trade.result !== 'loss') {
+      break;
+    }
+    losses += 1;
+  }
+
+  return losses;
+};
+
 // ── Core execution logic ──
 
 export const processSignal = async (signal: ScannerSignal): Promise<{
@@ -68,19 +139,26 @@ export const processSignal = async (signal: ScannerSignal): Promise<{
   tradeId?: string;
 }> => {
   const settings = await getAutoTradeSettings(signal.userId);
+  const smartSettings = await ensureUserTradingSettings(signal.userId);
   if (!settings) {
     return { action: 'rejected', reason: 'auto_mode_off' };
   }
 
   // ── Pre-flight checks ──
-  const rejection = await validateSignal(signal, settings);
+  const rejection = await validateSignal(signal, settings, smartSettings);
   if (rejection) {
     await createAutoTradeLog({
       userId: signal.userId,
       tradeId: null,
       action: 'rejected',
       reason: rejection,
-      metadata: { symbol: signal.symbol, direction: signal.direction },
+      metadata: {
+        symbol: signal.symbol,
+        direction: signal.direction,
+        strategy: signal.strategy ?? 'standard',
+        session: signal.session ?? null,
+        smartSettings,
+      },
     });
     return { action: 'rejected', reason: rejection };
   }
@@ -98,6 +176,9 @@ export const processSignal = async (signal: ScannerSignal): Promise<{
       sl: signal.sl,
       tp: signal.tp,
       confidence: signal.confidence,
+      strategy: signal.strategy ?? 'standard',
+      session: signal.session ?? null,
+      smartSettings,
     },
   });
 
@@ -137,19 +218,41 @@ export const processSignal = async (signal: ScannerSignal): Promise<{
         tradeId: null,
         action: 'rejected',
         reason: 'Semi mode: confidence too low for auto-execution',
-        metadata: { confidence: signal.confidence },
+        metadata: {
+          confidence: signal.confidence,
+          strategy: signal.strategy ?? 'standard',
+          session: signal.session ?? null,
+          smartSettings,
+        },
       });
       return { action: 'rejected', reason: 'low_confidence' };
     }
   }
 
+  if (signal.strategy === 'gold_scalper' && signal.confidence !== 'A+') {
+    await createAutoTradeLog({
+      userId: signal.userId,
+      tradeId: null,
+      action: 'rejected',
+      reason: 'Gold scalper requires A+ confidence',
+      metadata: {
+        confidence: signal.confidence,
+        strategy: signal.strategy,
+        session: signal.session ?? null,
+        smartSettings,
+      },
+    });
+    return { action: 'rejected', reason: 'low_confidence' };
+  }
+
   // Full mode or semi with high confidence → execute
-  return executeTrade(signal, settings);
+  return executeTrade(signal, settings, smartSettings);
 };
 
 export const executeTrade = async (
   signal: ScannerSignal,
   settings: AutoTradeSettingsRecord,
+  smartSettings: UserTradingSettingsRecord,
 ): Promise<{
   action: 'executed' | 'rejected';
   reason?: string;
@@ -205,7 +308,14 @@ export const executeTrade = async (
       tradeId: trade.id,
       action: 'executed',
       reason: `${signal.symbol} ${signal.direction} ${lotSize} lots @ ${signal.entryPrice}`,
-      metadata: { orderId, lotSize, balance: accountInfo.balance },
+      metadata: {
+        orderId,
+        lotSize,
+        balance: accountInfo.balance,
+        strategy: signal.strategy ?? 'standard',
+        session: signal.session ?? null,
+        smartSettings,
+      },
     });
 
     // ── Notify user ──
@@ -225,7 +335,11 @@ export const executeTrade = async (
       tradeId: null,
       action: 'rejected',
       reason: `Execution error: ${error instanceof Error ? error.message : 'Unknown'}`,
-      metadata: null,
+      metadata: {
+        strategy: signal.strategy ?? 'standard',
+        session: signal.session ?? null,
+        smartSettings,
+      },
     });
 
     return { action: 'rejected', reason: 'execution_error' };
@@ -237,10 +351,29 @@ export const executeTrade = async (
 const validateSignal = async (
   signal: ScannerSignal,
   settings: AutoTradeSettingsRecord,
+  smartSettings: UserTradingSettingsRecord,
 ): Promise<RejectionReason | null> => {
   if (settings.autoMode === 'off') return 'auto_mode_off';
   if (!settings.isActive) return 'not_active';
   if (!settings.apiTokenEncrypted || !settings.ctraderAccountId) return 'no_ctrader_connection';
+
+  const recentClosedTrades = await listAutoTradesForUser(signal.userId, 'closed', 20);
+  const consecutiveLosses = countConsecutiveLosses(recentClosedTrades);
+  if (smartSettings.auto_pause_enabled && consecutiveLosses >= smartSettings.max_losses_in_row) {
+    await createAutoTradeLog({
+      userId: signal.userId,
+      tradeId: null,
+      action: 'rejected',
+      reason: 'Auto pause triggered after consecutive losses',
+      metadata: {
+        consecutiveLosses,
+        maxLossesInRow: smartSettings.max_losses_in_row,
+        smartSettings,
+      },
+    });
+    await disableTradingAfterAutoPause(signal.userId);
+    return 'auto_paused';
+  }
 
   // Gold-only filter
   if (settings.goldOnly && signal.symbol !== 'XAUUSD') return 'gold_only_filter';
@@ -248,8 +381,19 @@ const validateSignal = async (
   // Market state check
   if (signal.marketState === 'choppy') return 'chop_market';
 
-  // Confidence check
-  if (signal.confidence === 'avoid' || signal.confidence === 'B') return 'low_confidence';
+  const normalizedStrategy = (signal.strategy ?? 'standard') as string;
+  if (normalizedStrategy !== smartSettings.strategy_mode && !(smartSettings.strategy_mode === 'standard' && normalizedStrategy === 'standard')) {
+    return 'strategy_mismatch';
+  }
+
+  const signalConfidence = getConfidenceScore(signal.confidence);
+  if (signalConfidence <= 1) return 'low_confidence';
+
+  const requiredConfidence = Math.max(smartSettings.min_confidence, getPersonalityMinConfidence(smartSettings.personality));
+  if (signalConfidence < requiredConfidence) return 'confidence_locked';
+
+  const assetClass = getAssetClassForSymbol(signal.symbol);
+  if (!smartSettings.allowed_assets.includes(assetClass)) return 'asset_not_allowed';
 
   // SL distance check
   const slDistance = Math.abs(signal.entryPrice - signal.sl);
@@ -257,8 +401,41 @@ const validateSignal = async (
   if (slDistance < minSl) return 'sl_too_small';
 
   // Session check
-  const allowedSessions = Array.isArray(settings.allowedSessions) ? settings.allowedSessions as string[] : ['london', 'newyork'];
-  if (!isSessionAllowed(allowedSessions)) return 'session_not_allowed';
+  const currentSession = getNormalizedSignalSession(signal);
+  if (!smartSettings.allowed_sessions.includes(currentSession as 'london' | 'newyork')) return 'session_not_allowed';
+
+  const recentLogs = await listAutoTradeLogsForUser(signal.userId, 100);
+  const sessionTradeLimit = getPersonalitySessionTradeLimit(smartSettings.personality);
+  if (sessionTradeLimit !== null) {
+    const sessionExecutions = recentLogs.filter((log) => {
+      const metadata = log.metadata as Record<string, unknown> | null;
+      return log.action === 'executed' && metadata?.session === currentSession;
+    });
+    if (sessionExecutions.length >= sessionTradeLimit) {
+      return 'personality_session_limit';
+    }
+  }
+
+  if (signal.strategy === 'gold_scalper') {
+    const goldScalperExecutions = recentLogs.filter((log) => {
+      const metadata = log.metadata as Record<string, unknown> | null;
+      return log.action === 'executed' && metadata?.strategy === 'gold_scalper';
+    });
+
+    const sessionExecutions = goldScalperExecutions.filter((log) => {
+      const metadata = log.metadata as Record<string, unknown> | null;
+      return metadata?.session === currentSession;
+    });
+
+    if (sessionExecutions.length >= GOLD_SCALPER_MAX_TRADES_PER_SESSION) {
+      return 'gold_scalper_session_limit';
+    }
+
+    const latestExecution = goldScalperExecutions[0];
+    if (latestExecution && Date.now() - new Date(latestExecution.createdAt).getTime() < GOLD_SCALPER_COOLDOWN_MS) {
+      return 'strategy_cooldown';
+    }
+  }
 
   // Daily trade limit
   const todayStart = new Date();
@@ -271,6 +448,23 @@ const validateSignal = async (
   if (todayProfit < 0 && Math.abs(todayProfit) >= settings.maxDailyLoss) return 'daily_loss_exceeded';
 
   return null;
+};
+
+const disableTradingAfterAutoPause = async (userId: string) => {
+  const settings = await getAutoTradeSettings(userId);
+  if (!settings) {
+    return;
+  }
+
+  await createAutoTradeLog({
+    userId,
+    tradeId: null,
+    action: 'emergency_stop',
+    reason: 'Auto trader paused after hitting the consecutive-loss limit.',
+    metadata: { source: 'auto_pause' },
+  });
+
+  await upsertAutoTradeSettings(userId, { isActive: false, autoMode: 'off' });
 };
 
 // ── Performance update ──
