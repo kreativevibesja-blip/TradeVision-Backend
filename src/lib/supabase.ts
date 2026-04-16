@@ -93,6 +93,7 @@ const RISK_SETTINGS_TABLE = 'RiskSettings';
 const UPLOAD_ERROR_TABLE = 'upload_errors';
 const AUTO_TRADE_SETTINGS_TABLE = 'AutoTradeSettings';
 const USER_TRADING_SETTINGS_TABLE = 'user_trading_settings';
+const MT5_ACCOUNTS_TABLE = 'mt5_accounts';
 const AUTO_TRADE_TABLE = 'AutoTrade';
 const AUTO_TRADE_LOG_TABLE = 'AutoTradeLog';
 const AUTO_PERFORMANCE_TABLE = 'AutoPerformance';
@@ -119,6 +120,7 @@ export type SmartStrategyMode = 'standard' | 'gold_scalper' | 'spike_reaction';
 export type TradingPersonality = 'conservative' | 'balanced' | 'aggressive';
 export type AllowedTradingSession = 'london' | 'newyork';
 export type AllowedTradingAsset = 'gold' | 'indices' | 'forex';
+export type MT5AccountStatus = 'connecting' | 'connected' | 'failed';
 export type AutoTradeStatus = 'pending' | 'executed' | 'closed' | 'rejected';
 export type AutoTradeResult = 'win' | 'loss' | 'breakeven';
 export type AutoTradeLogAction = 'signal_received' | 'executed' | 'rejected' | 'closed' | 'emergency_stop' | 'breakeven';
@@ -403,9 +405,6 @@ export interface RiskSettingsRecord {
 export interface AutoTradeSettingsRecord {
   id: string;
   userId: string;
-  ctraderAccountId: string | null;
-  apiTokenEncrypted: string | null;
-  refreshTokenEncrypted: string | null;
   autoMode: AutoTradeMode;
   strategyMode: StrategyMode;
   riskPerTrade: number;
@@ -416,6 +415,16 @@ export interface AutoTradeSettingsRecord {
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface MT5AccountRecord {
+  id: string;
+  user_id: string;
+  metaapi_account_id: string;
+  login: string;
+  server: string;
+  status: MT5AccountStatus;
+  created_at: string;
 }
 
 export interface AutoTradeRecord {
@@ -430,7 +439,7 @@ export interface AutoTradeRecord {
   status: AutoTradeStatus;
   result: AutoTradeResult | null;
   profit: number | null;
-  ctraderOrderId: string | null;
+  mt5OrderId: string | null;
   scanResultId: string | null;
   confidence: string | null;
   marketState: string | null;
@@ -1865,6 +1874,12 @@ export const toggleKillSwitch = async (userId: string, enabled: boolean) => {
 export const getAutoTradeSettings = (userId: string) =>
   maybeSingle<AutoTradeSettingsRecord>('getAutoTradeSettings', supabase.from(AUTO_TRADE_SETTINGS_TABLE).select('*').eq('userId', userId).maybeSingle());
 
+export const getMT5AccountByUserId = (userId: string) =>
+  maybeSingle<MT5AccountRecord>('getMT5AccountByUserId', supabase.from(MT5_ACCOUNTS_TABLE).select('*').eq('user_id', userId).maybeSingle());
+
+export const listAllMT5Accounts = () =>
+  many<MT5AccountRecord>('listAllMT5Accounts', supabase.from(MT5_ACCOUNTS_TABLE).select('*').order('created_at', { ascending: false }));
+
 export const getUserTradingSettings = (userId: string) =>
   maybeSingle<UserTradingSettingsRecord>('getUserTradingSettings', supabase.from(USER_TRADING_SETTINGS_TABLE).select('*').eq('user_id', userId).maybeSingle());
 
@@ -1894,6 +1909,30 @@ export const ensureUserTradingSettings = async (userId: string) => {
   }
 
   return upsertUserTradingSettings(userId, DEFAULT_USER_TRADING_SETTINGS);
+};
+
+export const upsertMT5Account = async (
+  userId: string,
+  values: Omit<MT5AccountRecord, 'id' | 'user_id' | 'created_at'>,
+) => {
+  const existing = await getMT5AccountByUserId(userId);
+  if (existing) {
+    return updateSingle<MT5AccountRecord>('upsertMT5Account:update', MT5_ACCOUNTS_TABLE, {
+      ...values,
+    }, (q) => q.eq('user_id', userId));
+  }
+
+  return insertSingle<MT5AccountRecord>('upsertMT5Account:insert', MT5_ACCOUNTS_TABLE, {
+    user_id: userId,
+    ...values,
+  });
+};
+
+export const deleteMT5AccountByUserId = async (userId: string) => {
+  const { error } = await supabase.from(MT5_ACCOUNTS_TABLE).delete().eq('user_id', userId);
+  if (error) {
+    logDbError('deleteMT5AccountByUserId', error);
+  }
 };
 
 export const upsertAutoTradeSettings = async (userId: string, values: Partial<Omit<AutoTradeSettingsRecord, 'id' | 'userId' | 'createdAt' | 'updatedAt'>>) => {

@@ -112,11 +112,7 @@ export const config = {
     topTierMonthly: 500,
   },
 
-  ctrader: {
-    clientId: process.env.CTRADER_CLIENT_ID || '',
-    clientSecret: process.env.CTRADER_CLIENT_SECRET || '',
-    redirectUri: process.env.CTRADER_REDIRECT_URI || '',
-    apiUrl: process.env.CTRADER_API_URL || 'https://openapi.ctrader.com',
-    authUrl: process.env.CTRADER_AUTH_URL || 'https://openapi.ctrader.com',
+  metaapi: {
+    apiKey: process.env.METAAPI_API_KEY || '',
   },
 };

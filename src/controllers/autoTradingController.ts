@@ -1,10 +1,11 @@
 import { Response } from 'express';
 import { AuthRequest } from '../middleware/auth';
-import { encrypt } from '../lib/encryption';
-import { config } from '../config';
 import {
   getAutoTradeSettings,
   ensureUserTradingSettings,
+  getMT5AccountByUserId,
+  listAllMT5Accounts,
+  deleteMT5AccountByUserId,
   upsertAutoTradeSettings,
   upsertUserTradingSettings,
   listAutoTradesForUser,
@@ -27,37 +28,45 @@ import {
   type AllowedTradingAsset,
   type AllowedTradingSession,
 } from '../lib/supabase';
-import { processSignal, executeTrade, emergencyStop, updatePerformanceAfterClose } from '../services/autoTraderEngine';
-import { connectAccount, getAccountBalance, getOpenTrades, exchangeCodeForTokens, getTradingAccounts } from '../services/ctraderService';
+import { executeTrade, emergencyStop, updatePerformanceAfterClose } from '../services/autoTraderEngine';
+import { closeMT5Position, disconnectMT5Account, getMT5AccountState, getMT5OpenPositions } from '../services/mt5Service';
+
+const buildMergedSettings = (
+  settings: Awaited<ReturnType<typeof getAutoTradeSettings>>,
+  smartSettings: Awaited<ReturnType<typeof ensureUserTradingSettings>>,
+  mt5Account: Awaited<ReturnType<typeof getMT5AccountByUserId>>,
+) => ({
+  autoMode: settings?.autoMode ?? 'off',
+  strategyMode: settings?.strategyMode ?? (smartSettings.strategy_mode === 'gold_scalper' ? 'gold_scalper' : 'standard'),
+  riskPerTrade: settings?.riskPerTrade ?? 1,
+  maxDailyLoss: settings?.maxDailyLoss ?? 5,
+  maxTradesPerDay: settings?.maxTradesPerDay ?? 3,
+  allowedSessions: smartSettings.allowed_sessions,
+  allowedAssets: smartSettings.allowed_assets,
+  personality: smartSettings.personality,
+  minConfidence: smartSettings.min_confidence,
+  autoPauseEnabled: smartSettings.auto_pause_enabled,
+  maxLossesInRow: smartSettings.max_losses_in_row,
+  goldOnly: smartSettings.allowed_assets.length === 1 && smartSettings.allowed_assets[0] === 'gold',
+  isActive: settings?.isActive ?? false,
+  connected: Boolean(mt5Account && mt5Account.status === 'connected'),
+  mt5AccountId: mt5Account?.metaapi_account_id ?? null,
+  mt5Status: mt5Account?.status ?? null,
+});
 
 // ── Settings ──
 
 export const getAutoSettings = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    const [settings, smartSettings] = await Promise.all([
+    const [settings, smartSettings, mt5Account] = await Promise.all([
       getAutoTradeSettings(userId),
       ensureUserTradingSettings(userId),
+      getMT5AccountByUserId(userId),
     ]);
     const performance = await getAutoPerformance(userId);
     return res.json({
-      settings: {
-        autoMode: settings?.autoMode ?? 'off',
-        strategyMode: settings?.strategyMode ?? (smartSettings.strategy_mode === 'gold_scalper' ? 'gold_scalper' : 'standard'),
-        riskPerTrade: settings?.riskPerTrade ?? 1,
-        maxDailyLoss: settings?.maxDailyLoss ?? 5,
-        maxTradesPerDay: settings?.maxTradesPerDay ?? 3,
-        allowedSessions: smartSettings.allowed_sessions,
-        allowedAssets: smartSettings.allowed_assets,
-        personality: smartSettings.personality,
-        minConfidence: smartSettings.min_confidence,
-        autoPauseEnabled: smartSettings.auto_pause_enabled,
-        maxLossesInRow: smartSettings.max_losses_in_row,
-        goldOnly: smartSettings.allowed_assets.length === 1 && smartSettings.allowed_assets[0] === 'gold',
-        isActive: settings?.isActive ?? false,
-        connected: Boolean(settings?.ctraderAccountId && settings?.apiTokenEncrypted),
-        ctraderAccountId: settings?.ctraderAccountId ?? null,
-      },
+      settings: buildMergedSettings(settings, smartSettings, mt5Account),
       performance: performance ? {
         totalTrades: performance.totalTrades,
         wins: performance.wins,
@@ -207,28 +216,13 @@ export const updateAutoSettings = async (req: AuthRequest, res: Response) => {
 
     if (typeof isActive === 'boolean') autoSettingsUpdate.isActive = isActive;
 
-    const [autoSettings, smartSettings] = await Promise.all([
+    const [autoSettings, smartSettings, mt5Account] = await Promise.all([
       Object.keys(autoSettingsUpdate).length > 0 ? upsertAutoTradeSettings(userId, autoSettingsUpdate) : getAutoTradeSettings(userId),
       Object.keys(smartSettingsUpdate).length > 0 ? upsertUserTradingSettings(userId, smartSettingsUpdate) : Promise.resolve(currentSmartSettings),
+      getMT5AccountByUserId(userId),
     ]);
 
-    const mergedSettings = {
-      autoMode: autoSettings?.autoMode ?? 'off',
-      strategyMode: autoSettings?.strategyMode ?? (smartSettings.strategy_mode === 'gold_scalper' ? 'gold_scalper' : 'standard'),
-      riskPerTrade: autoSettings?.riskPerTrade ?? 1,
-      maxDailyLoss: autoSettings?.maxDailyLoss ?? 5,
-      maxTradesPerDay: autoSettings?.maxTradesPerDay ?? 3,
-      allowedSessions: smartSettings.allowed_sessions,
-      allowedAssets: smartSettings.allowed_assets,
-      personality: smartSettings.personality,
-      minConfidence: smartSettings.min_confidence,
-      autoPauseEnabled: smartSettings.auto_pause_enabled,
-      maxLossesInRow: smartSettings.max_losses_in_row,
-      goldOnly: smartSettings.allowed_assets.length === 1 && smartSettings.allowed_assets[0] === 'gold',
-      isActive: autoSettings?.isActive ?? false,
-      connected: Boolean(autoSettings?.ctraderAccountId && autoSettings?.apiTokenEncrypted),
-      ctraderAccountId: autoSettings?.ctraderAccountId ?? null,
-    };
+    const mergedSettings = buildMergedSettings(autoSettings, smartSettings, mt5Account);
 
     return res.json({ settings: mergedSettings });
   } catch (error) {
@@ -237,122 +231,24 @@ export const updateAutoSettings = async (req: AuthRequest, res: Response) => {
   }
 };
 
-// ── cTrader Connection (OAuth) ──
-
-export const getOAuthUrl = async (req: AuthRequest, res: Response) => {
-  try {
-    if (!config.ctrader.clientId || !config.ctrader.redirectUri) {
-      return res.status(500).json({ error: 'cTrader OAuth not configured' });
-    }
-    const params = new URLSearchParams({
-      client_id: config.ctrader.clientId,
-      redirect_uri: config.ctrader.redirectUri,
-      response_type: 'code',
-      scope: 'trading',
-    });
-    const url = `https://id.ctrader.com/connect/authorize?${params}`;
-    return res.json({ url });
-  } catch (error) {
-    console.error('[autoTrading] getOAuthUrl error:', error);
-    return res.status(500).json({ error: 'Failed to generate OAuth URL' });
-  }
-};
-
-export const connectCTrader = async (req: AuthRequest, res: Response) => {
+export const disconnectMT5 = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    const { code, accountId } = req.body;
-
-    if (!code || typeof code !== 'string') {
-      return res.status(400).json({ error: 'Missing authorization code' });
-    }
-
-    // Exchange code for tokens
-    const tokens = await exchangeCodeForTokens(code);
-    const encryptedAccess = encrypt(tokens.access_token);
-    const encryptedRefresh = encrypt(tokens.refresh_token);
-
-    // If no accountId provided, fetch available accounts so user can pick
-    if (!accountId) {
-      const accounts = await getTradingAccounts(tokens.access_token);
-      return res.json({
-        success: true,
-        needsAccountSelection: true,
-        accounts: accounts.map((a) => ({
-          accountId: String(a.accountId),
-          accountNumber: a.accountNumber,
-          live: a.live,
-          brokerName: a.brokerName,
-          balance: a.balance,
-          currency: a.currency,
-        })),
-        // Temporarily store encrypted tokens so the next request can use them
-        tempAccessToken: encryptedAccess,
-        tempRefreshToken: encryptedRefresh,
+    const mt5Account = await getMT5AccountByUserId(userId);
+    if (mt5Account) {
+      await disconnectMT5Account(mt5Account.metaapi_account_id).catch((error) => {
+        console.warn('[autoTrading] disconnectMT5 undeploy warning:', error);
       });
+      await deleteMT5AccountByUserId(userId);
     }
 
-    // Verify connection works
-    try {
-      const account = await connectAccount(encryptedAccess, accountId);
-      await upsertAutoTradeSettings(userId, {
-        ctraderAccountId: accountId,
-        apiTokenEncrypted: encryptedAccess,
-        refreshTokenEncrypted: encryptedRefresh,
-      });
-      return res.json({ success: true, balance: account.balance, currency: account.currency });
-    } catch {
-      return res.status(400).json({ error: 'Failed to connect to cTrader. Please check your credentials.' });
-    }
-  } catch (error) {
-    console.error('[autoTrading] connectCTrader error:', error);
-    return res.status(500).json({ error: 'Failed to connect account' });
-  }
-};
-
-export const selectCTraderAccount = async (req: AuthRequest, res: Response) => {
-  try {
-    const userId = req.user!.id;
-    const { accountId, encryptedAccessToken, encryptedRefreshToken } = req.body;
-
-    if (!accountId || typeof accountId !== 'string') {
-      return res.status(400).json({ error: 'Invalid account ID' });
-    }
-    if (!encryptedAccessToken || !encryptedRefreshToken) {
-      return res.status(400).json({ error: 'Missing token data' });
-    }
-
-    // Verify connection with selected account
-    try {
-      const account = await connectAccount(encryptedAccessToken, accountId);
-      await upsertAutoTradeSettings(userId, {
-        ctraderAccountId: accountId,
-        apiTokenEncrypted: encryptedAccessToken,
-        refreshTokenEncrypted: encryptedRefreshToken,
-      });
-      return res.json({ success: true, balance: account.balance, currency: account.currency });
-    } catch {
-      return res.status(400).json({ error: 'Failed to connect to the selected account.' });
-    }
-  } catch (error) {
-    console.error('[autoTrading] selectCTraderAccount error:', error);
-    return res.status(500).json({ error: 'Failed to select account' });
-  }
-};
-
-export const disconnectCTrader = async (req: AuthRequest, res: Response) => {
-  try {
-    const userId = req.user!.id;
     await upsertAutoTradeSettings(userId, {
-      ctraderAccountId: null,
-      apiTokenEncrypted: null,
-      refreshTokenEncrypted: null,
       isActive: false,
       autoMode: 'off' as AutoTradeMode,
     });
     return res.json({ success: true });
   } catch (error) {
-    console.error('[autoTrading] disconnectCTrader error:', error);
+    console.error('[autoTrading] disconnectMT5 error:', error);
     return res.status(500).json({ error: 'Failed to disconnect' });
   }
 };
@@ -360,11 +256,11 @@ export const disconnectCTrader = async (req: AuthRequest, res: Response) => {
 export const getBalance = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    const settings = await getAutoTradeSettings(userId);
-    if (!settings?.apiTokenEncrypted || !settings.ctraderAccountId) {
-      return res.status(400).json({ error: 'No cTrader account connected' });
+    const mt5Account = await getMT5AccountByUserId(userId);
+    if (!mt5Account) {
+      return res.status(400).json({ error: 'No MT5 account connected' });
     }
-    const account = await getAccountBalance(settings.apiTokenEncrypted, settings.ctraderAccountId);
+    const account = await getMT5AccountState(mt5Account.metaapi_account_id);
     return res.json(account);
   } catch (error) {
     console.error('[autoTrading] getBalance error:', error);
@@ -468,10 +364,9 @@ export const closeTradeFn = async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: 'Trade is not open' });
     }
 
-    const settings = await getAutoTradeSettings(userId);
-    if (settings?.apiTokenEncrypted && settings.ctraderAccountId && trade.ctraderOrderId) {
-      const { closeTrade } = await import('../services/ctraderService');
-      await closeTrade(settings.apiTokenEncrypted, settings.ctraderAccountId, trade.ctraderOrderId);
+    const mt5Account = await getMT5AccountByUserId(userId);
+    if (mt5Account && trade.mt5OrderId) {
+      await closeMT5Position(mt5Account.metaapi_account_id, trade.mt5OrderId);
     }
 
     const profit = Number(req.body.profit) || 0;
@@ -537,16 +432,16 @@ export const getPerformance = async (req: AuthRequest, res: Response) => {
   }
 };
 
-// ── Live positions from cTrader ──
+// ── Live positions from MT5 ──
 
 export const getLivePositions = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    const settings = await getAutoTradeSettings(userId);
-    if (!settings?.apiTokenEncrypted || !settings.ctraderAccountId) {
+    const mt5Account = await getMT5AccountByUserId(userId);
+    if (!mt5Account) {
       return res.json({ positions: [] });
     }
-    const positions = await getOpenTrades(settings.apiTokenEncrypted, settings.ctraderAccountId);
+    const positions = await getMT5OpenPositions(mt5Account.metaapi_account_id);
     return res.json({ positions });
   } catch (error) {
     console.error('[autoTrading] getLivePositions error:', error);
@@ -562,9 +457,10 @@ export const adminGetOverview = async (req: AuthRequest, res: Response) => {
     todayStart.setUTCHours(0, 0, 0, 0);
     const todayIso = todayStart.toISOString();
 
-    const [allSettings, allPerformance, todayCount, todayProfit, recentLogs] = await Promise.all([
+    const [allSettings, allPerformance, allMt5Accounts, todayCount, todayProfit, recentLogs] = await Promise.all([
       getAllAutoTradeSettings(),
       getAllAutoPerformance(),
+      listAllMT5Accounts(),
       countTodayAllAutoTrades(todayIso),
       getTodayAllAutoTradesProfit(todayIso),
       listAllAutoTradeLogs(50),
@@ -577,7 +473,7 @@ export const adminGetOverview = async (req: AuthRequest, res: Response) => {
         name: s.User?.name ?? null,
         autoMode: s.autoMode,
         isActive: s.isActive,
-        connected: Boolean(s.ctraderAccountId),
+        connected: allMt5Accounts.some((account) => account.user_id === s.userId && account.status === 'connected'),
         performance: allPerformance.find((p) => p.userId === s.userId) ?? null,
       })),
       system: {
@@ -595,14 +491,15 @@ export const adminGetOverview = async (req: AuthRequest, res: Response) => {
 export const adminGetUserDetail = async (req: AuthRequest, res: Response) => {
   try {
     const targetUserId = req.params.userId;
-    const [settings, performance, trades, logs] = await Promise.all([
+    const [settings, mt5Account, performance, trades, logs] = await Promise.all([
       getAutoTradeSettings(targetUserId),
+      getMT5AccountByUserId(targetUserId),
       getAutoPerformance(targetUserId),
       listAutoTradesForUser(targetUserId, undefined, 100),
       listAutoTradeLogsForUser(targetUserId, 100),
     ]);
 
-    return res.json({ settings, performance, trades, logs });
+    return res.json({ settings, mt5Account, performance, trades, logs });
   } catch (error) {
     console.error('[autoTrading] adminGetUserDetail error:', error);
     return res.status(500).json({ error: 'Failed to get user detail' });

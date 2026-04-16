@@ -1,6 +1,7 @@
 import {
   getAutoTradeSettings,
   ensureUserTradingSettings,
+  getMT5AccountByUserId,
   upsertAutoTradeSettings,
   createAutoTrade,
   createAutoTradeLog,
@@ -16,7 +17,7 @@ import {
   type TradingPersonality,
   type UserTradingSettingsRecord,
 } from '../lib/supabase';
-import { placeTrade, getAccountBalance, closeTrade, getOpenTrades } from './ctraderService';
+import { closeMT5Position, executeMT5Trade, getMT5AccountState, getMT5OpenPositions } from './mt5Service';
 import { sendPushToUser } from './pushService';
 
 // ── Types ──
@@ -38,7 +39,7 @@ export interface ScannerSignal {
 export type RejectionReason =
   | 'auto_mode_off'
   | 'not_active'
-  | 'no_ctrader_connection'
+  | 'no_mt5_connection'
   | 'gold_only_filter'
   | 'chop_market'
   | 'low_confidence'
@@ -78,11 +79,6 @@ const getCurrentSession = (): string => {
   if (hour >= 7 && hour < 16) return 'london';
   if (hour >= 12 && hour < 21) return 'newyork';
   return 'off-hours';
-};
-
-const isSessionAllowed = (allowedSessions: string[]): boolean => {
-  const current = getCurrentSession();
-  return allowedSessions.includes(current);
 };
 
 const getNormalizedSignalSession = (signal: ScannerSignal): string => {
@@ -194,7 +190,7 @@ export const processSignal = async (signal: ScannerSignal): Promise<{
       tp: signal.tp,
       lotSize: 0, // Calculated on execution
       status: 'pending',
-      ctraderOrderId: null,
+      mt5OrderId: null,
       confidence: signal.confidence,
       marketState: signal.marketState,
       scanResultId: signal.scanResultId ?? null,
@@ -258,13 +254,13 @@ export const executeTrade = async (
   reason?: string;
   tradeId?: string;
 }> => {
-  if (!settings.apiTokenEncrypted || !settings.ctraderAccountId) {
-    return { action: 'rejected', reason: 'no_ctrader_connection' };
+  const mt5Account = await getMT5AccountByUserId(signal.userId);
+  if (!mt5Account || mt5Account.status !== 'connected') {
+    return { action: 'rejected', reason: 'no_mt5_connection' };
   }
 
   try {
-    // ── Calculate lot size based on risk ──
-    const accountInfo = await getAccountBalance(settings.apiTokenEncrypted, settings.ctraderAccountId);
+    const accountInfo = await getMT5AccountState(mt5Account.metaapi_account_id);
     const slDistance = Math.abs(signal.entryPrice - signal.sl);
     const riskAmount = accountInfo.balance * (settings.riskPerTrade / 100);
     const lotSize = Math.round((riskAmount / slDistance) * 100) / 100;
@@ -273,18 +269,13 @@ export const executeTrade = async (
       return { action: 'rejected', reason: 'sl_too_small' };
     }
 
-    // ── Place trade via cTrader API ──
-    const { orderId } = await placeTrade(
-      settings.apiTokenEncrypted,
-      settings.ctraderAccountId,
-      {
-        symbol: signal.symbol,
-        direction: signal.direction,
-        lotSize,
-        sl: signal.sl,
-        tp: signal.tp,
-      },
-    );
+    const { orderId } = await executeMT5Trade(mt5Account.metaapi_account_id, {
+      symbol: signal.symbol,
+      type: signal.direction,
+      volume: lotSize,
+      sl: signal.sl,
+      tp: signal.tp,
+    });
 
     // ── Record trade ──
     const trade = await createAutoTrade({
@@ -296,7 +287,7 @@ export const executeTrade = async (
       tp: signal.tp,
       lotSize,
       status: 'executed',
-      ctraderOrderId: orderId,
+      mt5OrderId: orderId,
       confidence: signal.confidence,
       marketState: signal.marketState,
       scanResultId: signal.scanResultId ?? null,
@@ -355,7 +346,8 @@ const validateSignal = async (
 ): Promise<RejectionReason | null> => {
   if (settings.autoMode === 'off') return 'auto_mode_off';
   if (!settings.isActive) return 'not_active';
-  if (!settings.apiTokenEncrypted || !settings.ctraderAccountId) return 'no_ctrader_connection';
+  const mt5Account = await getMT5AccountByUserId(signal.userId);
+  if (!mt5Account || mt5Account.status !== 'connected') return 'no_mt5_connection';
 
   const recentClosedTrades = await listAutoTradesForUser(signal.userId, 'closed', 20);
   const consecutiveLosses = countConsecutiveLosses(recentClosedTrades);
@@ -506,12 +498,17 @@ export const emergencyStop = async (
 
   let closedCount = 0;
 
-  if (closePositions && settings.apiTokenEncrypted && settings.ctraderAccountId) {
+  if (closePositions) {
     try {
-      const openTrades = await getOpenTrades(settings.apiTokenEncrypted, settings.ctraderAccountId);
+      const mt5Account = await getMT5AccountByUserId(userId);
+      if (!mt5Account || mt5Account.status !== 'connected') {
+        throw new Error('No MT5 account connected');
+      }
+
+      const openTrades = await getMT5OpenPositions(mt5Account.metaapi_account_id);
       for (const trade of openTrades) {
         try {
-          await closeTrade(settings.apiTokenEncrypted, settings.ctraderAccountId, trade.orderId);
+          await closeMT5Position(mt5Account.metaapi_account_id, trade.orderId);
           closedCount++;
         } catch (err) {
           console.error(`[autoTraderEngine] Failed to close position ${trade.orderId}:`, err);

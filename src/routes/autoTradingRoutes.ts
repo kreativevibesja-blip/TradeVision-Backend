@@ -3,10 +3,7 @@ import { authenticate, requireVipAutoTrader } from '../middleware/auth';
 import {
   getAutoSettings,
   updateAutoSettings,
-  getOAuthUrl,
-  connectCTrader,
-  selectCTraderAccount,
-  disconnectCTrader,
+  disconnectMT5,
   getBalance,
   getTrades,
   getActiveTrades,
@@ -31,11 +28,8 @@ router.use(authenticate, requireVipAutoTrader);
 router.get('/settings', getAutoSettings);
 router.patch('/settings', updateAutoSettings);
 
-// cTrader connection (OAuth)
-router.get('/oauth-url', getOAuthUrl);
-router.post('/connect', connectCTrader);
-router.post('/select-account', selectCTraderAccount);
-router.post('/disconnect', disconnectCTrader);
+// MT5 connection
+router.post('/disconnect', disconnectMT5);
 router.get('/balance', getBalance);
 
 // Trades
@@ -45,7 +39,7 @@ router.get('/trades/pending', getPending);
 router.post('/trades/:id/approve', approvePendingTrade);
 router.post('/trades/:id/close', closeTradeFn);
 
-// Live positions from cTrader
+// Live positions from MT5
 router.get('/positions', getLivePositions);
 
 // Emergency stop
