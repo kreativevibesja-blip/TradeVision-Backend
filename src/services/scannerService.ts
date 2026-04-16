@@ -1144,12 +1144,14 @@ export async function getScanResults(
   limit = 20,
   scope: ScanResultScope = 'all',
 ): Promise<ScanResult[]> {
+  const safeLimit = Math.max(1, limit);
+  const fetchLimit = scope === 'history' ? Math.max(safeLimit * 4, 80) : safeLimit;
   let query = supabase
     .from(SCAN_RESULT_TABLE)
     .select('*')
     .eq('userId', userId)
     .order('createdAt', { ascending: false })
-    .limit(limit);
+    .limit(fetchLimit);
 
   if (scope !== 'all') {
     const dayStart = getStartOfNewYorkDay();
@@ -1166,10 +1168,25 @@ export async function getScanResults(
   if (error) throw new Error(error.message);
 
   const results = (data ?? []) as ScanResult[];
-  const scopedResults = scope === 'current' ? dedupeOpenResultsBySymbol(results).slice(0, limit) : results;
+  const scopedResults = scope === 'current'
+    ? dedupeOpenResultsBySymbol(results).slice(0, safeLimit)
+    : results;
 
   if (scope === 'history') {
-    return scopedResults.map((result) => ({ ...result, currentPrice: result.currentPrice ?? null }));
+    const prioritizedHistory = [...scopedResults]
+      .sort((left, right) => {
+        const leftOpen = left.status === 'active' || left.status === 'triggered';
+        const rightOpen = right.status === 'active' || right.status === 'triggered';
+
+        if (leftOpen !== rightOpen) {
+          return leftOpen ? -1 : 1;
+        }
+
+        return new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime();
+      })
+      .slice(0, safeLimit);
+
+    return attachLivePricesToResults(prioritizedHistory);
   }
 
   return attachLivePricesToResults(scopedResults);
