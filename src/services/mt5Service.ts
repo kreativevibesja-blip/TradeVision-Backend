@@ -1,4 +1,3 @@
-import MetaApi from 'metaapi.cloud-sdk';
 import { config } from '../config';
 
 export interface MT5TradeRequest {
@@ -53,21 +52,25 @@ export class MT5ServiceError extends Error {
   }
 }
 
-let api: any | null = null;
+let metaApiInstance: any | null = null;
+const connectionCache = new Map<string, any>();
 
-const getMetaApi = () => {
-  if (!config.metaapi.apiKey) {
-    throw new MT5ServiceError('not_configured', 'MT5 integration is not configured.', 500);
+async function getMetaApi() {
+  if (!process.env.METAAPI_API_KEY) {
+    throw new MT5ServiceError('not_configured', 'MetaAPI key missing', 500);
   }
 
-  if (!api) {
-    api = new MetaApi(config.metaapi.apiKey);
+  if (!metaApiInstance) {
+    const MetaApi = (await import('metaapi.cloud-sdk')).default;
+    metaApiInstance = new MetaApi(process.env.METAAPI_API_KEY);
   }
 
-  return api;
-};
+  return metaApiInstance;
+}
 
 const mapMetaApiError = (error: unknown): MT5ServiceError => {
+  console.error('MetaAPI Error:', error);
+
   if (error instanceof MT5ServiceError) {
     return error;
   }
@@ -91,29 +94,48 @@ const mapMetaApiError = (error: unknown): MT5ServiceError => {
 };
 
 const getRpcConnection = async (accountId: string) => {
+  if (connectionCache.has(accountId)) {
+    return connectionCache.get(accountId);
+  }
+
   try {
-    const account = await getMetaApi().metatraderAccountApi.getAccount(accountId);
+    const api = await getMetaApi();
+    const account = await api.metatraderAccountApi.getAccount(accountId);
 
     if (account.state !== 'DEPLOYED' && account.state !== 'DEPLOYING') {
       await account.deploy();
     }
 
-    if (account.connectionStatus !== 'CONNECTED') {
-      await account.waitConnected();
-    }
-
     const connection = account.getRPCConnection();
     await connection.connect();
-    await connection.waitSynchronized();
+
+    connectionCache.set(accountId, connection);
     return connection;
   } catch (error) {
+    connectionCache.delete(accountId);
     throw mapMetaApiError(error);
+  }
+};
+
+const withRpcConnection = async <T>(accountId: string, operation: (connection: any) => Promise<T>): Promise<T> => {
+  try {
+    const connection = await getRpcConnection(accountId);
+    return await operation(connection);
+  } catch (error) {
+    if (connectionCache.has(accountId)) {
+      connectionCache.delete(accountId);
+      const connection = await getRpcConnection(accountId);
+      return operation(connection);
+    }
+
+    throw error;
   }
 };
 
 export const connectMT5Account = async (userId: string, login: string, password: string, server: string) => {
   try {
-    const account = await getMetaApi().metatraderAccountApi.createAccount({
+    const api = await getMetaApi();
+    const account = await api.metatraderAccountApi.createAccount({
       name: `User-${userId}`,
       type: 'cloud',
       login,
@@ -124,11 +146,25 @@ export const connectMT5Account = async (userId: string, login: string, password:
     });
 
     await account.deploy();
-    await account.waitConnected();
 
     return {
       accountId: String(account.id),
-      status: account.connectionStatus === 'CONNECTED' ? 'connected' : 'connecting',
+      status: 'connecting' as const,
+    };
+  } catch (error) {
+    console.error('MetaAPI Error:', error);
+    throw new MT5ServiceError('metaapi_error', 'Failed to connect MT5 account', 502);
+  }
+};
+
+export const checkMT5Connection = async (accountId: string) => {
+  try {
+    const api = await getMetaApi();
+    const account = await api.metatraderAccountApi.getAccount(accountId);
+
+    return {
+      status: String(account.connectionStatus ?? 'DISCONNECTED'),
+      state: String(account.state ?? 'UNDEPLOYED'),
     };
   } catch (error) {
     throw mapMetaApiError(error);
@@ -137,7 +173,9 @@ export const connectMT5Account = async (userId: string, login: string, password:
 
 export const disconnectMT5Account = async (accountId: string) => {
   try {
-    const account = await getMetaApi().metatraderAccountApi.getAccount(accountId);
+    connectionCache.delete(accountId);
+    const api = await getMetaApi();
+    const account = await api.metatraderAccountApi.getAccount(accountId);
     await account.undeploy();
   } catch (error) {
     throw mapMetaApiError(error);
@@ -145,8 +183,7 @@ export const disconnectMT5Account = async (accountId: string) => {
 };
 
 export const getMT5AccountState = async (accountId: string): Promise<MT5AccountSnapshot> => {
-  const connection = await getRpcConnection(accountId);
-  const info = await connection.getAccountInformation();
+  const info: any = await withRpcConnection(accountId, (connection) => connection.getAccountInformation());
 
   return {
     balance: Number(info.balance ?? 0),
@@ -157,20 +194,25 @@ export const getMT5AccountState = async (accountId: string): Promise<MT5AccountS
 };
 
 export const executeMT5Trade = async (accountId: string, trade: MT5TradeRequest): Promise<MT5TradeResult> => {
-  const connection = await getRpcConnection(accountId);
-  const result = trade.type === 'buy'
-    ? await connection.createMarketBuyOrder(trade.symbol, trade.volume, trade.sl ?? null, trade.tp ?? null)
-    : await connection.createMarketSellOrder(trade.symbol, trade.volume, trade.sl ?? null, trade.tp ?? null);
+  try {
+    const result: any = await withRpcConnection(accountId, (connection) => (
+      trade.type === 'buy'
+        ? connection.createMarketBuyOrder(trade.symbol, trade.volume, trade.sl ?? null, trade.tp ?? null)
+        : connection.createMarketSellOrder(trade.symbol, trade.volume, trade.sl ?? null, trade.tp ?? null)
+    ));
 
-  return {
-    orderId: String(result.orderId ?? result.positionId ?? result.numericCode ?? result.stringCode),
-    rawResult: result,
-  };
+    return {
+      orderId: String(result.orderId || result.positionId || Date.now()),
+      rawResult: result,
+    };
+  } catch (error) {
+    console.error('MT5 trade error:', error);
+    throw new MT5ServiceError('metaapi_error', 'Trade execution failed', 502);
+  }
 };
 
 export const getMT5OpenPositions = async (accountId: string): Promise<MT5Position[]> => {
-  const connection = await getRpcConnection(accountId);
-  const positions = await connection.getPositions();
+  const positions: any[] = await withRpcConnection(accountId, (connection) => connection.getPositions());
 
   return (positions ?? []).map((position: any) => ({
     orderId: String(position.id ?? position.positionId ?? position.ticket),
@@ -187,6 +229,5 @@ export const getMT5OpenPositions = async (accountId: string): Promise<MT5Positio
 };
 
 export const closeMT5Position = async (accountId: string, positionId: string) => {
-  const connection = await getRpcConnection(accountId);
-  return connection.closePosition(positionId);
+  return withRpcConnection(accountId, (connection) => connection.closePosition(positionId));
 };

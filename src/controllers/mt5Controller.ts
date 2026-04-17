@@ -1,7 +1,7 @@
 import { Response } from 'express';
 import { AuthRequest } from '../middleware/auth';
 import { getMT5AccountByUserId, upsertMT5Account } from '../lib/supabase';
-import { connectMT5Account, executeMT5Trade, getMT5AccountState, MT5ServiceError } from '../services/mt5Service';
+import { connectMT5Account, executeMT5Trade, MT5ServiceError } from '../services/mt5Service';
 
 const getErrorResponse = (error: unknown) => {
   if (error instanceof MT5ServiceError) {
@@ -21,22 +21,18 @@ export const connectMT5 = async (req: AuthRequest, res: Response) => {
     }
 
     const connection = await connectMT5Account(userId, String(login), String(password), String(server));
-    const accountState = await getMT5AccountState(connection.accountId);
 
     await upsertMT5Account(userId, {
       metaapi_account_id: connection.accountId,
       login: String(login),
       server: String(server),
-      status: 'connected',
+      status: 'connecting',
     });
 
     return res.json({
       success: true,
       accountId: connection.accountId,
-      status: 'connected',
-      balance: accountState.balance,
-      equity: accountState.equity,
-      currency: accountState.currency,
+      status: connection.status,
     });
   } catch (error) {
     console.error('[mt5] connect error:', error);
