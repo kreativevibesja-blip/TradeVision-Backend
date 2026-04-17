@@ -78,6 +78,9 @@ export interface TradeSetup {
   confidenceScore: number;
   marketRegime: MarketRegime;
   strategy: string;
+  session?: 'london' | 'newyork';
+  setup?: 'session_flip';
+  validUntil?: string;
   confirmations: TradeConfirmations;
   confirmationLabels: string[];
 }
@@ -127,6 +130,9 @@ export interface PotentialTradeSetup {
   marketRegime: MarketRegime;
   confirmations: TradeConfirmations;
   strategy: string;
+  session?: 'london' | 'newyork';
+  setup?: 'session_flip';
+  validUntil?: string;
   narrative: string;
   fulfilledConditions: string[];
   requiredTriggers: string[];
@@ -3701,365 +3707,575 @@ export function zoneFilter(signal: Pick<TradeSetup, 'symbol' | 'direction' | 'en
   return { valid: true, reason: null as string | null };
 }
 
-// ── 9. Main Analysis Function (single symbol) ──
-// Pure logic — no AI, no network calls. Just candles in, setup out.
+// ── 9. Single-strategy continuation analysis ──
 
-export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | null {
-  if (candles.length < MIN_SCANNER_ANALYSIS_CANDLES) return null;
+interface ContinuationSweepSignal {
+  index: number;
+  sweptLevel: number;
+  sweepExtreme: number;
+  candle: Candle;
+}
 
-  const trend = detectTrend(candles);
-  const broaderTrend = detectContextTrend(candles);
-  const emaTrend = analyzeEmaTrend(candles);
-  const marketCondition = detectMarketCondition(candles, emaTrend);
-  const currentPrice = candles[candles.length - 1].close;
-  const range = detectSupportResistanceRange(candles);
-  const lookLeftCandles = candles.slice(-Math.min(500, candles.length));
-  const zones = buildZones(lookLeftCandles, currentPrice);
-  const gaps = buildFairValueGaps(lookLeftCandles, currentPrice);
-  const currentZone = findActiveReversalZone(currentPrice, zones, candles);
-  const bullishReversalPattern = resolveBullishReversalPattern(currentPrice, currentZone, candles);
-  const bearishReversalPattern = resolveBearishReversalPattern(currentPrice, currentZone, candles);
-  const bullishReversal = bullishReversalPattern.matched;
-  const bearishReversal = bearishReversalPattern.matched;
-  const macroTrend = detectMacroTrend(candles, emaTrend);
+interface PullbackAssessment {
+  valid: boolean;
+  touchedEma20: boolean;
+  touchedEma50: boolean;
+  overextended: boolean;
+}
 
-  if (marketCondition.marketState === 'chop' || marketCondition.marketState === 'unclear') {
-    console.log(`[scanner-engine] Blocked ${symbol} by market state ${marketCondition.marketState}: ${marketCondition.reason}`);
-    return null;
-  }
+interface DisplacementAssessment {
+  index: number;
+  candle: Candle;
+  engulfsPrevious: boolean;
+  bodySize: number;
+}
 
-  if (marketCondition.marketState === 'range') {
-    const rangeTradeSetup = buildSupportResistanceTradeSetup(symbol, candles, broaderTrend, emaTrend);
-    if (rangeTradeSetup) return rangeTradeSetup;
-    return null;
-  }
+interface StructureBreakAssessment {
+  index: number;
+  entry: number;
+  breakLevel: number;
+}
 
-  const bullishArea = toPriceArea(findDirectionalZone('buy', zones, currentPrice, candles, symbol) ?? findDirectionalFvg('buy', gaps, candles, symbol));
-  const bearishArea = toPriceArea(findDirectionalZone('sell', zones, currentPrice, candles, symbol) ?? findDirectionalFvg('sell', gaps, candles, symbol));
-  const bullishPoiReclaim = hasPoiReclaim('buy', bullishArea, candles);
-  const bearishPoiReclaim = hasPoiReclaim('sell', bearishArea, candles);
+interface ContinuationSetupAssessment {
+  direction: 'buy' | 'sell';
+  score: number;
+  confidenceScore: number;
+  entry: number;
+  stopLoss: number;
+  takeProfit: number;
+  takeProfit2: number;
+  emaStack: EmaStackState;
+  confirmations: TradeConfirmations;
+  confirmationLabels: string[];
+  session: 'london' | 'newyork';
+  setup: 'session_flip';
+  validUntil: string;
+  marketRegime: MarketRegime;
+  narrative: string;
+  fulfilledConditions: string[];
+  requiredTriggers: string[];
+  contextLabels: string[];
+}
 
-  let direction: 'buy' | 'sell';
-  direction = marketCondition.marketState === 'bullish' ? 'buy' : 'sell';
+type SessionFlipSession = 'asia' | 'london' | 'newyork';
+type SessionFlipVariant = 'london_sweep_reversal' | 'newyork_continuation' | 'newyork_reversal';
 
-  // Only count a reversal when it aligns with the chosen direction
-  const isReversalSetup = (direction === 'buy' && bullishReversal) || (direction === 'sell' && bearishReversal);
-  const directionalZone = findDirectionalZone(direction, zones, currentPrice, candles, symbol);
-  const directionalFvg = findDirectionalFvg(direction, gaps, candles, symbol);
-  const preferredArea = toPriceArea(directionalZone ?? directionalFvg);
+const sessions = {
+  asia: { start: 0, end: 6 },
+  london: { start: 2, end: 11 },
+  newyork: { start: 8, end: 17 },
+} as const;
 
-  // EMA 50 execution analysis
-  const ema50Exec = analyzeEma50Execution(candles, emaTrend, directionalZone, directionalFvg);
-  const ema20Entry = analyzeEma20EntryContext(direction, candles, emaTrend, currentPrice);
-  const emaStackAligned = direction === 'buy' ? ema50Exec.ema50Above200 : !ema50Exec.ema50Above200;
-  const ema50CrossAligned =
-    (direction === 'buy' && ema50Exec.ema50Cross === 'bullish') ||
-    (direction === 'sell' && ema50Exec.ema50Cross === 'bearish');
+const LONDON_SWEEP_WINDOW_END = 5;
+const NEWYORK_OPEN_WINDOW_END = 11;
+const SESSION_FLIP_VALIDITY_MS = 15 * 60_000;
+const NEW_YORK_TIME_FORMATTER = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/New_York',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23',
+});
 
-  const sweep = detectLiquiditySweep(candles);
-  const pullback = detectPullback(trend, candles);
+function calculateEMA(candles: Candle[], period: number): number | null {
+  return calculateEmaSeries(candles, period)[calculateEmaSeries(candles, period).length - 1]?.value ?? null;
+}
 
-  const last = candles[candles.length - 1];
-  const prev = candles[candles.length - 2];
+function logContinuationRejection(symbol: string, reason: string): null {
+  console.log(`[scanner-engine] Blocked ${symbol} — ${reason}`);
+  return null;
+}
 
-  const engulfing = detectEngulfing(prev, last);
-  const rejection = detectRejection(last);
-  const structure = detectStructureBreak(candles);
+function getNewYorkTimeMeta(timestampSeconds: number) {
+  const parts = NEW_YORK_TIME_FORMATTER.formatToParts(new Date(timestampSeconds * 1000));
+  const lookup = (type: string) => parts.find((part) => part.type === type)?.value ?? '00';
+  const year = lookup('year');
+  const month = lookup('month');
+  const day = lookup('day');
 
-  const score = scoreSetup({ trend, pullback, sweep, engulfing, rejection, structure });
+  return {
+    hour: Number(lookup('hour')),
+    minute: Number(lookup('minute')),
+    dateKey: `${year}-${month}-${day}`,
+  };
+}
 
-  if (score < 5) return null;
+function getCurrentSession(hour: number): SessionFlipSession {
+  if (hour >= sessions.london.start && hour < sessions.london.end) return 'london';
+  if (hour >= sessions.newyork.start && hour < sessions.newyork.end) return 'newyork';
+  return 'asia';
+}
 
-  const recentMomentum = detectRecentMomentum(candles);
-  const alignedSweep = isSweepAligned(direction, sweep);
-  const alignedEngulfing = isEngulfingAligned(direction, engulfing);
-  const alignedRejection = isRejectionAligned(direction, rejection);
-  const alignedStructure = isStructureAligned(direction, structure);
-  const alignedMomentum = (direction === 'buy' && recentMomentum === 'bullish') || (direction === 'sell' && recentMomentum === 'bearish');
-  const freshReaction = isDirectionalReactionFromArea(direction, preferredArea, candles);
-  const poiReclaim = direction === 'buy' ? bullishPoiReclaim : bearishPoiReclaim;
-  const freshDisplacement = hasFreshDisplacement(direction, candles);
-  const stretchedFromArea = isExtendedFromArea(direction, currentPrice, preferredArea, candles);
-  // EMA alignment: require EMA 50 above EMA 200 for buys, below for sells
-  const emaAligned = emaStackAligned;
-  const nearDirectionalZone = directionalZone ? isNearZone(currentPrice, [directionalZone], 0.0025) !== null : false;
-  const activeBreaker = findActiveBreakerBlock(direction, currentPrice, candles);
-  const hasBreaker = activeBreaker !== null;
-  const fvgReaction = detectFvgReaction(direction, candles, gaps);
-  const hasFvgReaction = fvgReaction !== null && fvgReaction.hasReactionCandle;
-  const eqlSweep = detectEqualLevelSweep(direction, candles);
-  const hasEqlSweep = eqlSweep !== null;
-  const premiumDiscountBias = getPremiumDiscountBias(direction, currentPrice, candles);
-  const ote = detectOptimalTradeEntry(direction, currentPrice, candles, gaps, zones);
-  const hasOte = ote !== null && ote.inOteZone;
-  const mss = detectMarketStructureShift(candles);
-  const hasMss = isMssAligned(direction, mss);
-  const hasBos = alignedStructure || hasMss;
-  const hasLiquiditySweep = alignedSweep || hasEqlSweep;
-  const emaStackSupportsDirection = (direction === 'buy' && ema20Entry.emaStack === 'bullish') || (direction === 'sell' && ema20Entry.emaStack === 'bearish');
-  const awaitingEma20Reclaim = hasLiquiditySweep && freshDisplacement && !ema20Entry.hasReclaimedEma20;
-  const ema200ReclaimRetest = hasEma200ReclaimRetest(direction, candles, emaTrend);
-  const hasStrongZone = directionalZone ? isMeaningfulZone(symbol, directionalZone, candles, currentPrice) : false;
-  const volatilitySymbol = isVolatilitySymbol(symbol);
-  const trendDirection = toTradeDirection(trend);
-  const broaderTrendDirection = toTradeDirection(broaderTrend);
-  const macroTrendDirection = toTradeDirection(macroTrend);
-  const macroCounterTrend = macroTrendDirection !== null && macroTrendDirection !== direction;
-  const dynamicTrendTrigger = ema50CrossAligned || ema200ReclaimRetest;
-  const hasContinuationAreaReaction = nearDirectionalZone || freshReaction || poiReclaim || hasBreaker || hasFvgReaction || ema200ReclaimRetest;
-  const tradeConfirmations = buildTradeConfirmations({
-    alignedSweep: alignedSweep || hasEqlSweep,
-    alignedEngulfing,
-    alignedRejection,
-    alignedStructure,
-    poiReclaim,
-    emaAligned,
-    zoneReaction: nearDirectionalZone || freshReaction || ema200ReclaimRetest,
-    freshDisplacement,
-    alignedMomentum,
-    breakerBlock: hasBreaker,
-    fvgReaction: hasFvgReaction,
-    equalLevelSweep: hasEqlSweep,
-    premiumDiscount: premiumDiscountBias > 0,
-    ote: hasOte,
-    mss: hasMss,
-  });
-  const confirmationScore = countTradeConfirmations(tradeConfirmations);
-
-  if (direction === 'sell' && currentZone?.type === 'demand' && bullishPoiReclaim) return null;
-  if (direction === 'buy' && currentZone?.type === 'supply' && bearishPoiReclaim) return null;
-
-  if (sweep && !alignedSweep) return null;
-  if (engulfing && !alignedEngulfing) return null;
-  if (rejection && !alignedRejection) return null;
-  if (structure && !alignedStructure) return null;
-
-  const hasZonePresence = !!(directionalZone || directionalFvg || hasBreaker || hasFvgReaction);
-  const hasSweepConfirmation = alignedSweep || hasEqlSweep;
-  const hasEntryConfirmation = alignedRejection || alignedEngulfing;
-
-  // Core zone requirement — EMA 50 cross setups can bypass zone presence
-  // because the cross itself is the execution trigger from a dynamic level
-  if (!hasZonePresence && !dynamicTrendTrigger) return null;
-  if (isVolatilitySymbol(symbol) && !directionalZone && !hasBreaker && !hasFvgReaction && !ema200ReclaimRetest && !ema50CrossAligned) return null;
-  if (stretchedFromArea && !freshDisplacement && !dynamicTrendTrigger) return null;
-
-  // Sniper entry: when macro trend is clear, enforce the full sequence:
-  // 1) Price in zone  2) Liquidity sweep  3) Rejection/engulfing  4) EMA stack aligned
-  // Exception: EMA 50 cross aligned with macro direction is a standalone trigger
-  if (macroTrend !== 'ranging') {
-    if (!emaStackAligned && !isReversalSetup && !dynamicTrendTrigger) return null;
-
-    // Price must be at or reacting from a zone/FVG — or triggering off EMA 50 cross
-    if (!nearDirectionalZone && !freshReaction && !poiReclaim && !hasBreaker && !hasFvgReaction && !isReversalSetup && !dynamicTrendTrigger) return null;
-
-    // Need sweep + entry candle confirmation for the cleanest entries — EMA 50 cross counts as execution confirmation
-    if (!hasSweepConfirmation && !hasEntryConfirmation && !isReversalSetup && !hasBreaker && !hasFvgReaction && !(alignedStructure || hasMss) && !dynamicTrendTrigger) return null;
-  }
-
-  if (volatilitySymbol && trendDirection === direction && !isReversalSetup && !hasContinuationAreaReaction && !dynamicTrendTrigger) return null;
-
-  // When macro is ranging, apply the stricter micro counter-trend gates
-  if (macroTrend === 'ranging') {
-    if (volatilitySymbol && trendDirection && direction !== trendDirection) {
-      if (!isReversalSetup) return null;
-      if (!nearDirectionalZone || !freshReaction || !hasSweepConfirmation || !(alignedStructure || hasMss)) return null;
+function getSessionCandlesForDate(candles: Candle[], dateKey: string, session: SessionFlipSession): Candle[] {
+  return candles.filter((candle) => {
+    const meta = getNewYorkTimeMeta(candle.time);
+    if (meta.dateKey !== dateKey) {
+      return false;
     }
-    if (volatilitySymbol && broaderTrendDirection && direction !== broaderTrendDirection && !isReversalSetup) return null;
-  }
 
-  const directionalConfirmationCount = [hasSweepConfirmation, alignedEngulfing, alignedRejection, alignedStructure || hasMss, alignedMomentum, poiReclaim, ema200ReclaimRetest]
-    .filter(Boolean)
-    .length;
-
-  const trendPriorityDecision = evaluateTrendPriorityFilter({
-    symbol,
-    direction,
-    macroTrend,
-    confidenceScore: confirmationScore,
-    hasBos,
-    hasDisplacement: freshDisplacement,
-    hasLiquiditySweep,
-    hasStrongZone,
-    hasRejection: alignedRejection || alignedEngulfing || freshReaction,
+    const window = sessions[session];
+    return meta.hour >= window.start && meta.hour < window.end;
   });
+}
 
-  if (!trendPriorityDecision.allowed) {
+function getAsiaRange(candles: Candle[], dateKey: string): { asiaHigh: number; asiaLow: number } | null {
+  const asiaCandles = getSessionCandlesForDate(candles, dateKey, 'asia');
+  if (asiaCandles.length < 4) {
     return null;
   }
 
-  if (ema20Entry.overextended) {
-    console.log(`[scanner-engine] Blocked ${symbol} ${direction.toUpperCase()} — Overextended move, poor entry location`);
+  return {
+    asiaHigh: Math.max(...asiaCandles.map((candle) => candle.high)),
+    asiaLow: Math.min(...asiaCandles.map((candle) => candle.low)),
+  };
+}
+
+function getLondonTrendDirection(londonCandles: Candle[]): 'buy' | 'sell' | null {
+  if (londonCandles.length < 4) {
     return null;
   }
 
-  if (awaitingEma20Reclaim) {
-    console.log(`[scanner-engine] Delayed ${symbol} ${direction.toUpperCase()} — waiting for EMA20 reclaim after sweep and displacement`);
-    return null;
-  }
+  const trend = detectTrend(londonCandles);
+  if (trend === 'bullish') return 'buy';
+  if (trend === 'bearish') return 'sell';
 
-  if (!ema20Entry.emaMomentum) {
-    console.log(`[scanner-engine] Blocked ${symbol} ${direction.toUpperCase()} — No ${direction === 'buy' ? 'bullish' : 'bearish'} momentum confirmation (EMA20)`);
-    return null;
-  }
+  const firstClose = londonCandles[0].close;
+  const lastClose = londonCandles[londonCandles.length - 1].close;
+  if (lastClose > firstClose) return 'buy';
+  if (lastClose < firstClose) return 'sell';
+  return null;
+}
 
-  // EMA 50/200 not stacked for this direction — need extra confirmation
-  // EMA 50 cross already confirms intent so it bypasses the stack requirement
-  if (!emaAligned && !isReversalSetup && !dynamicTrendTrigger && directionalConfirmationCount < 3) return null;
+function isStrongTrendAligned(direction: 'buy' | 'sell', price: number, ema20: number, ema50: number, ema200: number): boolean {
+  return direction === 'buy'
+    ? price > ema200 && ema50 > ema200 && ema20 > ema50
+    : price < ema200 && ema50 < ema200 && ema20 < ema50;
+}
 
-  if (directionalConfirmationCount < 2 && !isReversalSetup && !hasBreaker && !hasFvgReaction && !dynamicTrendTrigger) return null;
-  if (!alignedEngulfing && !alignedRejection && !(alignedStructure || hasMss) && !poiReclaim && !isReversalSetup && !hasBreaker && !hasFvgReaction && !dynamicTrendTrigger) return null;
+function isExtendedFromEmaCluster(price: number, ema20: number, ema50: number, atr: number): boolean {
+  return Math.abs(price - ema20) > atr * 1.8 && Math.abs(price - ema50) > atr * 2.3;
+}
 
-  // Liquidity sweeps need actual reversal confirmation before the scanner fires.
-  if ((alignedSweep || hasEqlSweep) && !alignedEngulfing && !(alignedStructure || hasMss) && !isReversalSetup && !hasBreaker) return null;
+function detectLevelSweepSignal(
+  direction: 'buy' | 'sell',
+  candles: Candle[],
+  level: number,
+  requireRejection: boolean,
+): ContinuationSweepSignal | null {
+  for (let index = Math.max(0, candles.length - 8); index < candles.length; index++) {
+    const candle = candles[index];
+    const rejection = detectRejection(candle);
 
-  // If the local tape is still moving against the setup, do not force an entry from the higher-level trend.
-  if (!alignedMomentum && !(alignedStructure || hasMss) && !alignedEngulfing && !poiReclaim && !isReversalSetup && !hasBreaker && !hasFvgReaction && !dynamicTrendTrigger) return null;
-
-  // Favor the same setup family shown in the winning examples: reaction from a clean area, then displacement.
-  if (!freshReaction && !poiReclaim && !alignedSweep && !hasEqlSweep && !alignedRejection && !alignedEngulfing && !isReversalSetup && !hasBreaker && !hasFvgReaction && !dynamicTrendTrigger) return null;
-  if (!freshDisplacement && !(alignedStructure || hasMss) && !alignedEngulfing && !poiReclaim && !isReversalSetup && !hasBreaker && !hasFvgReaction && !dynamicTrendTrigger) return null;
-
-  const entry = last.close;
-  // EMA 50 cross: anchor SL to EMA 200 (the macro filter level). Otherwise use structural SL.
-  const fixedSymbolRisk = getFixedSymbolRiskTargets(symbol, direction, entry);
-  const stopLossDecision = fixedSymbolRisk
-    ? {
-        stopLoss: fixedSymbolRisk.stopLoss,
-        slReason: fixedSymbolRisk.slReason,
+    if (direction === 'buy' && candle.low < level && candle.close > level) {
+      if (requireRejection && rejection !== 'bullish_rejection') {
+        continue;
       }
-    : dynamicTrendTrigger && emaTrend.ema200 != null
-    ? {
-        stopLoss: computeEma200AnchoredStopLoss(symbol, direction, candles, emaTrend.ema200),
-        slReason: 'EMA200-anchored SL' as const,
+      return { index, sweptLevel: level, sweepExtreme: candle.low, candle };
+    }
+
+    if (direction === 'sell' && candle.high > level && candle.close < level) {
+      if (requireRejection && rejection !== 'bearish_rejection') {
+        continue;
       }
-    : computeStopLoss(symbol, direction, candles);
-  const stopLoss = stopLossDecision.stopLoss;
-  const { takeProfit, takeProfit2, structuralTargets } = fixedSymbolRisk
-    ? { takeProfit: fixedSymbolRisk.takeProfit, takeProfit2: fixedSymbolRisk.takeProfit2, structuralTargets: [] as number[] }
-    : resolveTakeProfitTargets(symbol, direction, entry, stopLoss, candles, {
-        useStructuralTargets: !ema200ReclaimRetest,
-      });
-
-  if (isVolatilitySymbol(symbol) && structuralTargets.length === 0 && !dynamicTrendTrigger) return null;
-
-  // Sanity: TP must be in the right direction
-  if (direction === 'buy' && takeProfit <= entry) return null;
-  if (direction === 'sell' && takeProfit >= entry) return null;
-  if (direction === 'buy' && takeProfit2 <= takeProfit) return null;
-  if (direction === 'sell' && takeProfit2 >= takeProfit) return null;
-
-  // Sanity: SL must be on the correct side
-  if (direction === 'buy' && stopLoss >= entry) return null;
-  if (direction === 'sell' && stopLoss <= entry) return null;
-
-  const confirmations: SetupConfirmations = { sweep, engulfing, rejection, structure };
-  let cappedConfidenceScore = macroCounterTrend && !hasBos
-    ? Math.min(confirmationScore, 7)
-    : confirmationScore;
-
-  if (emaStackSupportsDirection) {
-    cappedConfidenceScore = Math.min(10, cappedConfidenceScore + 1);
+      return { index, sweptLevel: level, sweepExtreme: candle.high, candle };
+    }
   }
 
-  const candidateSetup: TradeSetup = {
-    symbol,
-    direction,
+  return null;
+}
+
+function buildSessionFlipCandidate(input: {
+  symbol: string;
+  candles: Candle[];
+  session: 'london' | 'newyork';
+  variant: SessionFlipVariant;
+  direction: 'buy' | 'sell';
+  sweep: ContinuationSweepSignal;
+  emaAligned: boolean;
+  zoneReaction: boolean;
+  marketRegime: MarketRegime;
+}): ContinuationSetupAssessment | null {
+  const displacement = detectDirectionalDisplacement(input.direction, input.candles, input.sweep.index);
+  if (!displacement) {
+    return logContinuationRejection(input.symbol, 'no displacement');
+  }
+
+  const structureBreak = detectDirectionalMicroBreak(input.direction, input.candles, displacement.index);
+  if (!structureBreak) {
+    return logContinuationRejection(input.symbol, 'no micro structure break');
+  }
+
+  let score = 0;
+  score += 2;
+  score += 2;
+  score += 3;
+  if (input.emaAligned) {
+    score += 2;
+  }
+
+  if (score < 7) {
+    return logContinuationRejection(input.symbol, 'low score');
+  }
+
+  const atr = Math.max(computeAtr(input.candles, 14), averageRange(input.candles, 14) * 0.5, 0.0001);
+  const entry = structureBreak.entry || displacement.candle.close;
+  const stopLoss = input.direction === 'buy'
+    ? input.sweep.sweepExtreme - atr * 0.5
+    : input.sweep.sweepExtreme + atr * 0.5;
+  const risk = Math.abs(entry - stopLoss);
+  if (risk <= 0) {
+    return logContinuationRejection(input.symbol, 'invalid risk geometry');
+  }
+
+  const structuralTarget = findDirectionalStructureTarget(input.direction, input.candles, entry);
+  const fallbackTarget = input.direction === 'buy' ? entry + risk * 2 : entry - risk * 2;
+  const takeProfit = structuralTarget ?? fallbackTarget;
+  const confirmationLabels = [
+    'Session timing aligned',
+    input.direction === 'buy' ? 'Sell-side liquidity sweep' : 'Buy-side liquidity sweep',
+    input.direction === 'buy' ? 'Bullish displacement candle' : 'Bearish displacement candle',
+    input.direction === 'buy' ? 'Bullish micro structure break' : 'Bearish micro structure break',
+    input.emaAligned ? 'EMA alignment confirmed' : 'EMA filter softened',
+  ];
+
+  return {
+    direction: input.direction,
+    score,
+    confidenceScore: score >= 9 ? 95 : score >= 8 ? 88 : 78,
     entry,
     stopLoss,
-    slReason: stopLossDecision.slReason,
     takeProfit,
-    takeProfit2,
-    emaMomentum: ema20Entry.emaMomentum,
-    emaStack: ema20Entry.emaStack,
-    emaEntryValid: ema20Entry.emaEntryValid,
-    score,
-    confidenceScore: cappedConfidenceScore,
-    marketRegime: isReversalSetup ? 'reversal' : 'trend',
-    strategy: isReversalSetup
-      ? direction === 'buy'
-        ? macroTrend === 'bullish'
-          ? 'Bullish Trend Pullback Reversal'
-          : broaderTrend === 'bearish'
-            ? 'Bullish Countertrend Reversal from Demand'
-            : 'Bullish Higher-Timeframe Reversal'
-        : macroTrend === 'bearish'
-          ? 'Bearish Trend Pullback Reversal'
-          : broaderTrend === 'bullish'
-            ? 'Bearish Countertrend Reversal from Supply'
-            : 'Bearish Higher-Timeframe Reversal'
-      : hasBreaker
-        ? direction === 'buy'
-          ? 'Bullish Breaker Block Retest'
-          : 'Bearish Breaker Block Retest'
-      : hasFvgReaction
-        ? direction === 'buy'
-          ? 'Bullish FVG Fill Continuation'
-          : 'Bearish FVG Fill Continuation'
-      : ema200ReclaimRetest
-        ? direction === 'buy'
-          ? 'Bullish EMA200 Reclaim Continuation'
-          : 'Bearish EMA200 Reclaim Continuation'
-      : hasEqlSweep
-        ? direction === 'buy'
-          ? 'Bullish EQL Sweep Reversal'
-          : 'Bearish EQH Sweep Reversal'
-      : poiReclaim
-        ? direction === 'buy'
-          ? macroTrend === 'bullish' || broaderTrend !== 'bearish'
-            ? 'Bullish POI Reclaim Continuation'
-            : 'Bullish POI Reclaim Countertrend'
-          : macroTrend === 'bearish' || broaderTrend !== 'bullish'
-            ? 'Bearish POI Reclaim Continuation'
-            : 'Bearish POI Reclaim Countertrend'
-      : ema50CrossAligned
-        ? direction === 'buy'
-          ? 'Bullish EMA 50 Cross Continuation'
-          : 'Bearish EMA 50 Cross Continuation'
-      : deriveStrategy(direction, sweep),
-    confirmations: tradeConfirmations,
-    confirmationLabels: [
-      ...(emaAligned
-        ? [direction === 'buy' ? 'EMA 50 above EMA 200 — bullish stack confirmed' : 'EMA 50 below EMA 200 — bearish stack confirmed']
-        : []),
-      ...(macroTrend !== 'ranging'
-        ? [direction === 'buy' ? 'Price above EMA 200 — macro bullish filter' : 'Price below EMA 200 — macro bearish filter']
-        : []),
-      ...(ema200ReclaimRetest
-        ? [direction === 'buy'
-          ? 'EMA200 reclaim, retest, and strong close above EMA20/EMA50 confirmed'
-          : 'EMA200 reclaim, retest, and strong close below EMA20/EMA50 confirmed']
-        : []),
-      ...(ema50Exec.nearEma50
-        ? [direction === 'buy' ? 'Pullback to EMA 50 dynamic support' : 'Pullback to EMA 50 dynamic resistance']
-        : []),
-      ...(ema50Exec.ema50ZoneConfluence
-        ? ['EMA 50 confluent with structural zone']
-        : []),
-      ...(ema50CrossAligned
-        ? [direction === 'buy'
-          ? 'Price closed above EMA 50 — bullish execution trigger'
-          : 'Price closed below EMA 50 — bearish execution trigger']
-        : []),
-      ...(isReversalSetup ? [direction === 'buy' ? 'Demand reversal pattern confirmed' : 'Supply reversal pattern confirmed', direction === 'buy' ? 'Bullish closure confirmation' : 'Bearish closure confirmation'] : []),
-      ...(poiReclaim && !isReversalSetup ? [direction === 'buy' ? 'POI reclaim from demand/support' : 'POI reclaim from supply/resistance'] : []),
-      ...(hasBreaker ? [direction === 'buy' ? 'Bullish breaker block retest (flipped supply → demand)' : 'Bearish breaker block retest (flipped demand → supply)'] : []),
-      ...(hasFvgReaction ? [direction === 'buy' ? 'Bullish FVG fill reaction — price entered imbalance and reversed' : 'Bearish FVG fill reaction — price entered imbalance and reversed'] : []),
-      ...(hasEqlSweep ? [direction === 'buy' ? `Equal lows swept at ${eqlSweep!.price.toFixed(5)} (${eqlSweep!.touches} touches)` : `Equal highs swept at ${eqlSweep!.price.toFixed(5)} (${eqlSweep!.touches} touches)`] : []),
-      ...(hasOte ? [`Price in OTE zone (62–79% retracement)${ote!.hasFvgOverlap ? ' with FVG overlap' : ote!.hasZoneOverlap ? ' with zone overlap' : ''}`] : []),
-      ...(hasMss ? [direction === 'buy' ? 'Bullish market structure shift (swing high broken)' : 'Bearish market structure shift (swing low broken)'] : []),
-      ...(premiumDiscountBias > 0 ? [direction === 'buy' ? 'Entry in discount zone (below 50% of swing)' : 'Entry in premium zone (above 50% of swing)'] : []),
-      ...buildConfirmationLabels(confirmations),
-    ],
+    takeProfit2: takeProfit,
+    emaStack: input.direction === 'buy' ? 'bullish' : 'bearish',
+    confirmations: buildTradeConfirmations({
+      alignedSweep: true,
+      alignedEngulfing: displacement.engulfsPrevious,
+      alignedRejection: input.variant === 'london_sweep_reversal',
+      alignedStructure: true,
+      poiReclaim: false,
+      emaAligned: input.emaAligned,
+      zoneReaction: input.zoneReaction,
+      freshDisplacement: true,
+      alignedMomentum: input.emaAligned,
+    }),
+    confirmationLabels,
+    session: input.session,
+    setup: 'session_flip',
+    validUntil: new Date((input.candles[input.candles.length - 1].time * 1000) + SESSION_FLIP_VALIDITY_MS).toISOString(),
+    marketRegime: input.marketRegime,
+    narrative: `${input.symbol} ${input.variant.replace(/_/g, ' ')} session flip detected.`,
+    fulfilledConditions: confirmationLabels,
+    requiredTriggers: [],
+    contextLabels: ['session_flip', input.variant],
   };
+}
 
-  const zoneCheck = zoneFilter(candidateSetup, candles);
-  if (!zoneCheck.valid) {
-    console.log(`[scanner-engine] Blocked ${symbol} ${direction.toUpperCase()} by zone filter: ${zoneCheck.reason}`);
+function countRecentPriceEma50Crosses(candles: Candle[], ema50: number): number {
+  const recent = candles.slice(-10);
+  if (recent.length < 3) {
+    return 0;
+  }
+
+  let crosses = 0;
+  for (let index = 1; index < recent.length; index++) {
+    const previousDelta = recent[index - 1].close - ema50;
+    const currentDelta = recent[index].close - ema50;
+    if ((previousDelta <= 0 && currentDelta > 0) || (previousDelta >= 0 && currentDelta < 0)) {
+      crosses++;
+    }
+  }
+
+  return crosses;
+}
+
+function isContinuationChop(candles: Candle[], ema200: number, ema50: number): boolean {
+  const recent = candles.slice(-10);
+  if (recent.length < 10) {
+    return false;
+  }
+
+  const referenceIndex = Math.max(0, candles.length - 10);
+  const ema200Reference = calculateEmaSeries(candles, 200)[Math.max(0, calculateEmaSeries(candles, 200).length - 10)]?.value ?? ema200;
+  const emaFlat = Math.abs(ema200 - ema200Reference) <= Math.max(averageRange(candles, 10) * 0.2, Math.abs(ema200) * 0.00015);
+  const crosses = countRecentPriceEma50Crosses(candles, ema50);
+  const overlaps = hasHeavyCandleOverlap(recent);
+
+  return emaFlat || crosses >= 4 || overlaps;
+}
+
+function assessPullback(direction: 'buy' | 'sell', candles: Candle[], ema20: number, ema50: number, atr: number): PullbackAssessment {
+  const recent = candles.slice(-10);
+  const touchBuffer = Math.max(atr * 0.35, averageRange(candles, 10) * 0.25, Math.abs(candles[candles.length - 1].close) * 0.00035);
+  const touchedEma20 = recent.some((candle) => direction === 'buy'
+    ? candle.low <= ema20 + touchBuffer
+    : candle.high >= ema20 - touchBuffer);
+  const touchedEma50 = recent.some((candle) => direction === 'buy'
+    ? candle.low <= ema50 + touchBuffer
+    : candle.high >= ema50 - touchBuffer);
+  const latestClose = candles[candles.length - 1].close;
+  const overextended = Math.abs(latestClose - ema20) > atr * 1.8 && Math.abs(latestClose - ema50) > atr * 2.1;
+
+  return {
+    valid: touchedEma20 || touchedEma50,
+    touchedEma20,
+    touchedEma50,
+    overextended,
+  };
+}
+
+function detectDirectionalSweepSignal(direction: 'buy' | 'sell', candles: Candle[]): ContinuationSweepSignal | null {
+  for (let index = Math.max(8, candles.length - 6); index < candles.length; index++) {
+    const candle = candles[index];
+    const lookback = candles.slice(Math.max(0, index - 8), index);
+    if (lookback.length < 4) {
+      continue;
+    }
+
+    const previousHigh = Math.max(...lookback.map((entry) => entry.high));
+    const previousLow = Math.min(...lookback.map((entry) => entry.low));
+
+    if (direction === 'buy' && candle.low < previousLow && candle.close > previousLow) {
+      return { index, sweptLevel: previousLow, sweepExtreme: candle.low, candle };
+    }
+
+    if (direction === 'sell' && candle.high > previousHigh && candle.close < previousHigh) {
+      return { index, sweptLevel: previousHigh, sweepExtreme: candle.high, candle };
+    }
+  }
+
+  return null;
+}
+
+function detectDirectionalDisplacement(
+  direction: 'buy' | 'sell',
+  candles: Candle[],
+  sweepIndex: number,
+): DisplacementAssessment | null {
+  const avgBody = Math.max(averageBody(candles, 20), 0.00001);
+
+  for (let index = sweepIndex; index < candles.length; index++) {
+    if (index === 0) {
+      continue;
+    }
+
+    const candle = candles[index];
+    const previous = candles[index - 1];
+    const bodySize = Math.abs(candle.close - candle.open);
+    const bullishBody = candle.close > candle.open;
+    const bearishBody = candle.close < candle.open;
+    const engulfsPrevious = direction === 'buy'
+      ? bullishBody && candle.close > previous.high && candle.open <= previous.close
+      : bearishBody && candle.close < previous.low && candle.open >= previous.close;
+    const directionalClose = direction === 'buy'
+      ? candle.close >= candle.low + (candle.high - candle.low) * 0.7
+      : candle.close <= candle.high - (candle.high - candle.low) * 0.7;
+
+    if (bodySize > avgBody * 1.5 && engulfsPrevious && directionalClose) {
+      return { index, candle, engulfsPrevious, bodySize };
+    }
+  }
+
+  return null;
+}
+
+function detectDirectionalMicroBreak(
+  direction: 'buy' | 'sell',
+  candles: Candle[],
+  displacementIndex: number,
+): StructureBreakAssessment | null {
+  for (let index = displacementIndex; index < candles.length; index++) {
+    const window = candles.slice(Math.max(0, index - 4), index);
+    if (window.length < 3) {
+      continue;
+    }
+
+    const breakLevel = direction === 'buy'
+      ? Math.max(...window.map((candle) => candle.high))
+      : Math.min(...window.map((candle) => candle.low));
+    const candle = candles[index];
+
+    if (direction === 'buy' && candle.close > breakLevel) {
+      return { index, entry: candle.close, breakLevel };
+    }
+
+    if (direction === 'sell' && candle.close < breakLevel) {
+      return { index, entry: candle.close, breakLevel };
+    }
+  }
+
+  return null;
+}
+
+function findDirectionalStructureTarget(direction: 'buy' | 'sell', candles: Candle[], entry: number): number | null {
+  const swings = findSwingHighsLows(candles.slice(-120));
+  if (direction === 'buy') {
+    const target = swings
+      .filter((swing) => swing.type === 'high' && swing.price > entry)
+      .sort((left, right) => left.price - right.price)[0];
+    return target?.price ?? null;
+  }
+
+  const target = swings
+    .filter((swing) => swing.type === 'low' && swing.price < entry)
+    .sort((left, right) => right.price - left.price)[0];
+  return target?.price ?? null;
+}
+
+function buildContinuationSetup(symbol: string, candles: Candle[]): ContinuationSetupAssessment | null {
+  if (candles.length < MIN_SCANNER_ANALYSIS_CANDLES) {
+    return logContinuationRejection(symbol, 'not enough candles for session flip scan');
+  }
+
+  const ema200 = calculateEMA(candles, 200);
+  const ema50 = calculateEMA(candles, 50);
+  const ema20 = calculateEMA(candles, 20);
+  if (ema200 == null || ema50 == null || ema20 == null) {
+    return logContinuationRejection(symbol, 'EMA data unavailable');
+  }
+
+  const latest = candles[candles.length - 1];
+  const latestTime = getNewYorkTimeMeta(latest.time);
+  const price = latest.close;
+  const currentSession = getCurrentSession(latestTime.hour);
+  const dateKey = latestTime.dateKey;
+  const atr = Math.max(computeAtr(candles, 14), averageRange(candles, 14) * 0.5, 0.0001);
+
+  if (isContinuationChop(candles, ema200, ema50)) {
+    return logContinuationRejection(symbol, 'chop filter active');
+  }
+
+  const asiaRange = getAsiaRange(candles, dateKey);
+  const londonCandles = getSessionCandlesForDate(candles, dateKey, 'london');
+  const newYorkCandles = getSessionCandlesForDate(candles, dateKey, 'newyork');
+  const londonTrend = getLondonTrendDirection(londonCandles);
+  const bullishEmaTrend = isStrongTrendAligned('buy', price, ema20, ema50, ema200);
+  const bearishEmaTrend = isStrongTrendAligned('sell', price, ema20, ema50, ema200);
+
+  if (currentSession === 'london' && latestTime.hour < LONDON_SWEEP_WINDOW_END) {
+    if (!asiaRange) {
+      return logContinuationRejection(symbol, 'no asia range');
+    }
+
+    const londonOpenCandles = londonCandles.filter((candle) => getNewYorkTimeMeta(candle.time).hour < LONDON_SWEEP_WINDOW_END);
+    const bullishSweep = detectLevelSweepSignal('buy', londonOpenCandles, asiaRange.asiaLow, true);
+    if (bullishSweep && !bearishEmaTrend) {
+      return buildSessionFlipCandidate({
+        symbol,
+        candles: londonOpenCandles,
+        session: 'london',
+        variant: 'london_sweep_reversal',
+        direction: 'buy',
+        sweep: bullishSweep,
+        emaAligned: price >= ema20 || ema20 >= ema50,
+        zoneReaction: true,
+        marketRegime: 'reversal',
+      });
+    }
+
+    const bearishSweep = detectLevelSweepSignal('sell', londonOpenCandles, asiaRange.asiaHigh, true);
+    if (bearishSweep && !bullishEmaTrend) {
+      return buildSessionFlipCandidate({
+        symbol,
+        candles: londonOpenCandles,
+        session: 'london',
+        variant: 'london_sweep_reversal',
+        direction: 'sell',
+        sweep: bearishSweep,
+        emaAligned: price <= ema20 || ema20 <= ema50,
+        zoneReaction: true,
+        marketRegime: 'reversal',
+      });
+    }
+
+    return logContinuationRejection(symbol, 'no london sweep');
+  }
+
+  if (latestTime.hour >= sessions.newyork.start && latestTime.hour < NEWYORK_OPEN_WINDOW_END) {
+    if (!londonTrend || newYorkCandles.length < 3) {
+      return logContinuationRejection(symbol, 'no london trend');
+    }
+
+    const continuationPullback = assessPullback(londonTrend, candles, ema20, ema50, atr);
+    const continuationSweep = detectDirectionalSweepSignal(londonTrend, newYorkCandles);
+    if (continuationPullback.valid && !continuationPullback.overextended && continuationSweep) {
+      const continuationEmaAligned = londonTrend === 'buy' ? bullishEmaTrend : bearishEmaTrend;
+      if (continuationEmaAligned) {
+        return buildSessionFlipCandidate({
+          symbol,
+          candles: newYorkCandles,
+          session: 'newyork',
+          variant: 'newyork_continuation',
+          direction: londonTrend,
+          sweep: continuationSweep,
+          emaAligned: true,
+          zoneReaction: continuationPullback.touchedEma20 || continuationPullback.touchedEma50,
+          marketRegime: 'trend',
+        });
+      }
+    }
+
+    if (!isExtendedFromEmaCluster(price, ema20, ema50, atr)) {
+      return logContinuationRejection(symbol, 'no new york pullback or extension');
+    }
+
+    const reversalDirection: 'buy' | 'sell' = londonTrend === 'buy' ? 'sell' : 'buy';
+    const reversalSweep = detectDirectionalSweepSignal(reversalDirection, newYorkCandles);
+    if (!reversalSweep) {
+      return logContinuationRejection(symbol, 'no new york reversal sweep');
+    }
+
+    if ((reversalDirection === 'buy' && bearishEmaTrend) || (reversalDirection === 'sell' && bullishEmaTrend)) {
+      return logContinuationRejection(symbol, 'reversal fighting strong trend');
+    }
+
+    return buildSessionFlipCandidate({
+      symbol,
+      candles: newYorkCandles,
+      session: 'newyork',
+      variant: 'newyork_reversal',
+      direction: reversalDirection,
+      sweep: reversalSweep,
+      emaAligned: true,
+      zoneReaction: true,
+      marketRegime: 'reversal',
+    });
+  }
+
+  return logContinuationRejection(symbol, 'outside session flip window');
+}
+
+// ── 9. Main Analysis Function (single symbol) ──
+// Pure logic — continuation only.
+
+export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | null {
+  const setup = buildContinuationSetup(symbol, candles);
+  if (!setup) {
     return null;
   }
 
-  return candidateSetup;
+  return {
+    symbol,
+    direction: setup.direction,
+    entry: setup.entry,
+    stopLoss: setup.stopLoss,
+    slReason: 'Swing-based ATR fallback SL',
+    takeProfit: setup.takeProfit,
+    takeProfit2: setup.takeProfit2,
+    emaMomentum: true,
+    emaStack: setup.emaStack,
+    emaEntryValid: true,
+    score: setup.score,
+    confidenceScore: setup.confidenceScore,
+    marketRegime: setup.marketRegime,
+    strategy: 'session_flip',
+    session: setup.session,
+    setup: setup.setup,
+    validUntil: setup.validUntil,
+    confirmations: setup.confirmations,
+    confirmationLabels: setup.confirmationLabels,
+  };
 }
 
 export function analyzePotentialTrade(symbol: string, candles: Candle[]): PotentialTradeSetup | null {
@@ -4108,47 +4324,34 @@ export function analyzePotentialTrades(
   candles: Candle[],
   context?: AnalyzePotentialTradeContext,
 ): PotentialTradeSetup[] {
-  if (candles.length < MIN_SCANNER_ANALYSIS_CANDLES) return [];
-
-  const trend = context?.trend ?? detectTrend(candles);
-  const broaderTrend = context?.broaderTrend ?? detectContextTrend(candles);
-  const emaTrend = context?.emaTrend ?? analyzeEmaTrend(candles);
-  const marketCondition = detectMarketCondition(candles, emaTrend);
-  const macroTrend = detectMacroTrend(candles, emaTrend);
-  const currentPrice = context?.currentPrice ?? candles[candles.length - 1].close;
-  const lookLeftCandles = candles.slice(-Math.min(500, candles.length));
-  const zones = context?.zones ?? buildZones(lookLeftCandles, currentPrice);
-  const gaps = context?.gaps ?? buildFairValueGaps(lookLeftCandles, currentPrice);
-  const currentZone = context?.currentZone ?? findActiveReversalZone(currentPrice, zones, candles);
-  const bullishReversal = context?.bullishReversal ?? resolveBullishReversalPattern(currentPrice, currentZone, candles).matched;
-  const bearishReversal = context?.bearishReversal ?? resolveBearishReversalPattern(currentPrice, currentZone, candles).matched;
-  const rangeCandidate = buildSupportResistanceRangePotential(symbol, candles, broaderTrend, emaTrend);
-  const bullishArea = toPriceArea(findDirectionalZone('buy', zones, currentPrice, candles, symbol) ?? findDirectionalFvg('buy', gaps, candles, symbol));
-  const bearishArea = toPriceArea(findDirectionalZone('sell', zones, currentPrice, candles, symbol) ?? findDirectionalFvg('sell', gaps, candles, symbol));
-  const bullishPoiReclaim = context?.bullishPoiReclaim ?? hasPoiReclaim('buy', bullishArea, candles);
-  const bearishPoiReclaim = context?.bearishPoiReclaim ?? hasPoiReclaim('sell', bearishArea, candles);
-
-  if (marketCondition.marketState === 'chop' || marketCondition.marketState === 'unclear') {
-    console.log(`[scanner-engine] Blocked potential ${symbol} by market state ${marketCondition.marketState}: ${marketCondition.reason}`);
+  const setup = buildContinuationSetup(symbol, candles);
+  if (!setup) {
     return [];
   }
 
-  if (marketCondition.marketState === 'range') {
-    return rangeCandidate ? [rangeCandidate] : [];
-  }
-
-  const macroDirection: 'buy' | 'sell' = marketCondition.marketState === 'bullish' ? 'buy' : 'sell';
-
-  const candidates: PotentialTradeSetup[] = [];
-
-  const trendCandidate = buildPotentialCandidate({
-    symbol, candles, trend, broaderTrend, macroTrend, emaTrend, currentPrice,
-    zones, gaps, currentZone, direction: macroDirection, mode: 'trend',
-    bullishReversal, bearishReversal, bullishPoiReclaim, bearishPoiReclaim,
-  });
-  if (trendCandidate) candidates.push(trendCandidate);
-
-  return candidates
-    .filter((c, i, a) => a.findIndex(x => x.direction === c.direction && x.strategy === c.strategy) === i)
-    .sort((left, right) => right.activationProbability - left.activationProbability);
+  return [{
+    symbol,
+    direction: setup.direction,
+    currentPrice: context?.currentPrice ?? candles[candles.length - 1].close,
+    entry: setup.entry,
+    stopLoss: setup.stopLoss,
+    slReason: 'Swing-based ATR fallback SL',
+    takeProfit: setup.takeProfit,
+    takeProfit2: setup.takeProfit2,
+    emaMomentum: true,
+    emaStack: setup.emaStack,
+    emaEntryValid: true,
+    activationProbability: setup.confidenceScore,
+    confidenceScore: setup.confidenceScore,
+    marketRegime: setup.marketRegime,
+    confirmations: setup.confirmations,
+    strategy: 'session_flip',
+    session: setup.session,
+    setup: setup.setup,
+    validUntil: setup.validUntil,
+    narrative: setup.narrative,
+    fulfilledConditions: setup.fulfilledConditions,
+    requiredTriggers: setup.requiredTriggers,
+    contextLabels: setup.contextLabels,
+  }];
 }

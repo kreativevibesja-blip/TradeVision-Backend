@@ -7,7 +7,6 @@ import { DERIV_SCANNER_SYMBOL_IDS, SESSION_SCANNER_SYMBOL_IDS, VOLATILITY_SCANNE
 import { scheduleScannerPanelRefreshForAllUsers, scheduleScannerPanelRefreshForUser } from '../lib/scanner/panelStream';
 import { getCooldownMinutes, isSymbolOnCooldown, allowContinuation, passesPostFirstTradeFilter, type TradeResult } from '../lib/scanner/cooldownEngine';
 import { analyzeMarket, analyzePotentialTrades, detectTrend, findSwingHighsLows, type Candle, type MarketRegime, type PotentialTradeSetup, type TradeConfirmations, type TrendDirection } from './scannerEngine';
-import { analyzeGoldScalper } from './scannerEngines/goldScalper';
 import { analyzeLiveChartCandles } from './liveChartAnalysis';
 import type { MarketCandle } from './marketData';
 import { sendPushToUser } from './pushService';
@@ -61,6 +60,7 @@ export interface ScanResult {
   createdAt: string;
   currentPrice?: number | null;
   snapshotUrl?: string | null;
+  validUntil?: string | null;
 }
 
 export interface ScannerAlert {
@@ -105,6 +105,8 @@ export interface PotentialTrade {
   activationProbability: number;
   marketRegime: MarketRegime;
   strategy: string;
+  setup?: string;
+  validUntil?: string;
   narrative: string;
   fulfilledConditions: string[];
   requiredTriggers: string[];
@@ -167,13 +169,24 @@ const SCANNER_SYMBOLS_BY_SESSION: Record<SessionType, readonly string[]> = {
 };
 
 const SCANNER_TIMEFRAME = 'M15';
-const GOLD_SCALPER_SPREAD_THRESHOLD = 0.6;
 const LIVE_RESULT_CACHE_SYNC_MS = 20_000;
 const HIGH_CONFIDENCE_POTENTIAL_THRESHOLD = 90;
 const AI_REVIEW_NEAR_LIVE_THRESHOLD = 86;
 const AI_REVIEW_CACHE_TTL_MS = 10 * 60_000;
 const PREFER_HISTORY_BEFORE_CACHE_SYMBOLS = new Set(['XAUUSD']);
 const HISTORY_RATE_LIMIT_BACKOFF_MS = 60_000;
+
+function getScannerSpreadThreshold(symbol: string, referencePrice: number): number {
+  const normalized = symbol.trim().toUpperCase();
+  if (normalized === 'XAUUSD') return 1.2;
+  if (/^(US30|NAS100|SPX500|GER40|UK100|USTEC|US500)$/i.test(normalized)) return 8;
+  if (/^[A-Z]{6}$/.test(normalized)) return normalized.endsWith('JPY') ? 0.08 : 0.0012;
+  return Math.max(referencePrice * 0.004, 0.5);
+}
+
+function isScannerSpreadAcceptable(symbol: string, spread: number, referencePrice: number): boolean {
+  return spread <= getScannerSpreadThreshold(symbol, referencePrice);
+}
 
 const TIMEFRAME_TO_GRANULARITY: Record<'M1' | 'M5' | 'M15' | 'H1', 60 | 300 | 900 | 3600> = {
   M1: 60,
@@ -1009,9 +1022,20 @@ function promotePotentialToScanCycleResult(potential: PotentialTradeSetup): Scan
     confidenceScore: potential.confidenceScore,
     marketRegime: potential.marketRegime,
     strategy: potential.strategy.replace(/ Watchlist$/i, ''),
+    setup: potential.setup,
+    validUntil: potential.validUntil,
     confirmations: potential.confirmations,
     score: 9,
   };
+}
+
+function getDerivedValidUntil(createdAt: string): string | null {
+  const createdAtMs = new Date(createdAt).getTime();
+  if (!Number.isFinite(createdAtMs)) {
+    return null;
+  }
+
+  return new Date(createdAtMs + 15 * 60_000).toISOString();
 }
 
 async function loadLatestScannerPrice(symbol: string): Promise<number | null> {
@@ -1022,7 +1046,11 @@ async function loadLatestScannerPrice(symbol: string): Promise<number | null> {
 async function attachLivePricesToResults(results: ScanResult[]): Promise<ScanResult[]> {
   const openResults = results.filter((result) => result.status === 'active' || result.status === 'triggered');
   if (openResults.length === 0) {
-    return results.map((result) => ({ ...result, currentPrice: result.currentPrice ?? null }));
+    return results.map((result) => ({
+      ...result,
+      currentPrice: result.currentPrice ?? null,
+      validUntil: result.validUntil ?? getDerivedValidUntil(result.createdAt),
+    }));
   }
 
   const uniqueSymbols = Array.from(new Set(openResults.map((result) => result.symbol)));
@@ -1040,6 +1068,7 @@ async function attachLivePricesToResults(results: ScanResult[]): Promise<ScanRes
 
   return results.map((result) => ({
     ...result,
+    validUntil: result.validUntil ?? getDerivedValidUntil(result.createdAt),
     currentPrice: (result.status === 'active' || result.status === 'triggered')
       ? (latestPriceBySymbol.get(result.symbol) ?? null)
       : (result.currentPrice ?? null),
@@ -1359,7 +1388,10 @@ function registerLiveResultInCache(result: ScanResult) {
     return;
   }
 
-  symbolBucket.set(result.id, result);
+  symbolBucket.set(result.id, {
+    ...result,
+    validUntil: result.validUntil ?? getDerivedValidUntil(result.createdAt),
+  });
   liveResultCache.set(result.symbol, symbolBucket);
 }
 
@@ -1473,6 +1505,23 @@ async function processResultLifecycle(
   const decimals = result.entry >= 100 ? 2 : 5;
 
   if (result.status === 'active') {
+    const validUntil = result.validUntil ?? getDerivedValidUntil(result.createdAt);
+    if (validUntil && Date.now() > new Date(validUntil).getTime()) {
+      await updateScanResult(result.id, {
+        status: 'expired',
+        closedAt: new Date().toISOString(),
+      });
+
+      const alert = await insertAlert({
+        userId: result.userId,
+        scanResultId: result.id,
+        message: `${result.symbol} session flip setup expired after the 15-minute entry window closed`,
+        type: 'warning',
+      });
+      alerts.push(alert);
+      return alerts;
+    }
+
     const entryDistance = Math.abs(currentPrice - result.entry);
     const slDistance = Math.abs(result.entry - result.stopLoss) || 1;
     const proximityRatio = entryDistance / slDistance;
@@ -1537,21 +1586,28 @@ async function processResultLifecycle(
       }).catch((err) => console.error('[Push] Failed to send trigger notification:', err));
 
       // Auto trading integration — forward signal to auto trader engine
-      processSignal({
-        userId: result.userId,
-        symbol: result.symbol,
-        direction: result.direction,
-        entryPrice: result.entry,
-        sl: result.stopLoss,
-        tp: result.takeProfit,
-        confidence: result.confidenceScore >= 80 ? 'A+' : result.confidenceScore >= 65 ? 'A' : 'B',
-        marketState: result.marketRegime,
-        strategy: result.strategy ?? undefined,
-        session: result.strategy === 'gold_scalper'
-          ? `${result.sessionType}_killzone`
-          : result.sessionType,
-        scanResultId: result.id,
-      }).catch((err) => console.error('[AutoTrader] Failed to process signal:', err));
+      const triggerQuote = await fetchLiveQuoteForSymbol(result.symbol).catch((error) => {
+        console.error(`[AutoTrader] Failed to fetch trigger quote for ${result.symbol}:`, error);
+        return null;
+      });
+
+      if (!triggerQuote || !isScannerSpreadAcceptable(result.symbol, triggerQuote.spread, triggerQuote.price)) {
+        console.log(`[AutoTrader] Skipped ${result.symbol} execution because spread is not acceptable`);
+      } else {
+        processSignal({
+          userId: result.userId,
+          symbol: result.symbol,
+          direction: result.direction,
+          entryPrice: result.entry,
+          sl: result.stopLoss,
+          tp: result.takeProfit,
+          confidence: result.confidenceScore >= 80 ? 'A+' : result.confidenceScore >= 65 ? 'A' : 'B',
+          marketState: result.marketRegime,
+          strategy: result.strategy ?? undefined,
+          session: result.sessionType,
+          scanResultId: result.id,
+        }).catch((err) => console.error('[AutoTrader] Failed to process signal:', err));
+      }
 
       return alerts;
     }
@@ -1672,14 +1728,8 @@ async function processResultLifecycle(
   return alerts;
 }
 
-// ── Session trade limits ──
+// ── Session pacing rules ──
 
-const MAX_TRADES_PER_DAY = 10;
-const MAX_TRADES_PER_DAY_BY_SESSION: Record<SessionType, number> = {
-  london: 3,
-  newyork: 3,
-  volatility: 5,
-};
 const SESSION_REASSESS_COOLDOWN_MS = 90 * 60_000;
 const SESSION_ENTRY_SPACING_MS = 60 * 60_000;
 const SCANNER_ACTIVITY_LOOKBACK_MS = 24 * 60 * 60_000;
@@ -1781,26 +1831,6 @@ function findLastClosedActivity(
   ) ?? null;
 }
 
-function getVolatilityBucketTradeCount(
-  activities: RecentScannerActivity[],
-  bucket: VolatilitySessionBucket,
-): number {
-  const dayStartMs = new Date(getStartOfNewYorkDay()).getTime();
-
-  return activities.filter((activity) => {
-    if (activity.sessionType !== 'volatility') {
-      return false;
-    }
-
-    const createdAtMs = new Date(activity.createdAt).getTime();
-    if (createdAtMs < dayStartMs) {
-      return false;
-    }
-
-    return getVolatilitySessionBucketForTimestamp(activity.createdAt) === bucket;
-  }).length;
-}
-
 // ── Core scanner logic ──
 
 interface ScanCycleResult {
@@ -1817,6 +1847,8 @@ interface ScanCycleResult {
   confidenceScore: number;
   marketRegime: MarketRegime;
   strategy: string;
+  setup?: string;
+  validUntil?: string;
   confirmations: TradeConfirmations;
   score: number;
 }
@@ -1878,55 +1910,18 @@ async function buildPotentialForSymbol(symbol: string): Promise<PotentialTradeSe
 
 async function scanSymbol(symbol: string, strategyMode: StrategyMode = 'standard'): Promise<ScanCycleResult | null> {
   try {
-    if (strategyMode === 'gold_scalper') {
-      if (symbol !== 'XAUUSD') {
-        return null;
-      }
-
-      const [m1Candles, m5Candles, liveQuote] = await Promise.all([
-        loadScannerCandles(symbol, 'M1', 120, 50),
-        loadScannerCandles(symbol, 'M5', 120, 30),
-        fetchLiveQuoteForSymbol(symbol).catch((error) => {
-          console.error(`[Scanner][gold_scalper] Failed to fetch live quote for ${symbol}:`, error);
-          return null;
-        }),
-      ]);
-
-      if (!liveQuote) {
-        return null;
-      }
-
-      const goldScalper = analyzeGoldScalper(symbol, m1Candles, m5Candles, {
-        spread: liveQuote.spread,
-        config: { maxSpread: GOLD_SCALPER_SPREAD_THRESHOLD },
-      });
-
-      if (goldScalper.rejectionReason) {
-        console.log(`[Scanner][gold_scalper] ${symbol} rejected in ${goldScalper.session}: ${goldScalper.rejectionReason}`);
-        return null;
-      }
-
-      return {
-        symbol: goldScalper.symbol,
-        direction: goldScalper.type,
-        entry: goldScalper.entry,
-        stopLoss: goldScalper.sl,
-        slReason: 'Swing-based ATR fallback SL',
-        takeProfit: goldScalper.tp,
-        takeProfit2: null,
-        emaMomentum: true,
-        emaStack: goldScalper.type === 'buy' ? 'bullish' : 'bearish',
-        emaEntryValid: true,
-        confidenceScore: goldScalper.confidence,
-        marketRegime: goldScalper.marketRegime,
-        strategy: goldScalper.strategy,
-        confirmations: goldScalper.confirmations,
-        score: goldScalper.score,
-      };
-    }
-
     const candles = await loadScannerCandles(symbol, 'M15', 600);
     if (candles.length < 200) {
+      return null;
+    }
+
+    const liveQuote = await fetchLiveQuoteForSymbol(symbol).catch((error) => {
+      console.error(`[Scanner] Failed to fetch live quote for ${symbol}:`, error);
+      return null;
+    });
+    const referencePrice = liveQuote?.price ?? candles[candles.length - 1].close;
+    if (liveQuote && !isScannerSpreadAcceptable(symbol, liveQuote.spread, referencePrice)) {
+      console.log(`[Scanner] ${symbol} rejected by spread filter (${liveQuote.spread.toFixed(5)})`);
       return null;
     }
 
@@ -1987,20 +1982,14 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
     return { results: [], alerts: [] };
   }
 
-  let dailyCount = await getTodayTradeCount(userId);
   const recentActivity = await getRecentScannerActivity(userId);
-
-  if (dailyCount >= MAX_TRADES_PER_DAY) {
-    console.log(`[Scanner] Daily limit reached for user ${userId} (${dailyCount}/${MAX_TRADES_PER_DAY})`);
-    return { results: [], alerts: [] };
-  }
 
   const savedResults: ScanResult[] = [];
   const savedAlerts: ScannerAlert[] = [];
   const claimedSymbols = new Set<string>();
 
   for (const sessionType of relevantSessions) {
-    if (strategyMode === 'gold_scalper' && sessionType === 'volatility') {
+    if (sessionType === 'volatility') {
       continue;
     }
 
@@ -2008,43 +1997,15 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
       continue;
     }
 
-    const maxTradesForSession = MAX_TRADES_PER_DAY_BY_SESSION[sessionType];
     const sessionCount = await getTodayTradeCount(userId, sessionType);
-    if (sessionCount >= maxTradesForSession) {
-      console.log(`[Scanner] Session limit reached for user ${userId} ${sessionType} (${sessionCount}/${maxTradesForSession})`);
-      continue;
-    }
 
-    const remainingDaily = MAX_TRADES_PER_DAY - dailyCount;
-    const remainingSession = maxTradesForSession - sessionCount;
-    let slotsAvailable = Math.min(remainingDaily, remainingSession);
-
-    if (sessionType === 'volatility') {
-      const bucket = getCurrentVolatilitySessionBucket();
-      const bucketLimit = VOLATILITY_BUCKET_LIMITS[bucket];
-      const bucketCount = getVolatilityBucketTradeCount(recentActivity, bucket);
-      const remainingBucket = bucketLimit - bucketCount;
-
-      if (remainingBucket <= 0) {
-        continue;
-      }
-
-      slotsAvailable = Math.min(slotsAvailable, remainingBucket);
-    }
-
-    if (slotsAvailable <= 0) {
-      break;
-    }
-
-    const symbolsToScan = strategyMode === 'gold_scalper'
-      ? ['XAUUSD']
-      : [...SCANNER_SYMBOLS_BY_SESSION[sessionType]];
+    const symbolsToScan = [...SCANNER_SYMBOLS_BY_SESSION[sessionType]];
 
     const rawResults = await Promise.all(symbolsToScan.map((symbol) => scanSymbol(symbol, strategyMode)));
     const validResults = rawResults
       .filter((r): r is ScanCycleResult => r !== null)
       .sort((a, b) => b.score - a.score || b.confidenceScore - a.confidenceScore)
-      .slice(0, slotsAvailable);
+      .slice(0, symbolsToScan.length);
 
     for (let i = 0; i < validResults.length; i++) {
       const result = validResults[i];
@@ -2124,7 +2085,10 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
         continue;
       }
 
-      savedResults.push(scanResult);
+      savedResults.push({
+        ...scanResult,
+        validUntil: result.validUntil ?? getDerivedValidUntil(scanResult.createdAt),
+      });
       recentActivity.unshift({
         symbol: scanResult.symbol,
         direction: scanResult.direction,
@@ -2134,7 +2098,6 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
         closedAt: scanResult.closedAt,
         closeReason: scanResult.closeReason,
       });
-      dailyCount += 1;
 
       // Fire-and-forget: generate chart snapshot in the background
       loadScannerCandles(result.symbol, SCANNER_TIMEFRAME, 600)
@@ -2147,36 +2110,29 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
             takeProfit: result.takeProfit,
             takeProfit2: result.takeProfit2,
             candles: snapshotCandles,
-          }),
+          })
         )
-        .catch((err) => console.error(`[Scanner] Snapshot generation failed for ${result.symbol}:`, err));
+        .catch((err) => console.error('[Scanner] Snapshot generation failed:', err));
 
       const directionLabel = result.direction.toUpperCase();
-      const modeLabel = sessionType === 'volatility' ? 'Volatility 24/7' : `${sessionType === 'london' ? 'London' : 'New York'} Session`;
-      const alert = await insertAlert({
-        userId,
-        scanResultId: scanResult.id,
-        message: `High-quality ${modeLabel} setup detected on ${result.symbol} (${directionLabel}) — Score ${result.score}/9, ${result.strategy}, final TP 1:2 mapped.`,
-        type: 'trade',
-      });
+      const modeLabel = `${sessionType === 'london' ? 'London' : 'New York'} Session`;
+      if (result.score >= 8 && (sessionType === 'london' || sessionType === 'newyork')) {
+        const alert = await insertAlert({
+          userId,
+          scanResultId: scanResult.id,
+          message: `High-quality ${modeLabel} setup detected on ${result.symbol} (${directionLabel}) — Score ${result.score}/9, ${result.strategy}, final TP 1:2 mapped.`,
+          type: 'trade',
+        });
 
-      savedAlerts.push(alert);
+        savedAlerts.push(alert);
 
-      sendPushToUser(userId, {
-        title: 'TradeVision Alert 🚨',
-        body: `${result.symbol} ${directionLabel} setup detected (${sessionType === 'volatility' ? 'Volatility 24/7' : 'Session scanner'})`,
-        tag: `scan-${result.symbol}-${result.direction}`,
-        url: '/dashboard/scanner',
-      }).catch((err) => console.error('[Push] Failed to send:', err));
-
-      if (dailyCount >= MAX_TRADES_PER_DAY) {
-        break;
+        sendPushToUser(userId, {
+          title: 'TradeVision Alert 🚨',
+          body: `${result.symbol} ${directionLabel} setup detected (Session scanner)`,
+          tag: `scan-${result.symbol}-${result.direction}`,
+          url: '/dashboard/scanner',
+        }).catch((err) => console.error('[Push] Failed to send:', err));
       }
-    }
-
-    if (dailyCount >= MAX_TRADES_PER_DAY) {
-      console.log(`[Scanner] Daily limit reached for user ${userId} during ${sessionType} scanning`);
-      break;
     }
   }
 
@@ -2270,6 +2226,10 @@ export async function getPotentialTrades(userId: string, limit = 12): Promise<Po
   const potentials: PotentialTrade[] = [];
 
   for (const sessionType of relevantSessions) {
+    if (sessionType === 'volatility') {
+      continue;
+    }
+
     const rawPotentials = await Promise.all(
       SCANNER_SYMBOLS_BY_SESSION[sessionType]
         .filter((symbol) => !blockedSymbols.has(symbol))
