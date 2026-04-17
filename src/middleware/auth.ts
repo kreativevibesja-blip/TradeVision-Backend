@@ -165,10 +165,3 @@ export const requireTopTier = (req: AuthRequest, res: Response, next: NextFuncti
   }
   next();
 };
-
-export const requireVipAutoTrader = (req: AuthRequest, res: Response, next: NextFunction) => {
-  if (req.user?.subscription !== 'VIP_AUTO_TRADER') {
-    return res.status(403).json({ error: 'VIP Auto Trader plan required' });
-  }
-  next();
-};

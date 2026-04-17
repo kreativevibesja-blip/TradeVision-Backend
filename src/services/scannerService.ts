@@ -10,7 +10,6 @@ import { analyzeMarket, analyzePotentialTrades, detectTrend, findSwingHighsLows,
 import { analyzeLiveChartCandles } from './liveChartAnalysis';
 import type { MarketCandle } from './marketData';
 import { sendPushToUser } from './pushService';
-import { processSignal } from './autoTraderEngine';
 import { generateAndUploadSnapshot } from './tradeSnapshot';
 
 // ── Types ──
@@ -1584,30 +1583,6 @@ async function processResultLifecycle(
         tag: `trigger-${result.id}`,
         url: '/dashboard/scanner',
       }).catch((err) => console.error('[Push] Failed to send trigger notification:', err));
-
-      // Auto trading integration — forward signal to auto trader engine
-      const triggerQuote = await fetchLiveQuoteForSymbol(result.symbol).catch((error) => {
-        console.error(`[AutoTrader] Failed to fetch trigger quote for ${result.symbol}:`, error);
-        return null;
-      });
-
-      if (!triggerQuote || !isScannerSpreadAcceptable(result.symbol, triggerQuote.spread, triggerQuote.price)) {
-        console.log(`[AutoTrader] Skipped ${result.symbol} execution because spread is not acceptable`);
-      } else {
-        processSignal({
-          userId: result.userId,
-          symbol: result.symbol,
-          direction: result.direction,
-          entryPrice: result.entry,
-          sl: result.stopLoss,
-          tp: result.takeProfit,
-          confidence: result.confidenceScore >= 80 ? 'A+' : result.confidenceScore >= 65 ? 'A' : 'B',
-          marketState: result.marketRegime,
-          strategy: result.strategy ?? undefined,
-          session: result.sessionType,
-          scanResultId: result.id,
-        }).catch((err) => console.error('[AutoTrader] Failed to process signal:', err));
-      }
 
       return alerts;
     }
