@@ -14,6 +14,7 @@ import queueRoutes from './routes/queueRoutes';
 import presenceRoutes from './routes/presenceRoutes';
 import scannerRoutes from './routes/scannerRoutes';
 import notificationRoutes from './routes/notificationRoutes';
+import commandCenterRoutes from './routes/commandCenterRoutes';
 import { startQueueWorker } from './workers/queueWorker';
 import { startSystem } from './server/start';
 
@@ -75,6 +76,7 @@ app.use('/api', queueRoutes);
 app.use('/api', presenceRoutes);
 app.use('/api/scanner', scannerRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api', commandCenterRoutes);
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
