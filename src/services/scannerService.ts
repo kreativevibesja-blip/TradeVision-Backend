@@ -1964,10 +1964,6 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
   const claimedSymbols = new Set<string>();
 
   for (const sessionType of relevantSessions) {
-    if (sessionType === 'volatility') {
-      continue;
-    }
-
     if (isSessionInReassessmentCooldown(recentActivity, sessionType)) {
       continue;
     }
@@ -2201,10 +2197,6 @@ export async function getPotentialTrades(userId: string, limit = 12): Promise<Po
   const potentials: PotentialTrade[] = [];
 
   for (const sessionType of relevantSessions) {
-    if (sessionType === 'volatility') {
-      continue;
-    }
-
     const rawPotentials = await Promise.all(
       SCANNER_SYMBOLS_BY_SESSION[sessionType]
         .filter((symbol) => !blockedSymbols.has(symbol))

@@ -1,4 +1,5 @@
 import { analyzeEmaTrend, calculateEmaSeries, isEmaDirectionAligned, type EmaTrendContext } from '../lib/indicators/ema';
+import { VOLATILITY_SCANNER_SYMBOL_IDS } from '../lib/deriv/symbols';
 
 // ============================================================
 // Smart Session Scanner — Pure Logic Trade Detection Engine
@@ -3767,8 +3768,13 @@ const sessions = {
 } as const;
 
 const LONDON_SWEEP_WINDOW_END = 5;
+const LONDON_CONTINUATION_WINDOW_END = 8;
 const NEWYORK_OPEN_WINDOW_END = 11;
+const NEWYORK_AFTERNOON_WINDOW_END = 15;
 const SESSION_FLIP_VALIDITY_MS = 15 * 60_000;
+
+/** Volatility indices trade 24/7 — not gated by forex session windows */
+const VOLATILITY_SYMBOL_SET = new Set<string>(VOLATILITY_SCANNER_SYMBOL_IDS as readonly string[]);
 const NEW_YORK_TIME_FORMATTER = new Intl.DateTimeFormat('en-US', {
   timeZone: 'America/New_York',
   year: 'numeric',
@@ -4002,7 +4008,14 @@ function isContinuationChop(candles: Candle[], ema200: number, ema50: number): b
   const crosses = countRecentPriceEma50Crosses(candles, ema50);
   const overlaps = hasHeavyCandleOverlap(recent);
 
-  return emaFlat || crosses >= 4 || overlaps;
+  // Require at least 2 of 3 choppy conditions to confirm chop
+  // (emaFlat alone fires on almost every symbol because EMA200 is slow-moving)
+  let chopScore = 0;
+  if (emaFlat) chopScore++;
+  if (crosses >= 4) chopScore++;
+  if (overlaps) chopScore++;
+
+  return chopScore >= 2;
 }
 
 function assessPullback(direction: 'buy' | 'sell', candles: Candle[], ema20: number, ema50: number, atr: number): PullbackAssessment {
@@ -4146,12 +4159,48 @@ function buildContinuationSetup(symbol: string, candles: Candle[]): Continuation
     return logContinuationRejection(symbol, 'chop filter active');
   }
 
+  const bullishEmaTrend = isStrongTrendAligned('buy', price, ema20, ema50, ema200);
+  const bearishEmaTrend = isStrongTrendAligned('sell', price, ema20, ema50, ema200);
+
+  // ── Volatility indices: 24/7 trend continuation (no session window gate) ──
+  if (VOLATILITY_SYMBOL_SET.has(symbol)) {
+    // Determine trend direction from EMA alignment
+    let volDirection: 'buy' | 'sell' | null = null;
+    if (bullishEmaTrend) volDirection = 'buy';
+    else if (bearishEmaTrend) volDirection = 'sell';
+    if (!volDirection) {
+      return logContinuationRejection(symbol, 'no volatility EMA trend');
+    }
+
+    const recentCandles = candles.slice(-40);
+    const pullback = assessPullback(volDirection, candles, ema20, ema50, atr);
+    const sweep = detectDirectionalSweepSignal(volDirection, recentCandles);
+
+    if (!pullback.valid || pullback.overextended) {
+      return logContinuationRejection(symbol, 'volatility no valid pullback');
+    }
+    if (!sweep) {
+      return logContinuationRejection(symbol, 'volatility no sweep signal');
+    }
+
+    return buildSessionFlipCandidate({
+      symbol,
+      candles: recentCandles,
+      session: 'newyork', // session label doesn't matter for vol — just needs a valid value
+      variant: 'newyork_continuation',
+      direction: volDirection,
+      sweep,
+      emaAligned: true,
+      zoneReaction: pullback.touchedEma20 || pullback.touchedEma50,
+      marketRegime: 'trend',
+    });
+  }
+
+  // ── Forex / Index session-gated logic ──
   const asiaRange = getAsiaRange(candles, dateKey);
   const londonCandles = getSessionCandlesForDate(candles, dateKey, 'london');
   const newYorkCandles = getSessionCandlesForDate(candles, dateKey, 'newyork');
   const londonTrend = getLondonTrendDirection(londonCandles);
-  const bullishEmaTrend = isStrongTrendAligned('buy', price, ema20, ema50, ema200);
-  const bearishEmaTrend = isStrongTrendAligned('sell', price, ema20, ema50, ema200);
 
   if (currentSession === 'london' && latestTime.hour < LONDON_SWEEP_WINDOW_END) {
     if (!asiaRange) {
@@ -4190,6 +4239,33 @@ function buildContinuationSetup(symbol: string, candles: Candle[]): Continuation
     }
 
     return logContinuationRejection(symbol, 'no london sweep');
+  }
+
+  // London continuation (5:00–7:59 EST): trend continuation from London session
+  if (currentSession === 'london' && latestTime.hour >= LONDON_SWEEP_WINDOW_END && latestTime.hour < LONDON_CONTINUATION_WINDOW_END) {
+    if (!londonTrend || londonCandles.length < 5) {
+      return logContinuationRejection(symbol, 'no london trend for continuation');
+    }
+
+    const continuationPullback = assessPullback(londonTrend, candles, ema20, ema50, atr);
+    const continuationSweep = detectDirectionalSweepSignal(londonTrend, londonCandles);
+    const emaAligned = londonTrend === 'buy' ? bullishEmaTrend : bearishEmaTrend;
+
+    if (continuationPullback.valid && !continuationPullback.overextended && emaAligned && continuationSweep) {
+      return buildSessionFlipCandidate({
+        symbol,
+        candles: londonCandles,
+        session: 'london',
+        variant: 'london_sweep_reversal',
+        direction: londonTrend,
+        sweep: continuationSweep,
+        emaAligned: true,
+        zoneReaction: continuationPullback.touchedEma20 || continuationPullback.touchedEma50,
+        marketRegime: 'trend',
+      });
+    }
+
+    return logContinuationRejection(symbol, 'no london continuation setup');
   }
 
   if (latestTime.hour >= sessions.newyork.start && latestTime.hour < NEWYORK_OPEN_WINDOW_END) {
@@ -4241,6 +4317,35 @@ function buildContinuationSetup(symbol: string, candles: Candle[]): Continuation
       zoneReaction: true,
       marketRegime: 'reversal',
     });
+  }
+
+  // New York afternoon continuation (11:00–14:59 EST): ride dominant trend
+  if (latestTime.hour >= NEWYORK_OPEN_WINDOW_END && latestTime.hour < NEWYORK_AFTERNOON_WINDOW_END) {
+    // Need an established NY trend from earlier
+    const nyTrend = londonTrend; // Use the dominant trend direction
+    if (!nyTrend || newYorkCandles.length < 5) {
+      return logContinuationRejection(symbol, 'no established trend for afternoon');
+    }
+
+    const afternoonPullback = assessPullback(nyTrend, candles, ema20, ema50, atr);
+    const emaAligned = nyTrend === 'buy' ? bullishEmaTrend : bearishEmaTrend;
+    const afternoonSweep = detectDirectionalSweepSignal(nyTrend, newYorkCandles);
+
+    if (afternoonPullback.valid && !afternoonPullback.overextended && emaAligned && afternoonSweep) {
+      return buildSessionFlipCandidate({
+        symbol,
+        candles: newYorkCandles,
+        session: 'newyork',
+        variant: 'newyork_continuation',
+        direction: nyTrend,
+        sweep: afternoonSweep,
+        emaAligned: true,
+        zoneReaction: afternoonPullback.touchedEma20 || afternoonPullback.touchedEma50,
+        marketRegime: 'trend',
+      });
+    }
+
+    return logContinuationRejection(symbol, 'no afternoon continuation setup');
   }
 
   return logContinuationRejection(symbol, 'outside session flip window');
