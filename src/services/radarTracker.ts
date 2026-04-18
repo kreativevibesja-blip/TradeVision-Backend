@@ -5,24 +5,31 @@ import {
   type TrackedTradeState,
 } from '../lib/supabase';
 import { sendPushToUser } from './pushService';
+import { fetchLiveQuoteForSymbol, type LiveMarketQuote } from './marketData';
 
-const TICK_INTERVAL_MS = 5000;
+const TICK_INTERVAL_MS = 10_000; // 10 seconds — kinder to the market data API
 let intervalId: ReturnType<typeof setInterval> | null = null;
 
 const stateLabels: Record<TrackedTradeState, string> = {
   TRACKING: 'being tracked',
-  READY: 'READY for entry',
-  ACTIVE: 'ACTIVE — entry triggered',
-  INVALID: 'INVALIDATED',
+  READY: 'READY — price approaching entry zone',
+  ACTIVE: 'ACTIVE — price inside entry zone',
+  INVALID: 'INVALIDATED — stop loss breached',
   EXPIRED: 'EXPIRED',
 };
 
-async function notifyStateChange(trade: TrackedTradeRecord, newState: TrackedTradeState) {
+/** Normalize a pair like "EUR/USD" → "EURUSD" for the market data API */
+function normalizePairId(symbol: string): string {
+  return symbol.replace(/[/\s\-_]/g, '').toUpperCase();
+}
+
+async function notifyStateChange(trade: TrackedTradeRecord, newState: TrackedTradeState, price?: number) {
   if (newState === 'TRACKING') return;
   try {
+    const priceStr = price != null ? ` @ ${price}` : '';
     await sendPushToUser(trade.userId, {
-      title: `Trade Update: ${trade.symbol}`,
-      body: `Setup is now ${stateLabels[newState]}`,
+      title: `🎯 ${trade.symbol} Radar Alert`,
+      body: `${stateLabels[newState]}${priceStr}`,
       tag: `radar-${trade.id}`,
       url: '/dashboard/radar',
     });
@@ -31,37 +38,96 @@ async function notifyStateChange(trade: TrackedTradeRecord, newState: TrackedTra
   }
 }
 
-function evaluateState(trade: TrackedTradeRecord, now: Date): TrackedTradeState | null {
+/**
+ * Evaluate new state based on live price vs the trade's entry zone, SL, and TP.
+ *
+ * State machine:
+ *   TRACKING → price within 0.3% of zone edge  → READY
+ *   TRACKING → price enters zone               → ACTIVE (skip READY)
+ *   READY    → price enters zone               → ACTIVE
+ *   READY    → price moves away (>0.5% beyond) → back to TRACKING
+ *   Any      → price crosses SL side           → INVALID
+ *   Any      → price crosses TP side           → ACTIVE (let user manage exit)
+ *   Any      → expired                         → EXPIRED
+ */
+function evaluateState(
+  trade: TrackedTradeRecord,
+  price: number,
+  now: Date,
+): TrackedTradeState | null {
+  // Check expiry first
   if (new Date(trade.expiresAt) <= now) {
     return trade.state !== 'EXPIRED' ? 'EXPIRED' : null;
   }
 
-  // Use a simulated price from the entry zone for now.
-  // In production this would come from a market data feed.
-  // The entryZone itself is used as the trigger boundary.
-  const midEntry = (trade.entryZoneMin + trade.entryZoneMax) / 2;
+  const { entryZoneMin, entryZoneMax, stopLoss, takeProfit1, direction } = trade;
+  const zoneRange = Math.abs(entryZoneMax - entryZoneMin) || entryZoneMax * 0.001;
 
-  // Check invalidation: if SL is breached conceptually (time-based heuristic)
-  const ageMs = now.getTime() - new Date(trade.createdAt).getTime();
-  const expiryMs = new Date(trade.expiresAt).getTime() - new Date(trade.createdAt).getTime();
-  const ageRatio = ageMs / expiryMs;
+  // Is price inside the entry zone?
+  const inZone = price >= entryZoneMin && price <= entryZoneMax;
 
+  // How close is price to the nearest zone edge? (as ratio of zone width)
+  const distToZone = inZone
+    ? 0
+    : Math.min(Math.abs(price - entryZoneMin), Math.abs(price - entryZoneMax));
+  const proximityRatio = distToZone / zoneRange;
+
+  // Check for SL breach
+  const slBreached =
+    direction === 'buy'
+      ? price <= stopLoss
+      : price >= stopLoss;
+
+  if (slBreached && trade.state !== 'INVALID') {
+    return 'INVALID';
+  }
+
+  // Check for TP hit — transition to ACTIVE so user sees it hit target
+  const tpHit =
+    direction === 'buy'
+      ? price >= takeProfit1
+      : price <= takeProfit1;
+
+  if (tpHit && trade.state !== 'ACTIVE') {
+    return 'ACTIVE';
+  }
+
+  // State transitions based on price proximity to entry zone
   if (trade.state === 'TRACKING') {
-    // After 80% of time with no progress → INVALID
-    if (ageRatio > 0.8) return 'INVALID';
-    // After 40% of time → READY (simulates price approaching zone)
-    if (ageRatio > 0.4) return 'READY';
+    if (inZone) return 'ACTIVE';
+    // Price within 30% of zone width from the edge → READY
+    if (proximityRatio <= 0.3) return 'READY';
     return null;
   }
 
   if (trade.state === 'READY') {
-    if (ageRatio > 0.85) return 'INVALID';
-    // After 60% of time → ACTIVE (simulates confirmation met)
-    if (ageRatio > 0.6) return 'ACTIVE';
+    if (inZone) return 'ACTIVE';
+    // Price moved far away (>5x zone width) → back to TRACKING
+    if (proximityRatio > 5) return 'TRACKING';
     return null;
   }
 
+  // ACTIVE trades stay ACTIVE — user manages the exit
   return null;
+}
+
+// Cache quotes per tick to avoid duplicate API calls for same symbol
+async function fetchQuoteBatch(symbols: string[]): Promise<Map<string, LiveMarketQuote>> {
+  const unique = [...new Set(symbols)];
+  const results = new Map<string, LiveMarketQuote>();
+
+  await Promise.allSettled(
+    unique.map(async (sym) => {
+      try {
+        const quote = await fetchLiveQuoteForSymbol(sym);
+        results.set(sym, quote);
+      } catch {
+        // Symbol may not be supported for live quotes (e.g. Deriv synthetics)
+      }
+    }),
+  );
+
+  return results;
 }
 
 async function tick() {
@@ -71,16 +137,36 @@ async function tick() {
 
     const now = new Date();
 
-    // Batch process all trades
+    // 1. Collect unique symbols and fetch live prices in batch
+    const symbolIds = trades.map((t) => normalizePairId(t.symbol));
+    const quotes = await fetchQuoteBatch(symbolIds);
+
+    // 2. Evaluate each trade against its live price
     const updates: Promise<void>[] = [];
 
-    for (const trade of trades) {
-      const newState = evaluateState(trade, now);
+    for (let i = 0; i < trades.length; i++) {
+      const trade = trades[i];
+      const symId = symbolIds[i];
+      const quote = quotes.get(symId);
+
+      // If no live quote available, fall back to time-based expiry only
+      let newState: TrackedTradeState | null = null;
+
+      if (quote) {
+        newState = evaluateState(trade, quote.price, now);
+      } else {
+        // No market data — only check expiry
+        if (new Date(trade.expiresAt) <= now && trade.state !== 'EXPIRED') {
+          newState = 'EXPIRED';
+        }
+      }
+
       if (newState && newState !== trade.state) {
+        const price = quote?.price;
         updates.push(
           updateTrackedTradeState(trade.id, newState)
-            .then(() => notifyStateChange(trade, newState))
-            .catch((err) => console.error(`Radar update failed for ${trade.id}:`, err))
+            .then(() => notifyStateChange(trade, newState!, price))
+            .catch((err) => console.error(`Radar update failed for ${trade.id}:`, err)),
         );
       }
     }
@@ -95,7 +181,7 @@ async function tick() {
 
 export function startRadarTracker() {
   if (intervalId) return;
-  console.log('Trade Radar tracker started (5s interval)');
+  console.log('Trade Radar tracker started (10s interval, live market data)');
   intervalId = setInterval(tick, TICK_INTERVAL_MS);
 }
 
