@@ -6,9 +6,20 @@ import {
 } from '../lib/supabase';
 import { sendPushToUser } from './pushService';
 import { fetchLiveQuoteForSymbol, type LiveMarketQuote } from './marketData';
+import { subscribeToTicks } from '../lib/deriv/store';
+import { VOLATILITY_SCANNER_SYMBOL_IDS } from '../lib/deriv/symbols';
 
 const TICK_INTERVAL_MS = 10_000; // 10 seconds — kinder to the market data API
 let intervalId: ReturnType<typeof setInterval> | null = null;
+let unsubDerivTicks: (() => void) | null = null;
+
+/** Live price cache fed by Deriv WebSocket ticks */
+const derivPriceCache = new Map<string, { price: number; time: number }>();
+
+/** Set of volatility/synthetic symbol IDs for quick lookup (normalized) */
+const VOLATILITY_SYMBOLS = new Set<string>(
+  (VOLATILITY_SCANNER_SYMBOL_IDS as readonly string[]).map((s) => s.replace(/[/\s\-_]/g, '').toUpperCase()),
+);
 
 const stateLabels: Record<TrackedTradeState, string> = {
   TRACKING: 'being tracked',
@@ -21,6 +32,22 @@ const stateLabels: Record<TrackedTradeState, string> = {
 /** Normalize a pair like "EUR/USD" → "EURUSD" for the market data API */
 function normalizePairId(symbol: string): string {
   return symbol.replace(/[/\s\-_]/g, '').toUpperCase();
+}
+
+/** Check if a symbol is a Deriv volatility index */
+function isVolatilitySymbol(symbol: string): boolean {
+  const norm = symbol.replace(/[/\s\-_]/g, '').toUpperCase();
+  return VOLATILITY_SYMBOLS.has(norm);
+}
+
+/** Get live price for a volatility symbol from Deriv tick cache */
+function getDerivLivePrice(symbol: string): number | null {
+  const norm = symbol.replace(/[/\s\-_]/g, '').toUpperCase();
+  const cached = derivPriceCache.get(norm);
+  if (!cached) return null;
+  // Consider stale if older than 30 seconds
+  if (Date.now() - cached.time * 1000 > 30_000) return null;
+  return cached.price;
 }
 
 async function notifyStateChange(trade: TrackedTradeRecord, newState: TrackedTradeState, price?: number) {
@@ -137,25 +164,33 @@ async function tick() {
 
     const now = new Date();
 
-    // 1. Collect unique symbols and fetch live prices in batch
-    const symbolIds = trades.map((t) => normalizePairId(t.symbol));
-    const quotes = await fetchQuoteBatch(symbolIds);
+    // 1. Separate volatility trades (Deriv WS) from forex/index trades (TwelveData)
+    const forexTrades: { trade: TrackedTradeRecord; symId: string }[] = [];
+    const volTrades: { trade: TrackedTradeRecord; price: number | null }[] = [];
 
-    // 2. Evaluate each trade against its live price
+    for (const trade of trades) {
+      if (isVolatilitySymbol(trade.symbol)) {
+        volTrades.push({ trade, price: getDerivLivePrice(trade.symbol) });
+      } else {
+        forexTrades.push({ trade, symId: normalizePairId(trade.symbol) });
+      }
+    }
+
+    // 2. Batch fetch TwelveData quotes for forex/index symbols
+    const forexSymIds = forexTrades.map((t) => t.symId);
+    const quotes = forexSymIds.length > 0 ? await fetchQuoteBatch(forexSymIds) : new Map<string, LiveMarketQuote>();
+
+    // 3. Evaluate all trades
     const updates: Promise<void>[] = [];
 
-    for (let i = 0; i < trades.length; i++) {
-      const trade = trades[i];
-      const symId = symbolIds[i];
+    // Forex/index trades — use TwelveData
+    for (const { trade, symId } of forexTrades) {
       const quote = quotes.get(symId);
-
-      // If no live quote available, fall back to time-based expiry only
       let newState: TrackedTradeState | null = null;
 
       if (quote) {
         newState = evaluateState(trade, quote.price, now);
       } else {
-        // No market data — only check expiry
         if (new Date(trade.expiresAt) <= now && trade.state !== 'EXPIRED') {
           newState = 'EXPIRED';
         }
@@ -171,6 +206,27 @@ async function tick() {
       }
     }
 
+    // Volatility trades — use Deriv WS live prices
+    for (const { trade, price } of volTrades) {
+      let newState: TrackedTradeState | null = null;
+
+      if (price != null) {
+        newState = evaluateState(trade, price, now);
+      } else {
+        if (new Date(trade.expiresAt) <= now && trade.state !== 'EXPIRED') {
+          newState = 'EXPIRED';
+        }
+      }
+
+      if (newState && newState !== trade.state) {
+        updates.push(
+          updateTrackedTradeState(trade.id, newState)
+            .then(() => notifyStateChange(trade, newState!, price ?? undefined))
+            .catch((err) => console.error(`Radar update failed for ${trade.id}:`, err)),
+        );
+      }
+    }
+
     if (updates.length > 0) {
       await Promise.allSettled(updates);
     }
@@ -181,7 +237,16 @@ async function tick() {
 
 export function startRadarTracker() {
   if (intervalId) return;
-  console.log('Trade Radar tracker started (10s interval, live market data)');
+
+  // Subscribe to Deriv WS ticks to cache live volatility prices
+  unsubDerivTicks = subscribeToTicks(({ logicalSymbol, price, time }) => {
+    const norm = logicalSymbol.replace(/[/\s\-_]/g, '').toUpperCase();
+    if (VOLATILITY_SYMBOLS.has(norm)) {
+      derivPriceCache.set(norm, { price, time });
+    }
+  });
+
+  console.log('Trade Radar tracker started (10s interval, live market data + Deriv WS)');
   intervalId = setInterval(tick, TICK_INTERVAL_MS);
 }
 
@@ -190,4 +255,9 @@ export function stopRadarTracker() {
     clearInterval(intervalId);
     intervalId = null;
   }
+  if (unsubDerivTicks) {
+    unsubDerivTicks();
+    unsubDerivTicks = null;
+  }
+  derivPriceCache.clear();
 }
