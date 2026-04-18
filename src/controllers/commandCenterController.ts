@@ -17,17 +17,84 @@ function parseCandles(raw: unknown): CommandCenterCandle[] {
     }));
 }
 
+/** Try to parse a number from various sources */
+function toNum(v: unknown): number | null {
+  if (typeof v === 'number' && isFinite(v)) return v;
+  if (typeof v === 'string') {
+    const n = parseFloat(v);
+    if (isFinite(n)) return n;
+  }
+  return null;
+}
+
+/** Extract numeric price levels from arrays, comma-separated strings, etc. */
+function extractLevels(src: unknown): number[] {
+  if (!src) return [];
+  if (Array.isArray(src)) return src.map(toNum).filter((n): n is number => n !== null);
+  if (typeof src === 'string') return src.split(/[,;|\s]+/).map(Number).filter(isFinite);
+  return [];
+}
+
 function analysisToTradeInput(analysis: any): TradeInput | null {
   const raw = analysis.rawResponse && typeof analysis.rawResponse === 'object' ? analysis.rawResponse : {};
 
-  const direction = (raw.direction || analysis.direction || '').toLowerCase();
-  if (direction !== 'buy' && direction !== 'sell') return null;
+  // --- Direction: accept buy/sell/bullish/bearish/long/short ---
+  const dirRaw = (
+    raw.direction || raw.bias || raw.tradeDirection ||
+    analysis.direction || analysis.bias || ''
+  ).toString().toLowerCase().trim();
+  let direction: 'buy' | 'sell' | null = null;
+  if (dirRaw === 'buy' || dirRaw === 'bullish' || dirRaw === 'long') direction = 'buy';
+  else if (dirRaw === 'sell' || dirRaw === 'bearish' || dirRaw === 'short') direction = 'sell';
+  if (!direction) return null;
 
-  const entry = raw.entry ?? analysis.entry;
-  const stopLoss = raw.stopLoss ?? analysis.stopLoss;
-  const tp1 = raw.takeProfit1 ?? raw.tp1 ?? analysis.tp1;
+  // --- Entry: try structured zone, raw entry, currentPrice as fallback ---
+  let entry = toNum(raw.entry) ?? toNum(analysis.entry) ?? toNum(raw.entryPrice) ?? toNum(analysis.currentPrice);
 
-  if (typeof entry !== 'number' || typeof stopLoss !== 'number' || typeof tp1 !== 'number') return null;
+  const entryZoneObj = raw.entryZone || raw.entry_zone;
+  if (!entry && entryZoneObj && typeof entryZoneObj === 'object') {
+    const min = toNum(entryZoneObj.min) ?? toNum(entryZoneObj.low) ?? toNum(entryZoneObj.from);
+    const max = toNum(entryZoneObj.max) ?? toNum(entryZoneObj.high) ?? toNum(entryZoneObj.to);
+    if (min != null && max != null) entry = (min + max) / 2;
+  }
+  if (!entry) return null;
+
+  // --- Stop Loss: try multiple sources, fall back to support/resistance ---
+  let stopLoss = toNum(raw.stopLoss) ?? toNum(analysis.stopLoss) ?? toNum(raw.stop_loss);
+
+  if (stopLoss == null) {
+    const supports = extractLevels(raw.support || raw.supportLevels || raw.keyLevels?.support);
+    const resistances = extractLevels(raw.resistance || raw.resistanceLevels || raw.keyLevels?.resistance);
+    if (direction === 'buy' && supports.length > 0) {
+      stopLoss = supports.filter((s) => s < entry!).sort((a, b) => b - a)[0] ?? null;
+    } else if (direction === 'sell' && resistances.length > 0) {
+      stopLoss = resistances.filter((r) => r > entry!).sort((a, b) => a - b)[0] ?? null;
+    }
+    // Last resort: 1% from entry
+    if (stopLoss == null) stopLoss = direction === 'buy' ? entry * 0.99 : entry * 1.01;
+  }
+
+  // --- Take Profit: try multiple sources, fall back to 1:1 RR ---
+  let tp1 = toNum(raw.takeProfit1) ?? toNum(raw.tp1) ?? toNum(analysis.tp1) ?? toNum(raw.takeProfit);
+  const tp2 = toNum(raw.takeProfit2) ?? toNum(raw.tp2) ?? toNum(analysis.tp2) ?? null;
+  const tp3 = toNum(raw.takeProfit3) ?? toNum(raw.tp3) ?? toNum(analysis.tp3) ?? null;
+
+  if (tp1 == null) {
+    const supports = extractLevels(raw.support || raw.supportLevels || raw.keyLevels?.support);
+    const resistances = extractLevels(raw.resistance || raw.resistanceLevels || raw.keyLevels?.resistance);
+    if (direction === 'buy' && resistances.length > 0) {
+      tp1 = resistances.filter((r) => r > entry!).sort((a, b) => a - b)[0] ?? null;
+    } else if (direction === 'sell' && supports.length > 0) {
+      tp1 = supports.filter((s) => s < entry!).sort((a, b) => b - a)[0] ?? null;
+    }
+    // Last resort: 1:1 RR from SL distance
+    if (tp1 == null) {
+      const dist = Math.abs(entry - stopLoss);
+      tp1 = direction === 'buy' ? entry + dist : entry - dist;
+    }
+  }
+
+  const confidence = toNum(raw.confidence) ?? toNum(analysis.confidence) ?? 5;
 
   return {
     id: analysis.id,
@@ -37,13 +104,13 @@ function analysisToTradeInput(analysis: any): TradeInput | null {
     entry,
     stopLoss,
     takeProfit1: tp1,
-    takeProfit2: raw.takeProfit2 ?? raw.tp2 ?? analysis.tp2 ?? null,
-    takeProfit3: raw.takeProfit3 ?? raw.tp3 ?? analysis.tp3 ?? null,
+    takeProfit2: tp2,
+    takeProfit3: tp3,
     confirmation: raw.confirmation || raw.entryLogic?.confirmation || '',
-    invalidationLevel: raw.invalidationLevel ?? null,
+    invalidationLevel: toNum(raw.invalidationLevel) ?? null,
     invalidationReason: raw.invalidationReason ?? '',
     reasoning: raw.reasoning ?? analysis.explanation ?? '',
-    confidence: raw.confidence ?? analysis.confidence ?? 5,
+    confidence: confidence > 10 ? confidence / 10 : confidence,
     marketCondition: raw.marketCondition ?? '',
     primaryStrategy: raw.primaryStrategy ?? '',
     structure: raw.structure ?? undefined,
