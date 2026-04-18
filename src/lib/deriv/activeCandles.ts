@@ -6,7 +6,7 @@ export interface ActiveCandleState extends DerivedCandle {
 
 const activeCandles = new Map<string, ActiveCandleState>();
 const closedCandles = new Map<string, DerivedCandle[]>();
-const MAX_RUNTIME_CANDLES = 2000;
+const MAX_RUNTIME_CANDLES = 5000;
 
 function buildKey(symbol: string, timeframeSeconds: number) {
   return `${symbol}:${timeframeSeconds}`;
