@@ -1369,7 +1369,7 @@ export async function getSessionSummary(
 
 async function updateScanResult(
   id: string,
-  updates: Partial<Pick<ScanResult, 'status' | 'closeReason' | 'triggeredAt' | 'closedAt'>>,
+  updates: Partial<Pick<ScanResult, 'status' | 'closeReason' | 'triggeredAt' | 'closedAt' | 'stopLoss'>>,
 ): Promise<void> {
   const { data: existingResult, error: existingError } = await supabase
     .from(SCAN_RESULT_TABLE)
@@ -1453,7 +1453,7 @@ function removeLiveResultFromCache(result: ScanResult) {
 
 function mutateLiveResultCache(
   resultId: string,
-  updates: Partial<Pick<ScanResult, 'status' | 'closeReason' | 'triggeredAt' | 'closedAt'>>,
+  updates: Partial<Pick<ScanResult, 'status' | 'closeReason' | 'triggeredAt' | 'closedAt' | 'stopLoss'>>,
 ) {
   for (const [, symbolBucket] of liveResultCache) {
     const existing = symbolBucket.get(resultId);
@@ -1534,6 +1534,10 @@ function hasSecondaryTakeProfit(result: ScanResult): boolean {
   return result.takeProfit2 != null
     && Number.isFinite(result.takeProfit2)
     && Math.abs(result.takeProfit2 - result.takeProfit) > Number.EPSILON;
+}
+
+function isBreakevenStop(result: Pick<ScanResult, 'entry' | 'stopLoss'>): boolean {
+  return Math.abs(result.stopLoss - result.entry) <= Number.EPSILON;
 }
 
 async function processResultLifecycle(
@@ -1646,6 +1650,8 @@ async function processResultLifecycle(
   }
 
   if (result.status === 'triggered') {
+    let effectiveStopLoss = result.stopLoss;
+    const alreadyAtBreakeven = isBreakevenStop(result);
     const finalTakeProfit = getFinalTakeProfit(result);
     const risk = Math.abs(result.entry - result.stopLoss);
     const finalReward = Math.abs(finalTakeProfit - result.entry);
@@ -1664,31 +1670,37 @@ async function processResultLifecycle(
       ? highPrice >= finalTakeProfit
       : lowPrice <= finalTakeProfit;
 
-    const hitStopLoss = result.direction === 'buy'
-      ? lowPrice <= result.stopLoss
-      : highPrice >= result.stopLoss;
-
     if (Number.isFinite(risk)
       && risk > 0
       && Number.isFinite(finalReward)
       && finalReward > 0
       && hitBreakevenProtectZone
+      && !alreadyAtBreakeven
       && !(await hasBreakevenAlert(result.id))) {
+      effectiveStopLoss = result.entry;
+      await updateScanResult(result.id, {
+        stopLoss: effectiveStopLoss,
+      });
+
       const alert = await insertAlert({
         userId: result.userId,
         scanResultId: result.id,
-        message: `${result.symbol} breakeven protect zone reached — consider moving SL to entry at ${result.entry.toFixed(decimals)}`,
+        message: `${result.symbol} breakeven protect zone reached — stop loss moved to entry at ${result.entry.toFixed(decimals)}`,
         type: 'trade',
       });
       alerts.push(alert);
 
       sendPushToUser(result.userId, {
-        title: 'Move SL To Breakeven',
-        body: `${result.symbol} reached the breakeven protect zone. Consider moving stop loss to entry at ${result.entry.toFixed(decimals)}.`,
+        title: 'Stop Loss Moved To Breakeven',
+        body: `${result.symbol} reached the breakeven protect zone. Stop loss is now set to entry at ${result.entry.toFixed(decimals)}.`,
         tag: `breakeven-${result.id}`,
         url: '/dashboard/scanner',
       }).catch((err) => console.error('[Push] Failed to send breakeven notification:', err));
     }
+
+    const hitStopLoss = result.direction === 'buy'
+      ? lowPrice <= effectiveStopLoss
+      : highPrice >= effectiveStopLoss;
 
     if (hasSecondaryTakeProfit(result) && hitTakeProfitOne && !hitTakeProfit && !(await hasTakeProfitOneAlert(result.id))) {
       const alert = await insertAlert({
@@ -1709,11 +1721,13 @@ async function processResultLifecycle(
 
     if (hitTakeProfit || hitStopLoss) {
       const closeReason: ScanCloseReason = hitTakeProfit ? 'tp' : 'sl';
+      const closedAtBreakeven = !hitTakeProfit && Math.abs(effectiveStopLoss - result.entry) <= Number.EPSILON;
       const closedAt = new Date().toISOString();
       await updateScanResult(result.id, {
         status: 'closed',
         closeReason,
         closedAt,
+        stopLoss: effectiveStopLoss,
       });
 
       if (result.triggeredAt) {
@@ -1729,16 +1743,20 @@ async function processResultLifecycle(
         scanResultId: result.id,
         message: hitTakeProfit
           ? `${result.symbol} trade closed in profit — final take profit hit at ${currentPrice.toFixed(decimals)}`
-          : `${result.symbol} trade closed at stop loss — SL hit at ${currentPrice.toFixed(decimals)}`,
+          : closedAtBreakeven
+            ? `${result.symbol} trade closed at breakeven — price returned to entry at ${result.entry.toFixed(decimals)}`
+            : `${result.symbol} trade closed at stop loss — SL hit at ${currentPrice.toFixed(decimals)}`,
         type: hitTakeProfit ? 'trade' : 'warning',
       });
       alerts.push(alert);
 
       sendPushToUser(result.userId, {
-        title: hitTakeProfit ? 'Final Take Profit Hit' : 'Stop Loss Hit',
+        title: hitTakeProfit ? 'Final Take Profit Hit' : closedAtBreakeven ? 'Trade Closed At Breakeven' : 'Stop Loss Hit',
         body: hitTakeProfit
           ? `${result.symbol} closed in profit at the final target.`
-          : `${result.symbol} closed at stop loss.`,
+          : closedAtBreakeven
+            ? `${result.symbol} returned to entry after the breakeven move and closed flat.`
+            : `${result.symbol} closed at stop loss.`,
         tag: `closed-${result.id}`,
         url: '/dashboard/scanner',
       }).catch((err) => console.error('[Push] Failed to send closure notification:', err));
