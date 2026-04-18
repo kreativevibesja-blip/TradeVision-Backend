@@ -256,7 +256,7 @@ const DEFAULT_PRICING_PLANS: Array<Pick<PricingPlanRecord, 'name' | 'tier' | 'pr
     name: 'Top Tier 👑',
     tier: 'TOP_TIER',
     price: 39.95,
-    features: ['500 analyses per month', 'Advanced Smart Money Concepts', 'Priority AI processing', 'One-Tap Trade execution'],
+    features: ['500 analyses per month', 'Advanced Smart Money Concepts', 'Priority AI processing', 'Command Center', 'Trade Radar'],
     dailyLimit: 999999,
     isActive: true,
   },
