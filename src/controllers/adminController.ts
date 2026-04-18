@@ -13,10 +13,12 @@ import {
   getPaymentById,
   getSystemSetting,
   getUserById,
+  getUsersByIds,
   listAllAnalysesPage,
   listActiveAnnouncements,
   listAllPaymentsPage,
   listAnnouncements,
+  listAllBillingSettings,
   listPaidSubscribers,
   listPricingPlans,
   listSystemSettings,
@@ -676,11 +678,32 @@ export const deleteAnnouncement = async (req: Request, res: Response) => {
 
 export const getPaidSubscribers = async (_req: Request, res: Response) => {
   try {
-    const users = await listPaidSubscribers();
+    // 1. Get currently paid users
+    const activeUsers = await listPaidSubscribers();
+    const activeUserIds = new Set(activeUsers.map((u) => u.id));
+
+    // 2. Get all billing entries to find expired/cancelled users
+    const billingSettings = await listAllBillingSettings();
+    const expiredUserIds: string[] = [];
+
+    for (const setting of billingSettings) {
+      const userId = setting.key.replace('billing:', '');
+      if (activeUserIds.has(userId)) continue; // already included
+      const state = setting.value;
+      if (state && typeof state === 'object' && (state.status === 'expired' || state.status === 'cancelled')) {
+        expiredUserIds.push(userId);
+      }
+    }
+
+    // 3. Fetch user info for expired/cancelled users
+    const expiredUsers = expiredUserIds.length > 0 ? await getUsersByIds(expiredUserIds) : [];
+
+    // 4. Merge both sets
+    const allUsers = [...activeUsers, ...expiredUsers];
     const now = Date.now();
 
     const subscribers = await Promise.all(
-      users.map(async (user) => {
+      allUsers.map(async (user) => {
         const billing = await getBillingSummaryForUser(user.id, user.subscription);
         const expiresAt = billing.expiresAt;
         let daysLeft: number | null = null;
@@ -700,6 +723,15 @@ export const getPaidSubscribers = async (_req: Request, res: Response) => {
         };
       }),
     );
+
+    // Sort: expired/cancelled first, then expiring soon, then active
+    subscribers.sort((a, b) => {
+      const statusOrder: Record<string, number> = { expired: 0, cancelled: 1, active: 2, free: 3 };
+      const aOrder = statusOrder[a.status] ?? 4;
+      const bOrder = statusOrder[b.status] ?? 4;
+      if (aOrder !== bOrder) return aOrder - bOrder;
+      return (a.daysLeft ?? 999) - (b.daysLeft ?? 999);
+    });
 
     return res.json({ subscribers });
   } catch (error) {

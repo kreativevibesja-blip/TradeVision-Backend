@@ -730,6 +730,26 @@ export const listPaidSubscribers = () =>
       .order('createdAt', { ascending: false }),
   );
 
+/** List all billing:<userId> entries from SystemSettings */
+export const listAllBillingSettings = () =>
+  many<SystemSettingRecord>(
+    'listAllBillingSettings',
+    supabase
+      .from(SYSTEM_SETTINGS_TABLE)
+      .select('*')
+      .like('key', 'billing:%'),
+  );
+
+/** Get users by an array of IDs */
+export const getUsersByIds = (ids: string[]) =>
+  many<Pick<UserRecord, 'id' | 'email' | 'name' | 'subscription' | 'createdAt'>>(
+    'getUsersByIds',
+    supabase
+      .from(USER_TABLE)
+      .select('id,email,name,subscription,createdAt')
+      .in('id', ids),
+  );
+
 const getUsageDayStamp = (value?: string | null) => {
   const date = value ? new Date(value) : null;
   if (!date || Number.isNaN(date.getTime())) {
