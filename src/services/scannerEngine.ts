@@ -3874,6 +3874,24 @@ function detectLevelSweepSignal(
     const candle = candles[index];
     const rejection = detectRejection(candle);
 
+    if (direction === 'buy' && candle.low < level && candle.close > level) {
+      if (requireRejection && rejection !== 'bullish_rejection') {
+        continue;
+      }
+      return { index, sweptLevel: level, sweepExtreme: candle.low, candle };
+    }
+
+    if (direction === 'sell' && candle.high > level && candle.close < level) {
+      if (requireRejection && rejection !== 'bearish_rejection') {
+        continue;
+      }
+      return { index, sweptLevel: level, sweepExtreme: candle.high, candle };
+    }
+  }
+
+  return null;
+}
+
 function detectEmaClusterReclaimSignal(
   direction: 'buy' | 'sell',
   candles: Candle[],
@@ -3936,24 +3954,6 @@ function detectEmaClusterReclaimSignal(
     sweepExtreme: Math.max(previous.high, latest.high),
     candle: latest,
   };
-}
-
-    if (direction === 'buy' && candle.low < level && candle.close > level) {
-      if (requireRejection && rejection !== 'bullish_rejection') {
-        continue;
-      }
-      return { index, sweptLevel: level, sweepExtreme: candle.low, candle };
-    }
-
-    if (direction === 'sell' && candle.high > level && candle.close < level) {
-      if (requireRejection && rejection !== 'bearish_rejection') {
-        continue;
-      }
-      return { index, sweptLevel: level, sweepExtreme: candle.high, candle };
-    }
-  }
-
-  return null;
 }
 
 function buildSessionFlipCandidate(input: {
