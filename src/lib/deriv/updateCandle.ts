@@ -2,8 +2,16 @@ import { saveClosedCandle } from '../db/saveClosedCandle';
 import { appendClosedCandle, getActiveCandle, setActiveCandle, type ActiveCandleState } from './activeCandles';
 
 const TIMEFRAME_LABELS: Record<number, string> = {
+  60: 'M1',
+  300: 'M5',
   900: 'M15',
+  1800: 'M30',
+  3600: 'H1',
+  14400: 'H4',
+  86400: 'D1',
 };
+
+const LIVE_TIMEFRAMES = Object.keys(TIMEFRAME_LABELS).map(Number);
 
 function buildActiveCandle(bucketStart: number, price: number): ActiveCandleState {
   return {
@@ -50,5 +58,5 @@ export async function updateCandle(symbol: string, price: number, epoch: number,
 }
 
 export async function updateCandlesForTick(symbol: string, price: number, epoch: number) {
-  await updateCandle(symbol, price, epoch, 900);
+  await Promise.all(LIVE_TIMEFRAMES.map((timeframeSeconds) => updateCandle(symbol, price, epoch, timeframeSeconds)));
 }
