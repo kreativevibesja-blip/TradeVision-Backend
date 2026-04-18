@@ -4002,7 +4002,11 @@ function buildSessionFlipCandidate(input: {
 
   const structuralTarget = findDirectionalStructureTarget(input.direction, input.candles, entry);
   const fallbackTarget = input.direction === 'buy' ? entry + risk * 2 : entry - risk * 2;
-  const takeProfit = structuralTarget ?? fallbackTarget;
+  const takeProfit = structuralTarget == null
+    ? fallbackTarget
+    : input.direction === 'buy'
+      ? Math.max(structuralTarget, fallbackTarget)
+      : Math.min(structuralTarget, fallbackTarget);
   const confirmationLabels = [
     'Session timing aligned',
     input.triggerLabel ?? (input.direction === 'buy' ? 'Sell-side liquidity sweep' : 'Buy-side liquidity sweep'),

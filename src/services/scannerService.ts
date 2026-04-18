@@ -333,6 +333,47 @@ function averageScannerRange(candles: Candle[], sample = 12): number {
   return totalRange / recent.length;
 }
 
+function normalizeScanResultTargets<T extends {
+  direction: 'buy' | 'sell';
+  entry: number;
+  stopLoss: number;
+  takeProfit: number;
+  takeProfit2: number | null;
+}>(result: T): T {
+  const risk = Math.abs(result.entry - result.stopLoss);
+  if (!Number.isFinite(risk) || risk <= 0) {
+    return result;
+  }
+
+  const primaryFloor = result.direction === 'buy'
+    ? result.entry + risk * 2
+    : result.entry - risk * 2;
+  const normalizedTakeProfit = result.direction === 'buy'
+    ? Math.max(result.takeProfit, primaryFloor)
+    : Math.min(result.takeProfit, primaryFloor);
+
+  const normalizedTakeProfit2 = result.takeProfit2 == null || !Number.isFinite(result.takeProfit2)
+    ? normalizedTakeProfit
+    : result.direction === 'buy'
+      ? Math.max(result.takeProfit2, normalizedTakeProfit)
+      : Math.min(result.takeProfit2, normalizedTakeProfit);
+
+  const takeProfitChanged = Math.abs(normalizedTakeProfit - result.takeProfit) > Number.EPSILON;
+  const takeProfit2Changed = result.takeProfit2 == null
+    ? Math.abs(normalizedTakeProfit2 - normalizedTakeProfit) > Number.EPSILON
+    : Math.abs(normalizedTakeProfit2 - result.takeProfit2) > Number.EPSILON;
+
+  if (!takeProfitChanged && !takeProfit2Changed) {
+    return result;
+  }
+
+  return {
+    ...result,
+    takeProfit: normalizedTakeProfit,
+    takeProfit2: normalizedTakeProfit2,
+  };
+}
+
 function computeRewardMultiple(direction: 'buy' | 'sell', entry: number, stopLoss: number, takeProfit: number | null): number | null {
   if (takeProfit == null) {
     return null;
@@ -562,7 +603,7 @@ async function getOpenResultForUserSymbol(userId: string, symbol: string): Promi
     throw new Error(error.message);
   }
 
-  const candidates = (data ?? []) as ScanResult[];
+  const candidates = ((data ?? []) as ScanResult[]).map(normalizeScanResultTargets);
   return candidates.sort(compareOpenResultPriority)[0] ?? null;
 }
 
@@ -995,7 +1036,7 @@ function refinePotentialTradeWithH1(
     nextPotential.direction,
     higherTimeframeTargets,
     nextPotential.entry,
-    risk * 1.4,
+    risk * 2,
     fallbackTakeProfit,
   );
   nextPotential.takeProfit2 = nextPotential.takeProfit;
@@ -1046,7 +1087,7 @@ async function attachLivePricesToResults(results: ScanResult[]): Promise<ScanRes
   const openResults = results.filter((result) => result.status === 'active' || result.status === 'triggered');
   if (openResults.length === 0) {
     return results.map((result) => ({
-      ...result,
+      ...normalizeScanResultTargets(result),
       currentPrice: result.currentPrice ?? null,
       validUntil: result.validUntil ?? getDerivedValidUntil(result.createdAt),
     }));
@@ -1066,7 +1107,7 @@ async function attachLivePricesToResults(results: ScanResult[]): Promise<ScanRes
   const latestPriceBySymbol = new Map<string, number | null>(latestPricePairs);
 
   return results.map((result) => ({
-    ...result,
+    ...normalizeScanResultTargets(result),
     validUntil: result.validUntil ?? getDerivedValidUntil(result.createdAt),
     currentPrice: (result.status === 'active' || result.status === 'triggered')
       ? (latestPriceBySymbol.get(result.symbol) ?? null)
@@ -1233,7 +1274,7 @@ export async function getTradeReplayForUser(userId: string, scanResultId: string
     throw new Error(resultError.message);
   }
 
-  const result = resultData as ScanResult | null;
+  const result = resultData ? normalizeScanResultTargets(resultData as ScanResult) : null;
   if (!result || !result.triggeredAt) {
     return null;
   }
@@ -1357,29 +1398,33 @@ async function insertScanResult(result: Omit<ScanResult, 'id' | 'createdAt'>): P
     return null;
   }
 
+  const normalizedResult = normalizeScanResultTargets(result);
+
   const { data, error } = await supabase
     .from(SCAN_RESULT_TABLE)
-    .insert(result)
+    .insert(normalizedResult)
     .select()
     .single();
 
   if (error) throw new Error(error.message);
-  registerLiveResultInCache(data as ScanResult);
-  return data as ScanResult;
+  const insertedResult = normalizeScanResultTargets(data as ScanResult);
+  registerLiveResultInCache(insertedResult);
+  return insertedResult;
 }
 
 function registerLiveResultInCache(result: ScanResult) {
-  if (result.status !== 'active' && result.status !== 'triggered') {
+  const normalizedResult = normalizeScanResultTargets(result);
+  if (normalizedResult.status !== 'active' && normalizedResult.status !== 'triggered') {
     return;
   }
 
-  const symbolBucket = liveResultCache.get(result.symbol) ?? new Map<string, ScanResult>();
+  const symbolBucket = liveResultCache.get(normalizedResult.symbol) ?? new Map<string, ScanResult>();
   for (const [existingId, existing] of symbolBucket) {
-    if (existing.userId !== result.userId) {
+    if (existing.userId !== normalizedResult.userId) {
       continue;
     }
 
-    if (compareOpenResultPriority(existing, result) > 0) {
+    if (compareOpenResultPriority(existing, normalizedResult) > 0) {
       symbolBucket.delete(existingId);
       continue;
     }
@@ -1387,11 +1432,11 @@ function registerLiveResultInCache(result: ScanResult) {
     return;
   }
 
-  symbolBucket.set(result.id, {
-    ...result,
-    validUntil: result.validUntil ?? getDerivedValidUntil(result.createdAt),
+  symbolBucket.set(normalizedResult.id, {
+    ...normalizedResult,
+    validUntil: normalizedResult.validUntil ?? getDerivedValidUntil(normalizedResult.createdAt),
   });
-  liveResultCache.set(result.symbol, symbolBucket);
+  liveResultCache.set(normalizedResult.symbol, symbolBucket);
 }
 
 function removeLiveResultFromCache(result: ScanResult) {
@@ -1453,7 +1498,7 @@ async function syncLiveResultCache(force = false): Promise<void> {
 
     liveResultCache.clear();
     for (const result of (data ?? []) as ScanResult[]) {
-      registerLiveResultInCache(result);
+      registerLiveResultInCache(normalizeScanResultTargets(result));
     }
 
     liveResultCacheSyncedAt = Date.now();
