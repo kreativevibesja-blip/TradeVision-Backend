@@ -3874,6 +3874,70 @@ function detectLevelSweepSignal(
     const candle = candles[index];
     const rejection = detectRejection(candle);
 
+function detectEmaClusterReclaimSignal(
+  direction: 'buy' | 'sell',
+  candles: Candle[],
+  ema20: number,
+  ema50: number,
+): ContinuationSweepSignal | null {
+  if (candles.length < 4) {
+    return null;
+  }
+
+  const recent = candles.slice(-6);
+  const latest = recent[recent.length - 1];
+  const previous = recent[recent.length - 2];
+  const retestBuffer = Math.max(averageRange(candles, 12) * 0.35, Math.abs(latest.close) * 0.0005);
+  const hadBreakout = recent.slice(0, -1).some((candle, index, source) => {
+    if (index === 0) {
+      return false;
+    }
+
+    const prior = source[index - 1];
+    if (direction === 'buy') {
+      return prior.close <= ema20 && candle.close > ema20 && candle.close > ema50;
+    }
+
+    return prior.close >= ema20 && candle.close < ema20 && candle.close < ema50;
+  });
+
+  if (!hadBreakout || !hasStrongClosure(direction, recent)) {
+    return null;
+  }
+
+  const hadRetest = recent.slice(0, -1).some((candle) => direction === 'buy'
+    ? candle.low <= Math.max(ema20, ema50) + retestBuffer && candle.close >= Math.min(ema20, ema50) - retestBuffer
+    : candle.high >= Math.min(ema20, ema50) - retestBuffer && candle.close <= Math.max(ema20, ema50) + retestBuffer);
+
+  if (!hadRetest) {
+    return null;
+  }
+
+  if (direction === 'buy') {
+    if (!(latest.close > ema20 && latest.close > ema50 && latest.close > previous.high)) {
+      return null;
+    }
+
+    return {
+      index: candles.length - 1,
+      sweptLevel: Math.max(ema20, ema50),
+      sweepExtreme: Math.min(previous.low, latest.low),
+      candle: latest,
+    };
+  }
+
+  if (!(latest.close < ema20 && latest.close < ema50 && latest.close < previous.low)) {
+    return null;
+  }
+
+  return {
+    index: candles.length - 1,
+    sweptLevel: Math.min(ema20, ema50),
+    sweepExtreme: Math.max(previous.high, latest.high),
+    candle: latest,
+  };
+}
+
     if (direction === 'buy' && candle.low < level && candle.close > level) {
       if (requireRejection && rejection !== 'bullish_rejection') {
         continue;
@@ -3899,6 +3963,7 @@ function buildSessionFlipCandidate(input: {
   variant: SessionFlipVariant;
   direction: 'buy' | 'sell';
   sweep: ContinuationSweepSignal;
+  triggerLabel?: string;
   emaAligned: boolean;
   zoneReaction: boolean;
   marketRegime: MarketRegime;
@@ -3940,7 +4005,7 @@ function buildSessionFlipCandidate(input: {
   const takeProfit = structuralTarget ?? fallbackTarget;
   const confirmationLabels = [
     'Session timing aligned',
-    input.direction === 'buy' ? 'Sell-side liquidity sweep' : 'Buy-side liquidity sweep',
+    input.triggerLabel ?? (input.direction === 'buy' ? 'Sell-side liquidity sweep' : 'Buy-side liquidity sweep'),
     input.direction === 'buy' ? 'Bullish displacement candle' : 'Bearish displacement candle',
     input.direction === 'buy' ? 'Bullish micro structure break' : 'Bearish micro structure break',
     input.emaAligned ? 'EMA alignment confirmed' : 'EMA filter softened',
@@ -4175,12 +4240,14 @@ function buildContinuationSetup(symbol: string, candles: Candle[]): Continuation
     const recentCandles = candles.slice(-40);
     const pullback = assessPullback(volDirection, candles, ema20, ema50, atr);
     const sweep = detectDirectionalSweepSignal(volDirection, recentCandles);
+    const emaReclaimSignal = sweep ? null : detectEmaClusterReclaimSignal(volDirection, recentCandles, ema20, ema50);
+    const continuationTrigger = sweep ?? emaReclaimSignal;
 
     if (!pullback.valid || pullback.overextended) {
       return logContinuationRejection(symbol, 'volatility no valid pullback');
     }
-    if (!sweep) {
-      return logContinuationRejection(symbol, 'volatility no sweep signal');
+    if (!continuationTrigger) {
+      return logContinuationRejection(symbol, 'volatility no sweep/reclaim signal');
     }
 
     return buildSessionFlipCandidate({
@@ -4189,7 +4256,10 @@ function buildContinuationSetup(symbol: string, candles: Candle[]): Continuation
       session: 'newyork', // session label doesn't matter for vol — just needs a valid value
       variant: 'newyork_continuation',
       direction: volDirection,
-      sweep,
+      sweep: continuationTrigger,
+      triggerLabel: sweep
+        ? (volDirection === 'buy' ? 'Sell-side liquidity sweep' : 'Buy-side liquidity sweep')
+        : (volDirection === 'buy' ? 'EMA reclaim retest + bullish close' : 'EMA reclaim retest + bearish close'),
       emaAligned: true,
       zoneReaction: pullback.touchedEma20 || pullback.touchedEma50,
       marketRegime: 'trend',
@@ -4249,16 +4319,21 @@ function buildContinuationSetup(symbol: string, candles: Candle[]): Continuation
 
     const continuationPullback = assessPullback(londonTrend, candles, ema20, ema50, atr);
     const continuationSweep = detectDirectionalSweepSignal(londonTrend, londonCandles);
+    const continuationReclaim = continuationSweep ? null : detectEmaClusterReclaimSignal(londonTrend, londonCandles, ema20, ema50);
+    const continuationTrigger = continuationSweep ?? continuationReclaim;
     const emaAligned = londonTrend === 'buy' ? bullishEmaTrend : bearishEmaTrend;
 
-    if (continuationPullback.valid && !continuationPullback.overextended && emaAligned && continuationSweep) {
+    if (continuationPullback.valid && !continuationPullback.overextended && emaAligned && continuationTrigger) {
       return buildSessionFlipCandidate({
         symbol,
         candles: londonCandles,
         session: 'london',
         variant: 'london_sweep_reversal',
         direction: londonTrend,
-        sweep: continuationSweep,
+        sweep: continuationTrigger,
+        triggerLabel: continuationSweep
+          ? (londonTrend === 'buy' ? 'Sell-side liquidity sweep' : 'Buy-side liquidity sweep')
+          : (londonTrend === 'buy' ? 'EMA reclaim retest + bullish close' : 'EMA reclaim retest + bearish close'),
         emaAligned: true,
         zoneReaction: continuationPullback.touchedEma20 || continuationPullback.touchedEma50,
         marketRegime: 'trend',
@@ -4275,7 +4350,9 @@ function buildContinuationSetup(symbol: string, candles: Candle[]): Continuation
 
     const continuationPullback = assessPullback(londonTrend, candles, ema20, ema50, atr);
     const continuationSweep = detectDirectionalSweepSignal(londonTrend, newYorkCandles);
-    if (continuationPullback.valid && !continuationPullback.overextended && continuationSweep) {
+    const continuationReclaim = continuationSweep ? null : detectEmaClusterReclaimSignal(londonTrend, newYorkCandles, ema20, ema50);
+    const continuationTrigger = continuationSweep ?? continuationReclaim;
+    if (continuationPullback.valid && !continuationPullback.overextended && continuationTrigger) {
       const continuationEmaAligned = londonTrend === 'buy' ? bullishEmaTrend : bearishEmaTrend;
       if (continuationEmaAligned) {
         return buildSessionFlipCandidate({
@@ -4284,7 +4361,10 @@ function buildContinuationSetup(symbol: string, candles: Candle[]): Continuation
           session: 'newyork',
           variant: 'newyork_continuation',
           direction: londonTrend,
-          sweep: continuationSweep,
+          sweep: continuationTrigger,
+          triggerLabel: continuationSweep
+            ? (londonTrend === 'buy' ? 'Sell-side liquidity sweep' : 'Buy-side liquidity sweep')
+            : (londonTrend === 'buy' ? 'EMA reclaim retest + bullish close' : 'EMA reclaim retest + bearish close'),
           emaAligned: true,
           zoneReaction: continuationPullback.touchedEma20 || continuationPullback.touchedEma50,
           marketRegime: 'trend',
@@ -4330,15 +4410,20 @@ function buildContinuationSetup(symbol: string, candles: Candle[]): Continuation
     const afternoonPullback = assessPullback(nyTrend, candles, ema20, ema50, atr);
     const emaAligned = nyTrend === 'buy' ? bullishEmaTrend : bearishEmaTrend;
     const afternoonSweep = detectDirectionalSweepSignal(nyTrend, newYorkCandles);
+    const afternoonReclaim = afternoonSweep ? null : detectEmaClusterReclaimSignal(nyTrend, newYorkCandles, ema20, ema50);
+    const afternoonTrigger = afternoonSweep ?? afternoonReclaim;
 
-    if (afternoonPullback.valid && !afternoonPullback.overextended && emaAligned && afternoonSweep) {
+    if (afternoonPullback.valid && !afternoonPullback.overextended && emaAligned && afternoonTrigger) {
       return buildSessionFlipCandidate({
         symbol,
         candles: newYorkCandles,
         session: 'newyork',
         variant: 'newyork_continuation',
         direction: nyTrend,
-        sweep: afternoonSweep,
+        sweep: afternoonTrigger,
+        triggerLabel: afternoonSweep
+          ? (nyTrend === 'buy' ? 'Sell-side liquidity sweep' : 'Buy-side liquidity sweep')
+          : (nyTrend === 'buy' ? 'EMA reclaim retest + bullish close' : 'EMA reclaim retest + bearish close'),
         emaAligned: true,
         zoneReaction: afternoonPullback.touchedEma20 || afternoonPullback.touchedEma50,
         marketRegime: 'trend',
