@@ -109,41 +109,7 @@ export const VOLATILITY_SCANNER_SYMBOL_IDS = [
   'R_100',
   // Volatility Indices (1s)
   '1HZ10V',
-  '1HZ15V',
-  '1HZ25V',
-  '1HZ30V',
-  '1HZ50V',
   '1HZ75V',
-  '1HZ90V',
-  '1HZ100V',
-  // Jump Indices
-  'JD10',
-  'JD25',
-  'JD50',
-  'JD75',
-  'JD100',
-  // Boom Indices
-  'BOOM50',
-  'BOOM150N',
-  'BOOM300N',
-  'BOOM500',
-  'BOOM600',
-  'BOOM900',
-  'BOOM1000',
-  // Crash Indices
-  'CRASH50',
-  'CRASH150N',
-  'CRASH300N',
-  'CRASH500',
-  'CRASH600',
-  'CRASH900',
-  'CRASH1000',
-  // Step Indices
-  'stpRNG',
-  'stpRNG2',
-  'stpRNG3',
-  'stpRNG4',
-  'stpRNG5',
 ] as const;
 
 export const DERIV_SCANNER_SYMBOL_IDS = [...SESSION_SCANNER_SYMBOL_IDS, ...VOLATILITY_SCANNER_SYMBOL_IDS];
