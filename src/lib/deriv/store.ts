@@ -6,6 +6,7 @@ export interface TickPoint {
 type TickListener = (tick: { logicalSymbol: string; price: number; time: number }) => void;
 
 const derivToLogicalSymbol = new Map<string, string>();
+const latestTicks = new Map<string, TickPoint>();
 const tickListeners = new Set<TickListener>();
 
 export function registerTrackedDerivSymbol(logicalSymbol: string, derivSymbol: string) {
@@ -22,6 +23,11 @@ export function handleTick(tick: { symbol: string; quote: number; epoch: number 
     return;
   }
 
+  latestTicks.set(logicalSymbol, {
+    price: Number(tick.quote),
+    time: Number(tick.epoch),
+  });
+
   for (const listener of tickListeners) {
     listener({
       logicalSymbol,
@@ -37,5 +43,9 @@ export function subscribeToTicks(listener: TickListener) {
   return () => {
     tickListeners.delete(listener);
   };
+}
+
+export function getLatestTrackedTick(logicalSymbol: string): TickPoint | null {
+  return latestTicks.get(logicalSymbol) ?? null;
 }
 
