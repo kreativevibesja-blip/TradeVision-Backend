@@ -719,6 +719,17 @@ export const listUsersPage = async (
 export const countUsers = (subscription?: SubscriptionTier) =>
   countRows('countUsers', USER_TABLE, subscription ? (query) => query.eq('subscription', subscription) : undefined);
 
+/** List all users on paid plans (PRO, TOP_TIER, VIP_AUTO_TRADER) — used by admin subscriber dashboard */
+export const listPaidSubscribers = () =>
+  many<Pick<UserRecord, 'id' | 'email' | 'name' | 'subscription' | 'createdAt'>>(
+    'listPaidSubscribers',
+    supabase
+      .from(USER_TABLE)
+      .select('id,email,name,subscription,createdAt')
+      .in('subscription', ['PRO', 'TOP_TIER', 'VIP_AUTO_TRADER'])
+      .order('createdAt', { ascending: false }),
+  );
+
 const getUsageDayStamp = (value?: string | null) => {
   const date = value ? new Date(value) : null;
   if (!date || Number.isNaN(date.getTime())) {

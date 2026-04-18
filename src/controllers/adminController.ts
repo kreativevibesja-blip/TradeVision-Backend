@@ -17,6 +17,7 @@ import {
   listActiveAnnouncements,
   listAllPaymentsPage,
   listAnnouncements,
+  listPaidSubscribers,
   listPricingPlans,
   listSystemSettings,
   listTicketsForUser,
@@ -38,6 +39,7 @@ import { getBillingSummaryForUser } from '../services/billing';
 import { setBillingStateFromPayment } from '../services/billing';
 import { processReferralPayment } from '../services/referralService';
 import { sendPaymentReminderEmail } from '../services/paymentReminderEmail';
+import { sendRenewalReminderEmail } from '../services/renewalReminderEmail';
 
 const ANNOUNCEMENT_CONTENT_VERSION = 1;
 const DEFAULT_SUPPORT_WHATSAPP_NUMBER = '18762797956';
@@ -667,5 +669,78 @@ export const deleteAnnouncement = async (req: Request, res: Response) => {
     return res.json({ success: true });
   } catch (error) {
     return res.status(500).json({ error: 'Failed to delete announcement' });
+  }
+};
+
+// ── Paid Subscriber Dashboard ──
+
+export const getPaidSubscribers = async (_req: Request, res: Response) => {
+  try {
+    const users = await listPaidSubscribers();
+    const now = Date.now();
+
+    const subscribers = await Promise.all(
+      users.map(async (user) => {
+        const billing = await getBillingSummaryForUser(user.id, user.subscription);
+        const expiresAt = billing.expiresAt;
+        let daysLeft: number | null = null;
+
+        if (expiresAt) {
+          daysLeft = Math.ceil((new Date(expiresAt).getTime() - now) / (1000 * 60 * 60 * 24));
+        }
+
+        return {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          plan: billing.currentPlan,
+          status: billing.status,
+          expiresAt,
+          daysLeft,
+        };
+      }),
+    );
+
+    return res.json({ subscribers });
+  } catch (error) {
+    console.error('Admin paid subscribers error:', error);
+    return res.status(500).json({ error: 'Failed to get paid subscribers' });
+  }
+};
+
+export const sendSubscriptionRenewalReminder = async (req: Request, res: Response) => {
+  try {
+    const { userId } = req.params;
+    const user = await getUserById(userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const billing = await getBillingSummaryForUser(user.id, user.subscription);
+    if (!billing.expiresAt) {
+      return res.status(400).json({ error: 'User has no expiry date' });
+    }
+
+    const daysLeft = Math.ceil((new Date(billing.expiresAt).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+    const plan = billing.currentPlan === 'FREE' && billing.recentPayments.length > 0
+      ? billing.recentPayments[0].plan
+      : billing.currentPlan;
+
+    const result = await sendRenewalReminderEmail({
+      to: user.email,
+      userName: user.name || 'Trader',
+      plan: plan || 'PRO',
+      daysLeft,
+      expiresAt: billing.expiresAt,
+    });
+
+    if (!result.ok) {
+      return res.status(500).json({ error: result.error || 'Failed to send email' });
+    }
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Send renewal reminder error:', error);
+    return res.status(500).json({ error: 'Failed to send renewal reminder' });
   }
 };

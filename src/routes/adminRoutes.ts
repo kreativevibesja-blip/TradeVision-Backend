@@ -25,6 +25,8 @@ import {
   createAnnouncement,
   updateAnnouncement,
   deleteAnnouncement,
+  getPaidSubscribers,
+  sendSubscriptionRenewalReminder,
 } from '../controllers/adminController';
 import { getAdminTickets, getOpenTicketCount, updateAdminTicket, replyToTicket, createAdminTicket } from '../controllers/ticketController';
 import { getCoupons, createCoupon, toggleCoupon, deleteCoupon } from '../controllers/couponController';
@@ -62,6 +64,8 @@ router.get('/users', getUsers);
 router.get('/users/:id', getUserDetails);
 router.post('/users/:id/reset-usage', resetUserUsage);
 router.patch('/users/:id', updateUser);
+router.get('/subscribers', getPaidSubscribers);
+router.post('/subscribers/:userId/send-renewal', sendSubscriptionRenewalReminder);
 router.get('/analyses', getAnalysisLogs);
 router.get('/analyses/:id', getAdminAnalysisById);
 router.get('/payments', getPayments);
