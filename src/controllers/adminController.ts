@@ -626,7 +626,7 @@ export const createAnnouncement = async (req: Request, res: Response) => {
         expiresAt: getExpiryFromRequest(durationValue, durationUnit),
         type: announcementType,
         couponCode: announcementType === 'discount' && typeof couponCode === 'string' ? couponCode.trim().toUpperCase() : null,
-        targetPlan: announcementType === 'discount' && (targetPlan === 'PRO' || targetPlan === 'TOP_TIER') ? targetPlan : null,
+        targetPlan: targetPlan === 'PRO' || targetPlan === 'TOP_TIER' ? targetPlan : null,
       }),
     });
     return res.json({ announcement: mapAnnouncementRecord(announcement) });
@@ -647,7 +647,7 @@ export const updateAnnouncement = async (req: Request, res: Response) => {
             expiresAt: clearExpiry ? null : getExpiryFromRequest(durationValue, durationUnit),
             type: announcementType,
             couponCode: announcementType === 'discount' && typeof couponCode === 'string' ? couponCode.trim().toUpperCase() : null,
-            targetPlan: announcementType === 'discount' && (targetPlan === 'PRO' || targetPlan === 'TOP_TIER') ? targetPlan : null,
+            targetPlan: targetPlan === 'PRO' || targetPlan === 'TOP_TIER' ? targetPlan : null,
           })
         : undefined;
     const announcement = await updateAnnouncementRecord(id, {
