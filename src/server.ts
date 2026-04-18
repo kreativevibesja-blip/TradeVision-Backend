@@ -15,8 +15,10 @@ import presenceRoutes from './routes/presenceRoutes';
 import scannerRoutes from './routes/scannerRoutes';
 import notificationRoutes from './routes/notificationRoutes';
 import commandCenterRoutes from './routes/commandCenterRoutes';
+import radarRoutes from './routes/radarRoutes';
 import { startQueueWorker } from './workers/queueWorker';
 import { startSystem } from './server/start';
+import { startRadarTracker } from './services/radarTracker';
 
 export const app = express();
 
@@ -77,6 +79,7 @@ app.use('/api', presenceRoutes);
 app.use('/api/scanner', scannerRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api', commandCenterRoutes);
+app.use('/api/radar', radarRoutes);
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
@@ -100,4 +103,5 @@ export const startServer = () =>
     console.log(`TradeVision AI API running on port ${config.port}`);
     startQueueWorker();
     startSystem();
+    startRadarTracker();
   });

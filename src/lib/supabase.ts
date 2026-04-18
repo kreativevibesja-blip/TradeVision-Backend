@@ -97,6 +97,7 @@ const MT5_ACCOUNTS_TABLE = 'mt5_accounts';
 const AUTO_TRADE_TABLE = 'AutoTrade';
 const AUTO_TRADE_LOG_TABLE = 'AutoTradeLog';
 const AUTO_PERFORMANCE_TABLE = 'AutoPerformance';
+const TRACKED_TRADE_TABLE = 'TrackedTrade';
 
 export type SubscriptionTier = 'FREE' | 'PRO' | 'TOP_TIER' | 'VIP_AUTO_TRADER';
 export type UserRole = 'USER' | 'ADMIN';
@@ -2060,3 +2061,54 @@ export const getTodayAllAutoTradesProfit = async (todayStartIso: string): Promis
     supabase.from(AUTO_TRADE_TABLE).select('profit').eq('status', 'closed').gte('createdAt', todayStartIso));
   return trades.reduce((sum, t) => sum + (t.profit ?? 0), 0);
 };
+
+// ── Tracked Trade (Trade Radar) ──
+
+export type TrackedTradeState = 'TRACKING' | 'READY' | 'ACTIVE' | 'INVALID' | 'EXPIRED';
+
+export interface TrackedTradeRecord {
+  id: string;
+  userId: string;
+  analysisId: string | null;
+  symbol: string;
+  direction: SignalDirection;
+  entryZoneMin: number;
+  entryZoneMax: number;
+  stopLoss: number;
+  takeProfit1: number;
+  confidence: number;
+  conditions: string[];
+  state: TrackedTradeState;
+  expiresAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const createTrackedTrade = (values: Omit<TrackedTradeRecord, 'updatedAt'>) =>
+  insertSingle<TrackedTradeRecord>('createTrackedTrade', TRACKED_TRADE_TABLE, {
+    ...values,
+    updatedAt: new Date().toISOString(),
+  });
+
+export const getTrackedTradesForUser = (userId: string) =>
+  many<TrackedTradeRecord>('getTrackedTradesForUser',
+    supabase.from(TRACKED_TRADE_TABLE).select('*').eq('userId', userId).order('createdAt', { ascending: false }));
+
+export const getActiveTrackedTradesForUser = (userId: string) =>
+  many<TrackedTradeRecord>('getActiveTrackedTradesForUser',
+    supabase.from(TRACKED_TRADE_TABLE).select('*').eq('userId', userId).in('state', ['TRACKING', 'READY', 'ACTIVE']));
+
+export const countActiveTrackedTrades = (userId: string) =>
+  countRows('countActiveTrackedTrades', TRACKED_TRADE_TABLE, (q) =>
+    q.eq('userId', userId).in('state', ['TRACKING', 'READY', 'ACTIVE']));
+
+export const deleteTrackedTrade = (id: string, userId: string) =>
+  deleteSingle('deleteTrackedTrade', TRACKED_TRADE_TABLE, (q) => q.eq('id', id).eq('userId', userId));
+
+export const updateTrackedTradeState = async (id: string, state: TrackedTradeState): Promise<TrackedTradeRecord> =>
+  updateSingle<TrackedTradeRecord>('updateTrackedTradeState', TRACKED_TRADE_TABLE,
+    { state, updatedAt: new Date().toISOString() }, (q) => q.eq('id', id));
+
+export const getAllActiveTrackedTrades = () =>
+  many<TrackedTradeRecord>('getAllActiveTrackedTrades',
+    supabase.from(TRACKED_TRADE_TABLE).select('*').in('state', ['TRACKING', 'READY', 'ACTIVE']));
