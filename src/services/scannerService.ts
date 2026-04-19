@@ -19,8 +19,8 @@ type ForexSessionType = Extract<SessionType, 'london' | 'newyork'>;
 type VolatilitySessionBucket = 'asian' | 'london' | 'newyork';
 export type ScanResultStatus = 'active' | 'triggered' | 'closed' | 'invalidated' | 'expired';
 export type AlertType = 'info' | 'trade' | 'warning';
-export type ScanCloseReason = 'tp' | 'sl' | null;
-export type TradeReplayOutcome = 'open' | 'tp' | 'sl';
+export type ScanCloseReason = 'tp' | 'sl' | 'be' | null;
+export type TradeReplayOutcome = 'open' | 'tp' | 'sl' | 'be';
 export type CompressedReplayCandle = [number, number, number, number, number];
 
 export interface ScannerSession {
@@ -1214,45 +1214,78 @@ export async function getScanResults(
   scope: ScanResultScope = 'all',
 ): Promise<ScanResult[]> {
   const safeLimit = Math.max(1, limit);
-  const fetchLimit = scope === 'history' ? Math.max(safeLimit * 4, 80) : safeLimit;
-  let query = supabase
-    .from(SCAN_RESULT_TABLE)
-    .select('*')
-    .eq('userId', userId)
-    .order('createdAt', { ascending: false })
-    .limit(fetchLimit);
+  const fetchLimit = Math.max(safeLimit * 4, 80);
+  const dayStart = getStartOfNewYorkDay();
+  const applySessionFilter = <T extends { eq: (column: string, value: string) => T }>(query: T): T => (
+    sessionType ? query.eq('sessionType', sessionType) : query
+  );
 
-  if (scope !== 'all') {
-    const dayStart = getStartOfNewYorkDay();
-    query = scope === 'current'
-      ? query.gte('createdAt', dayStart)
-      : query.lt('createdAt', dayStart);
+  let scopedResults: ScanResult[];
+
+  if (scope === 'current') {
+    const openQuery = applySessionFilter(
+      supabase
+        .from(SCAN_RESULT_TABLE)
+        .select('*')
+        .eq('userId', userId)
+        .in('status', ['active', 'triggered'])
+        .order('createdAt', { ascending: false })
+        .limit(fetchLimit),
+    );
+    const recentQuery = applySessionFilter(
+      supabase
+        .from(SCAN_RESULT_TABLE)
+        .select('*')
+        .eq('userId', userId)
+        .gte('createdAt', dayStart)
+        .order('createdAt', { ascending: false })
+        .limit(fetchLimit),
+    );
+
+    const [{ data: openData, error: openError }, { data: recentData, error: recentError }] = await Promise.all([
+      openQuery,
+      recentQuery,
+    ]);
+
+    if (openError) throw new Error(openError.message);
+    if (recentError) throw new Error(recentError.message);
+
+    const mergedResults = new Map<string, ScanResult>();
+    for (const result of [...((openData ?? []) as ScanResult[]), ...((recentData ?? []) as ScanResult[])]) {
+      mergedResults.set(result.id, result);
+    }
+
+    scopedResults = dedupeOpenResultsBySymbol(
+      Array.from(mergedResults.values()).sort(
+        (left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime(),
+      ),
+    ).slice(0, safeLimit);
+  } else {
+    let query = supabase
+      .from(SCAN_RESULT_TABLE)
+      .select('*')
+      .eq('userId', userId)
+      .order('createdAt', { ascending: false })
+      .limit(scope === 'history' ? fetchLimit : safeLimit);
+
+    if (scope === 'history') {
+      query = query.lt('createdAt', dayStart);
+    }
+
+    query = applySessionFilter(query);
+
+    const { data, error } = await query;
+    if (error) throw new Error(error.message);
+
+    const results = (data ?? []) as ScanResult[];
+    scopedResults = scope === 'history'
+      ? results.filter((result) => result.status !== 'active' && result.status !== 'triggered')
+      : results;
   }
-
-  if (sessionType) {
-    query = query.eq('sessionType', sessionType);
-  }
-
-  const { data, error } = await query;
-  if (error) throw new Error(error.message);
-
-  const results = (data ?? []) as ScanResult[];
-  const scopedResults = scope === 'current'
-    ? dedupeOpenResultsBySymbol(results).slice(0, safeLimit)
-    : results;
 
   if (scope === 'history') {
     const prioritizedHistory = [...scopedResults]
-      .sort((left, right) => {
-        const leftCarryOver = left.status === 'triggered';
-        const rightCarryOver = right.status === 'triggered';
-
-        if (leftCarryOver !== rightCarryOver) {
-          return leftCarryOver ? -1 : 1;
-        }
-
-        return new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime();
-      })
+      .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())
       .slice(0, safeLimit);
 
     return attachLivePricesToResults(prioritizedHistory);
@@ -1720,8 +1753,8 @@ async function processResultLifecycle(
     }
 
     if (hitTakeProfit || hitStopLoss) {
-      const closeReason: ScanCloseReason = hitTakeProfit ? 'tp' : 'sl';
       const closedAtBreakeven = !hitTakeProfit && Math.abs(effectiveStopLoss - result.entry) <= Number.EPSILON;
+      const closeReason: ScanCloseReason = hitTakeProfit ? 'tp' : closedAtBreakeven ? 'be' : 'sl';
       const closedAt = new Date().toISOString();
       await updateScanResult(result.id, {
         status: 'closed',
