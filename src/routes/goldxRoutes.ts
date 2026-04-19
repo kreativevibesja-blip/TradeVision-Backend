@@ -31,6 +31,7 @@ import {
   adminGetGoldxSettings,
   adminUpdateGoldxSettings,
   adminGetGoldxTradeHistory,
+  adminGrantGoldxAccessToUser,
 } from '../controllers/goldxController';
 
 const router = Router();
@@ -59,5 +60,6 @@ router.get('/admin/audit-logs', authenticate, requireAdmin, adminGetGoldxAuditLo
 router.get('/admin/settings', authenticate, requireAdmin, adminGetGoldxSettings);
 router.post('/admin/settings', authenticate, requireAdmin, adminUpdateGoldxSettings);
 router.get('/admin/trade-history', authenticate, requireAdmin, adminGetGoldxTradeHistory);
+router.post('/admin/users/:userId/grant', authenticate, requireAdmin, adminGrantGoldxAccessToUser);
 
 export default router;

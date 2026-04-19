@@ -15,6 +15,7 @@ import {
   setUserMode,
   getGoldxPlan,
   ensureAdminGoldxAccess,
+  adminGrantGoldxAccess,
   adminGetAllLicenses,
   adminGetAllSubscriptions,
   adminRevokeLicense,
@@ -329,5 +330,26 @@ export const adminGetGoldxTradeHistory = async (req: AuthRequest, res: Response)
   } catch (err) {
     console.error('[GoldX Admin] getTradeHistory error:', err);
     res.status(500).json({ error: 'Internal error' });
+  }
+};
+
+export const adminGrantGoldxAccessToUser = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Auth required' });
+    const { userId } = req.params;
+    if (!userId) return res.status(400).json({ error: 'userId required' });
+
+    const result = await adminGrantGoldxAccess(userId, req.user.id);
+    res.json({
+      success: true,
+      created: result.created,
+      licenseKey: result.rawLicenseKey,
+      message: result.rawLicenseKey
+        ? 'GoldX access granted. Save the license key because it is only shown once.'
+        : 'User already has active GoldX access.',
+    });
+  } catch (err: any) {
+    console.error('[GoldX Admin] grantUserAccess error:', err);
+    res.status(500).json({ error: err?.message ?? 'Internal error' });
   }
 };

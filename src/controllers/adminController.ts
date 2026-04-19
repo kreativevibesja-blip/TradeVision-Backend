@@ -42,6 +42,7 @@ import { setBillingStateFromPayment } from '../services/billing';
 import { processReferralPayment } from '../services/referralService';
 import { sendPaymentReminderEmail } from '../services/paymentReminderEmail';
 import { sendRenewalReminderEmail } from '../services/renewalReminderEmail';
+import { getUserSubscription as getGoldxSubscription, getUserLicense as getGoldxLicense } from '../services/goldx/licenseService';
 
 const ANNOUNCEMENT_CONTENT_VERSION = 1;
 const DEFAULT_SUPPORT_WHATSAPP_NUMBER = '18762797956';
@@ -211,9 +212,11 @@ export const getUserDetails = async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    const [billingSummary, ticketData] = await Promise.all([
+    const [billingSummary, ticketData, goldxSubscription, goldxLicense] = await Promise.all([
       getBillingSummaryForUser(user.id, user.subscription),
       listTicketsForUser(user.id, 1, 20),
+      getGoldxSubscription(user.id),
+      getGoldxLicense(user.id),
     ]);
 
     const openTickets = ticketData.tickets
@@ -230,6 +233,14 @@ export const getUserDetails = async (req: Request, res: Response) => {
           lastPaymentAt: billingSummary.lastPaymentAt,
           canceledAt: billingSummary.canceledAt,
           recentPayments: billingSummary.recentPayments,
+        },
+        goldx: {
+          hasAccess: Boolean(goldxLicense && goldxLicense.status === 'active'),
+          subscriptionStatus: goldxSubscription?.status ?? null,
+          currentPeriodEnd: goldxSubscription?.currentPeriodEnd ?? null,
+          licenseStatus: goldxLicense?.status ?? null,
+          expiresAt: goldxLicense?.expiresAt ?? null,
+          mt5Account: goldxLicense?.mt5Account ?? null,
         },
         openTickets,
         openTicketCount: openTickets.length,

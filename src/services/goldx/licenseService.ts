@@ -443,6 +443,65 @@ export async function ensureAdminGoldxAccess(
   };
 }
 
+export async function adminGrantGoldxAccess(
+  userId: string,
+  adminUserId: string,
+): Promise<{ created: boolean; rawLicenseKey: string | null }> {
+  const [plan, activeSubscription, activeLicense] = await Promise.all([
+    getGoldxPlan(),
+    getUserSubscription(userId),
+    getUserLicense(userId),
+  ]);
+
+  if (!plan) {
+    throw new Error('No active GoldX plan');
+  }
+
+  if (activeSubscription && activeLicense) {
+    await insertAuditLog('admin_goldx_access_checked', {
+      userId: adminUserId,
+      meta: { targetUserId: userId, planId: plan.id, created: false },
+    });
+    return { created: false, rawLicenseKey: null };
+  }
+
+  let createdLicenseKey: string | null = null;
+  const periodEnd = activeSubscription?.currentPeriodEnd
+    ?? activeLicense?.expiresAt
+    ?? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+
+  if (!activeSubscription) {
+    const { error } = await supabase
+      .from('goldx_subscriptions')
+      .insert({
+        user_id: userId,
+        plan_id: plan.id,
+        status: 'active',
+        paypal_order_id: `admin-grant:${adminUserId}`,
+        current_period_end: periodEnd,
+      });
+
+    if (error) {
+      throw new Error(`Failed to grant GoldX subscription: ${error.message}`);
+    }
+  }
+
+  if (!activeLicense) {
+    const { rawKey } = await createLicense(userId, periodEnd);
+    createdLicenseKey = rawKey;
+  }
+
+  await insertAuditLog(createdLicenseKey ? 'admin_goldx_access_granted' : 'admin_goldx_access_synced', {
+    userId: adminUserId,
+    meta: { targetUserId: userId, planId: plan.id },
+  });
+
+  return {
+    created: !activeSubscription || !activeLicense,
+    rawLicenseKey: createdLicenseKey,
+  };
+}
+
 // ── Expiry / Cancellation ───────────────────────────────────
 
 export async function cancelSubscription(subscriptionId: string): Promise<void> {
