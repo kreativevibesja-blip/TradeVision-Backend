@@ -448,7 +448,7 @@ export async function ensureAdminGoldxAccess(
 export async function cancelSubscription(subscriptionId: string): Promise<void> {
   const { data: sub } = await supabase
     .from('goldx_subscriptions')
-    .select('user_id')
+    .select('user_id, current_period_end')
     .eq('id', subscriptionId)
     .single();
 
@@ -465,7 +465,10 @@ export async function cancelSubscription(subscriptionId: string): Promise<void> 
     const licenses = await getLicensesByUser(sub.user_id);
     for (const lic of licenses) {
       if (lic.status === 'active') {
-        await updateLicense(lic.id, { status: 'expired' });
+        await updateLicense(lic.id, {
+          expiresAt: sub.current_period_end ?? lic.expiresAt,
+          status: new Date(lic.expiresAt) < new Date() ? 'expired' : 'active',
+        });
       }
     }
     await insertAuditLog('subscription_cancelled', { userId: sub.user_id, meta: { subscriptionId } });
@@ -600,12 +603,22 @@ export async function getUserSubscription(userId: string): Promise<GoldxSubscrip
     .from('goldx_subscriptions')
     .select('*')
     .eq('user_id', userId)
-    .eq('status', 'active')
+    .in('status', ['active', 'cancelled', 'past_due'])
     .order('created_at', { ascending: false })
-    .limit(1)
-    .single();
-  if (!data) return null;
-  return snakeToCamel(data) as unknown as GoldxSubscription;
+    .limit(5);
+  const rows = (data ?? []) as Record<string, unknown>[];
+  if (!rows.length) return null;
+
+  const now = new Date();
+  const currentSub = rows
+    .map((row) => snakeToCamel(row) as unknown as GoldxSubscription)
+    .find((sub) => new Date(sub.currentPeriodEnd) >= now);
+
+  if (currentSub) {
+    return currentSub;
+  }
+
+  return null;
 }
 
 export async function getUserLicense(userId: string): Promise<GoldxLicense | null> {

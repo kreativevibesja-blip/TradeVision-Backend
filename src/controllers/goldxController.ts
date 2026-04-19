@@ -159,7 +159,7 @@ export const cancelMyGoldxSubscription = async (req: AuthRequest, res: Response)
   try {
     if (!req.user) return res.status(401).json({ error: 'Auth required' });
     const sub = await getUserSubscription(req.user.id);
-    if (!sub) return res.status(404).json({ error: 'No active subscription' });
+    if (!sub || sub.status !== 'active') return res.status(404).json({ error: 'No active subscription' });
     await cancelSubscription(sub.id);
     res.json({ success: true });
   } catch (err) {
