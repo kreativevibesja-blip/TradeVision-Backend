@@ -14,6 +14,7 @@ import {
   getUserAccountState,
   setUserMode,
   getGoldxPlan,
+  ensureAdminGoldxAccess,
   adminGetAllLicenses,
   adminGetAllSubscriptions,
   adminRevokeLicense,
@@ -117,11 +118,16 @@ export const getSignalHandler = async (req: GoldxSessionRequest, res: Response) 
 export const getMyGoldxSubscription = async (req: AuthRequest, res: Response) => {
   try {
     if (!req.user) return res.status(401).json({ error: 'Auth required' });
+    const adminProvision = req.user.role === 'ADMIN'
+      ? await ensureAdminGoldxAccess(req.user.id)
+      : { created: false, rawLicenseKey: null };
     const sub = await getUserSubscription(req.user.id);
     const license = await getUserLicense(req.user.id);
     const accountState = await getUserAccountState(req.user.id);
 
     res.json({
+      adminAccess: req.user.role === 'ADMIN',
+      adminLicenseKey: adminProvision.rawLicenseKey,
       subscription: sub,
       license: license
         ? { id: license.id, status: license.status, mt5Account: license.mt5Account, expiresAt: license.expiresAt }

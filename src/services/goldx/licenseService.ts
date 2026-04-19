@@ -389,6 +389,60 @@ export async function createSubscriptionAndLicense(
   return { subscriptionId: sub.id, rawLicenseKey: rawKey };
 }
 
+export async function ensureAdminGoldxAccess(
+  userId: string,
+): Promise<{ created: boolean; rawLicenseKey: string | null }> {
+  const [plan, activeSubscription, activeLicense] = await Promise.all([
+    getGoldxPlan(),
+    getUserSubscription(userId),
+    getUserLicense(userId),
+  ]);
+
+  if (!plan) {
+    throw new Error('No active GoldX plan');
+  }
+
+  if (activeSubscription && activeLicense) {
+    return { created: false, rawLicenseKey: null };
+  }
+
+  let createdLicenseKey: string | null = null;
+  const periodEnd = activeSubscription?.currentPeriodEnd
+    ?? activeLicense?.expiresAt
+    ?? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+
+  if (!activeSubscription) {
+    const { error } = await supabase
+      .from('goldx_subscriptions')
+      .insert({
+        user_id: userId,
+        plan_id: plan.id,
+        status: 'active',
+        paypal_order_id: 'admin-grant',
+        current_period_end: periodEnd,
+      });
+
+    if (error) {
+      throw new Error(`Failed to provision admin subscription: ${error.message}`);
+    }
+  }
+
+  if (!activeLicense) {
+    const { rawKey } = await createLicense(userId, periodEnd);
+    createdLicenseKey = rawKey;
+  }
+
+  await insertAuditLog(createdLicenseKey ? 'admin_access_provisioned' : 'admin_access_synced', {
+    userId,
+    meta: { planId: plan.id },
+  });
+
+  return {
+    created: !activeSubscription || !activeLicense,
+    rawLicenseKey: createdLicenseKey,
+  };
+}
+
 // ── Expiry / Cancellation ───────────────────────────────────
 
 export async function cancelSubscription(subscriptionId: string): Promise<void> {
