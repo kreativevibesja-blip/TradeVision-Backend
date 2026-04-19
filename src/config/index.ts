@@ -115,4 +115,11 @@ export const config = {
   metaapi: {
     apiKey: process.env.METAAPI_API_KEY || '',
   },
+
+  goldx: {
+    hmacSecret: process.env.GOLDX_HMAC_SECRET || 'goldx-hmac-secret-change-me',
+    licensePepper: process.env.GOLDX_LICENSE_PEPPER || 'goldx-pepper-change-me',
+    aesKey: process.env.GOLDX_AES_KEY || '',
+    sessionTtlMinutes: parseInt(process.env.GOLDX_SESSION_TTL_MINUTES || '10', 10),
+  },
 };
