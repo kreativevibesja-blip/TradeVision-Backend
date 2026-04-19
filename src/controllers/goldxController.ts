@@ -25,6 +25,7 @@ import {
   adminGetSettings,
   adminGetTradeHistory,
   insertAuditLog,
+  consumePendingDashboardGrant,
 } from '../services/goldx/licenseService';
 import { generateSignal, recordTrade } from '../services/goldx/strategyEngine';
 import { createOrder, captureOrder } from '../services/paypalService';
@@ -118,16 +119,33 @@ export const getSignalHandler = async (req: GoldxSessionRequest, res: Response) 
 export const getMyGoldxSubscription = async (req: AuthRequest, res: Response) => {
   try {
     if (!req.user) return res.status(401).json({ error: 'Auth required' });
-    const sub = await getUserSubscription(req.user.id);
-    const license = await getUserLicense(req.user.id);
-    const accountState = await getUserAccountState(req.user.id);
+    const [sub, license, accountState, latestGrant] = await Promise.all([
+      getUserSubscription(req.user.id),
+      getUserLicense(req.user.id),
+      getUserAccountState(req.user.id),
+      consumePendingDashboardGrant(req.user.id),
+    ]);
 
     res.json({
-      subscription: sub,
+      subscription: sub
+        ? {
+            id: sub.id,
+            status: sub.status,
+            currentPeriodStart: sub.currentPeriodStart,
+            currentPeriodEnd: sub.currentPeriodEnd,
+          }
+        : null,
       license: license
-        ? { id: license.id, status: license.status, mt5Account: license.mt5Account, expiresAt: license.expiresAt }
+        ? {
+            id: license.id,
+            status: license.status,
+            mt5Account: license.mt5Account,
+            expiresAt: license.expiresAt,
+            createdAt: license.createdAt,
+          }
         : null,
       accountState,
+      latestGrant,
     });
   } catch (err) {
     console.error('[GoldX] getMySubscription error:', err);

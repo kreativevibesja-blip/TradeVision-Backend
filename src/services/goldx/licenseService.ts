@@ -10,6 +10,8 @@ import {
   hashSessionToken,
   verifyHmac,
   isTimestampValid,
+  aesEncrypt,
+  aesDecrypt,
 } from './crypto';
 import type {
   GoldxLicense,
@@ -220,6 +222,55 @@ async function insertAuditLog(
     ip_address: opts.ip ?? null,
     meta: opts.meta ?? {},
   });
+}
+
+async function setPendingDashboardGrant(
+  userId: string,
+  payload: { licenseKey: string; issuedAt: string; expiresAt: string },
+): Promise<void> {
+  await supabase
+    .from('goldx_settings')
+    .upsert({
+      key: `dashboard_grant:${userId}`,
+      value: {
+        licenseKey: aesEncrypt(payload.licenseKey),
+        issuedAt: payload.issuedAt,
+        expiresAt: payload.expiresAt,
+      },
+      updated_at: new Date().toISOString(),
+    });
+}
+
+export async function consumePendingDashboardGrant(
+  userId: string,
+): Promise<{ licenseKey: string; issuedAt: string; expiresAt: string } | null> {
+  const settingKey = `dashboard_grant:${userId}`;
+  const { data } = await supabase
+    .from('goldx_settings')
+    .select('value')
+    .eq('key', settingKey)
+    .maybeSingle();
+
+  const rawValue = data?.value;
+  if (!rawValue || typeof rawValue !== 'object') {
+    return null;
+  }
+
+  const value = rawValue as Record<string, unknown>;
+  if (typeof value.licenseKey !== 'string' || typeof value.issuedAt !== 'string' || typeof value.expiresAt !== 'string') {
+    return null;
+  }
+
+  await supabase
+    .from('goldx_settings')
+    .delete()
+    .eq('key', settingKey);
+
+  return {
+    licenseKey: aesDecrypt(value.licenseKey),
+    issuedAt: value.issuedAt,
+    expiresAt: value.expiresAt,
+  };
 }
 
 // ── Mode Config ─────────────────────────────────────────────
@@ -466,9 +517,8 @@ export async function adminGrantGoldxAccess(
   }
 
   let createdLicenseKey: string | null = null;
-  const periodEnd = activeSubscription?.currentPeriodEnd
-    ?? activeLicense?.expiresAt
-    ?? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+  const periodStart = new Date().toISOString();
+  const periodEnd = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
 
   if (!activeSubscription) {
     const { error } = await supabase
@@ -478,17 +528,39 @@ export async function adminGrantGoldxAccess(
         plan_id: plan.id,
         status: 'active',
         paypal_order_id: `admin-grant:${adminUserId}`,
+        current_period_start: periodStart,
         current_period_end: periodEnd,
       });
 
     if (error) {
       throw new Error(`Failed to grant GoldX subscription: ${error.message}`);
     }
+  } else if (!activeLicense) {
+    const { error } = await supabase
+      .from('goldx_subscriptions')
+      .update({
+        status: 'active',
+        cancelled_at: null,
+        paypal_order_id: `admin-regrant:${adminUserId}`,
+        current_period_start: periodStart,
+        current_period_end: periodEnd,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', activeSubscription.id);
+
+    if (error) {
+      throw new Error(`Failed to reset GoldX subscription window: ${error.message}`);
+    }
   }
 
   if (!activeLicense) {
     const { rawKey } = await createLicense(userId, periodEnd);
     createdLicenseKey = rawKey;
+    await setPendingDashboardGrant(userId, {
+      licenseKey: rawKey,
+      issuedAt: periodStart,
+      expiresAt: periodEnd,
+    });
   }
 
   await insertAuditLog(createdLicenseKey ? 'admin_goldx_access_granted' : 'admin_goldx_access_synced', {
