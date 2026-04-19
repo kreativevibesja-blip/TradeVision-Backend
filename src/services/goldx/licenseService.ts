@@ -759,10 +759,17 @@ export async function getUserLicense(userId: string): Promise<GoldxLicense | nul
     .eq('user_id', userId)
     .eq('status', 'active')
     .order('created_at', { ascending: false })
-    .limit(1)
-    .single();
-  if (!data) return null;
-  return snakeToCamel(data) as unknown as GoldxLicense;
+    .limit(10);
+
+  const licenses = ((data ?? []) as Record<string, unknown>[])
+    .map((row) => snakeToCamel(row) as unknown as GoldxLicense);
+
+  if (!licenses.length) {
+    return null;
+  }
+
+  const boundLicense = licenses.find((license) => Boolean(license.mt5Account));
+  return boundLicense ?? licenses[0] ?? null;
 }
 
 export async function getUserAccountState(userId: string): Promise<GoldxAccountState | null> {
