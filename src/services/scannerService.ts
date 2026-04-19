@@ -175,8 +175,12 @@ const AI_REVIEW_CACHE_TTL_MS = 10 * 60_000;
 const PREFER_HISTORY_BEFORE_CACHE_SYMBOLS = new Set(['XAUUSD']);
 const HISTORY_RATE_LIMIT_BACKOFF_MS = 60_000;
 
+function normalizeScannerSymbol(symbol: string): string {
+  return symbol.trim().toUpperCase();
+}
+
 function getScannerSpreadThreshold(symbol: string, referencePrice: number): number {
-  const normalized = symbol.trim().toUpperCase();
+  const normalized = normalizeScannerSymbol(symbol);
   if (normalized === 'XAUUSD') return 1.2;
   if (/^(US30|NAS100|SPX500|GER40|UK100|USTEC|US500)$/i.test(normalized)) return 8;
   if (/^[A-Z]{6}$/.test(normalized)) return normalized.endsWith('JPY') ? 0.08 : 0.0012;
@@ -224,11 +228,11 @@ const potentialCache = new Map<string, CachedPotential>();
 const aiPotentialReviewCache = new Map<string, CachedAiPotentialReview>();
 
 function usesFixedIndexPoints(symbol: string): boolean {
-  return ['NAS100', 'US30'].includes(symbol.trim().toUpperCase());
+  return ['NAS100', 'US30'].includes(normalizeScannerSymbol(symbol));
 }
 
 function usesFixedJpyPipTargets(symbol: string): boolean {
-  const normalized = symbol.trim().toUpperCase();
+  const normalized = normalizeScannerSymbol(symbol);
   return /^[A-Z]{6}$/.test(normalized) && normalized.endsWith('JPY');
 }
 
@@ -1161,6 +1165,23 @@ function getStartOfNewYorkDay(): string {
   return new Date(zonedNow.getTime() + offsetMs).toISOString();
 }
 
+async function hasSymbolTradeToday(userId: string, symbol: string): Promise<boolean> {
+  const dayStart = getStartOfNewYorkDay();
+  const normalizedSymbol = normalizeScannerSymbol(symbol);
+  const { count, error } = await supabase
+    .from(SCAN_RESULT_TABLE)
+    .select('id', { count: 'exact', head: true })
+    .eq('userId', userId)
+    .eq('symbol', normalizedSymbol)
+    .gte('createdAt', dayStart);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return (count ?? 0) > 0;
+}
+
 // ── Database operations ──
 
 export async function getActiveSessionsForUser(userId: string): Promise<ScannerSession[]> {
@@ -1426,6 +1447,10 @@ async function updateScanResult(
 }
 
 async function insertScanResult(result: Omit<ScanResult, 'id' | 'createdAt'>): Promise<ScanResult | null> {
+  if (await hasSymbolTradeToday(result.userId, result.symbol)) {
+    return null;
+  }
+
   const existingOpenResult = await getOpenResultForUserSymbol(result.userId, result.symbol);
   if (existingOpenResult) {
     return null;
@@ -2082,6 +2107,12 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
       }
 
       if (claimedSymbols.has(result.symbol)) {
+        continue;
+      }
+
+      if (await hasSymbolTradeToday(userId, result.symbol)) {
+        claimedSymbols.add(result.symbol);
+        console.log(`[Scanner] ${result.symbol} already has a trade for today, skipping`);
         continue;
       }
 

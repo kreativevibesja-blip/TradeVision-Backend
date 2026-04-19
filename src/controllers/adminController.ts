@@ -235,6 +235,7 @@ export const getUserDetails = async (req: Request, res: Response) => {
           recentPayments: billingSummary.recentPayments,
         },
         goldx: {
+          licenseId: goldxLicense?.id ?? null,
           hasAccess: Boolean(goldxLicense && goldxLicense.status === 'active'),
           subscriptionStatus: goldxSubscription?.status ?? null,
           currentPeriodEnd: goldxSubscription?.currentPeriodEnd ?? null,
