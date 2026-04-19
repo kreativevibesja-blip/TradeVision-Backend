@@ -15,6 +15,10 @@ import type {
   GoldxLicense,
   GoldxLicenseSession,
   GoldxAccountState,
+  GoldxSubscription,
+  GoldxAuditLog,
+  GoldxTradeHistory,
+  GoldxPlan,
   GoldxVerifyRequest,
   GoldxVerifyResponse,
   GoldxMode,
@@ -597,5 +601,4 @@ export {
   getModeConfig,
   insertAuditLog,
   cleanExpiredSessions,
-  type GoldxTradeHistory,
 };
