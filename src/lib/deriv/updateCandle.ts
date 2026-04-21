@@ -5,10 +5,7 @@ const TIMEFRAME_LABELS: Record<number, string> = {
   60: 'M1',
   300: 'M5',
   900: 'M15',
-  1800: 'M30',
   3600: 'H1',
-  14400: 'H4',
-  86400: 'D1',
 };
 
 const LIVE_TIMEFRAMES = Object.keys(TIMEFRAME_LABELS).map(Number);
