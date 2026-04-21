@@ -37,6 +37,22 @@ import {
 const router = Router();
 
 // ── Public ──────────────────────────────────────────────────
+router.get('/', (_req, res) => {
+  res.json({
+    ok: true,
+    service: 'goldx',
+    endpoints: {
+      plan: '/api/goldx/plan',
+      verifyLicense: '/api/goldx/license/verify',
+      signal: '/api/goldx/signal',
+      me: '/api/goldx/me',
+      createPayment: '/api/goldx/payment/create',
+      capturePayment: '/api/goldx/payment/capture',
+      adminDashboard: '/api/goldx/admin/dashboard',
+    },
+  });
+});
+
 router.get('/plan', getGoldxPlanPublic);
 
 // ── EA Endpoints (HMAC-signed, no Supabase auth) ────────────
