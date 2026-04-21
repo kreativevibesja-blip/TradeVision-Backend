@@ -9,6 +9,15 @@ const LICENSE_PEPPER = process.env.GOLDX_LICENSE_PEPPER || 'goldx-pepper-change-
 const AES_KEY = process.env.GOLDX_AES_KEY || crypto.randomBytes(32).toString('hex');
 const REPLAY_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
 
+function normalizeTimestampMs(timestamp: number): number {
+  if (!Number.isFinite(timestamp)) {
+    return Number.NaN;
+  }
+
+  // MT5/EA payloads commonly send Unix time in seconds.
+  return timestamp < 1e12 ? timestamp * 1000 : timestamp;
+}
+
 /** SHA-256 hash a license key with pepper for storage */
 export function hashLicenseKey(licenseKey: string): string {
   return crypto
@@ -57,7 +66,8 @@ export function verifyHmac(payload: string, signature: string): boolean {
 /** Check if timestamp is within replay window */
 export function isTimestampValid(timestamp: number): boolean {
   const now = Date.now();
-  const diff = Math.abs(now - timestamp);
+  const normalizedTimestamp = normalizeTimestampMs(timestamp);
+  const diff = Math.abs(now - normalizedTimestamp);
   return diff <= REPLAY_WINDOW_MS;
 }
 
