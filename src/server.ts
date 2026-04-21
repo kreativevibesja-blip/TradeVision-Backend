@@ -17,6 +17,7 @@ import notificationRoutes from './routes/notificationRoutes';
 import commandCenterRoutes from './routes/commandCenterRoutes';
 import radarRoutes from './routes/radarRoutes';
 import goldxRoutes from './routes/goldxRoutes';
+import debugRoutes from './routes/debugRoutes';
 import { startQueueWorker } from './workers/queueWorker';
 import { startSystem } from './server/start';
 import { startRadarTracker } from './services/radarTracker';
@@ -82,6 +83,7 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api', commandCenterRoutes);
 app.use('/api/radar', radarRoutes);
 app.use('/api/goldx', goldxRoutes);
+app.use('/api/debug', debugRoutes);
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });

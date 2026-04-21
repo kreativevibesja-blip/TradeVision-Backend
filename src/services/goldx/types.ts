@@ -142,4 +142,8 @@ export interface GoldxVerifyResponse {
   maxTradesPerDay?: number;
   mode?: GoldxMode;
   error?: string;
+  debug?: {
+    boundAccount: string;
+    licenseId: string;
+  };
 }

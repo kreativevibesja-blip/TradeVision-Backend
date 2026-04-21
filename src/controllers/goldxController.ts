@@ -26,6 +26,9 @@ import {
   adminGetTradeHistory,
   insertAuditLog,
   consumePendingDashboardGrant,
+  debugBindLicense,
+  DEBUG_MODE,
+  SKIP_HMAC,
 } from '../services/goldx/licenseService';
 import { generateSignal, recordTrade } from '../services/goldx/strategyEngine';
 import { createOrder, captureOrder } from '../services/paypalService';
@@ -49,12 +52,12 @@ export const getGoldxPlanPublic = async (_req: Request, res: Response) => {
 export const verifyLicenseHandler = async (req: Request, res: Response) => {
   try {
     const body = req.body as GoldxVerifyRequest;
-    const signature = req.headers['x-goldx-signature'] as string;
+    const signature = (req.headers['x-goldx-signature'] as string | undefined) ?? '';
 
     if (!body.licenseKey || !body.mt5Account || !body.deviceId || !body.timestamp || !body.nonce) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
-    if (!signature) {
+    if (!signature && !SKIP_HMAC) {
       return res.status(400).json({ error: 'Missing HMAC signature header' });
     }
 
@@ -69,6 +72,33 @@ export const verifyLicenseHandler = async (req: Request, res: Response) => {
   } catch (err) {
     console.error('[GoldX] verifyLicense error:', err);
     res.status(500).json({ error: 'Internal error' });
+  }
+};
+
+export const debugBindLicenseHandler = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!DEBUG_MODE) {
+      return res.status(404).json({ error: 'Debug license binding is disabled' });
+    }
+
+    const { licenseKey, mt5Account } = req.body as { licenseKey?: string; mt5Account?: string };
+    if (!licenseKey || !mt5Account) {
+      return res.status(400).json({ error: 'licenseKey and mt5Account are required' });
+    }
+
+    const license = await debugBindLicense(licenseKey, mt5Account);
+    res.json({
+      success: true,
+      license: {
+        id: license.id,
+        mt5Account: license.mt5Account,
+        status: license.status,
+        expiresAt: license.expiresAt,
+      },
+    });
+  } catch (err: any) {
+    console.error('[GoldX Debug] bindLicense error:', err);
+    res.status(500).json({ error: err?.message ?? 'Internal error' });
   }
 };
 

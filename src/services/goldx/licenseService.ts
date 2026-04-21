@@ -28,7 +28,15 @@ import type {
 } from './types';
 
 const SESSION_TTL_MINUTES = 10;
+const DEBUG_MODE = process.env.DEBUG_LICENSE === 'true';
+const SKIP_HMAC = process.env.SKIP_HMAC === 'true';
 const USED_NONCES = new Map<string, number>();
+
+function logVerifyDebug(...args: unknown[]) {
+  if (DEBUG_MODE) {
+    console.log(...args);
+  }
+}
 
 // Clean nonces older than 10 minutes every 5 minutes
 setInterval(() => {
@@ -49,7 +57,7 @@ const snakeToCamel = (row: Record<string, unknown>): Record<string, unknown> => 
   return result;
 };
 
-async function getLicenseByHash(hash: string): Promise<GoldxLicense | null> {
+export async function getLicenseByHash(hash: string): Promise<GoldxLicense | null> {
   const { data, error } = await supabase
     .from('goldx_licenses')
     .select('*')
@@ -300,57 +308,98 @@ export async function verifyLicense(
   signature: string,
   ip: string | null,
 ): Promise<GoldxVerifyResponse> {
+  logVerifyDebug('==== VERIFY REQUEST START ====');
+  logVerifyDebug('REQ BODY:', req);
+  logVerifyDebug('SIGNATURE:', signature);
+  logVerifyDebug('IP:', ip);
+
   // 1. Anti-replay: check timestamp
   if (!isTimestampValid(req.timestamp)) {
+    logVerifyDebug('❌ FAILED: TIMESTAMP INVALID', req.timestamp);
     await insertAuditLog('verify_rejected_replay', { ip: ip ?? undefined, meta: { reason: 'timestamp' } });
     return { valid: false, error: 'Request expired or clock skew too large' };
   }
+  logVerifyDebug('✅ PASSED: TIMESTAMP');
 
   // 2. Anti-replay: check nonce
   if (USED_NONCES.has(req.nonce)) {
+    logVerifyDebug('❌ FAILED: NONCE REUSED', req.nonce);
     await insertAuditLog('verify_rejected_replay', { ip: ip ?? undefined, meta: { reason: 'nonce' } });
     return { valid: false, error: 'Duplicate request' };
   }
+  logVerifyDebug('✅ PASSED: NONCE');
   USED_NONCES.set(req.nonce, Date.now());
 
   // 3. Verify HMAC signature
   const payload = `${req.licenseKey}:${req.mt5Account}:${req.deviceId}:${req.timestamp}:${req.nonce}`;
-  if (!verifyHmac(payload, signature)) {
+  logVerifyDebug('HMAC PAYLOAD:', payload);
+  if (!SKIP_HMAC && !verifyHmac(payload, signature)) {
+    logVerifyDebug('❌ FAILED: HMAC INVALID');
     await insertAuditLog('verify_rejected_hmac', { ip: ip ?? undefined, meta: { mt5Account: req.mt5Account } });
     return { valid: false, error: 'Invalid signature' };
   }
+  logVerifyDebug(SKIP_HMAC ? '⚠️ HMAC BYPASSED VIA DEBUG FLAG' : '✅ PASSED: HMAC');
 
   // 4. Look up license
   const licenseHash = hashLicenseKey(req.licenseKey);
   const license = await getLicenseByHash(licenseHash);
+  logVerifyDebug('LICENSE FOUND:', license);
   if (!license) {
+    logVerifyDebug('❌ FAILED: LICENSE NOT FOUND');
     await insertAuditLog('verify_rejected_notfound', { ip: ip ?? undefined });
     return { valid: false, error: 'License not found' };
   }
 
   // 5. Check status
   if (license.status !== 'active') {
+    logVerifyDebug('❌ FAILED: LICENSE STATUS INVALID', license.status);
     await insertAuditLog('verify_rejected_status', { licenseId: license.id, ip: ip ?? undefined, meta: { status: license.status } });
     return { valid: false, error: `License ${license.status}` };
   }
 
   // 6. Check expiry
   if (new Date(license.expiresAt) < new Date()) {
+    logVerifyDebug('❌ FAILED: LICENSE EXPIRED', license.expiresAt);
     await updateLicense(license.id, { status: 'expired' });
     await insertAuditLog('license_expired', { licenseId: license.id, ip: ip ?? undefined });
     return { valid: false, error: 'License expired' };
   }
 
   // 7. Bind MT5 account (first time) or verify match
+  logVerifyDebug('CURRENT MT5 ACCOUNT:', license.mt5Account);
+  logVerifyDebug('INCOMING MT5 ACCOUNT:', req.mt5Account);
   if (!license.mt5Account) {
-    await updateLicense(license.id, { mt5Account: req.mt5Account, deviceId: req.deviceId });
+    logVerifyDebug('🔗 BINDING NEW MT5 ACCOUNT:', req.mt5Account);
+
+    await updateLicense(license.id, {
+      mt5Account: req.mt5Account,
+      deviceId: req.deviceId,
+    });
   } else if (license.mt5Account !== req.mt5Account) {
+    logVerifyDebug('❌ FAILED: ACCOUNT MISMATCH', {
+      expected: license.mt5Account,
+      received: req.mt5Account,
+    });
     await insertAuditLog('verify_rejected_account_mismatch', {
       licenseId: license.id,
       ip: ip ?? undefined,
       meta: { expected: license.mt5Account, received: req.mt5Account },
     });
     return { valid: false, error: 'License bound to a different MT5 account' };
+  } else {
+    logVerifyDebug('✅ MT5 ACCOUNT ALREADY MATCHED');
+  }
+
+  const updatedLicense = await getLicenseByHash(licenseHash);
+  logVerifyDebug('UPDATED LICENSE:', updatedLicense);
+  if (!updatedLicense?.mt5Account || updatedLicense.mt5Account !== req.mt5Account) {
+    logVerifyDebug('❌ FAILED: MT5 BINDING NOT PERSISTED', updatedLicense);
+    await insertAuditLog('verify_rejected_binding_not_persisted', {
+      licenseId: license.id,
+      ip: ip ?? undefined,
+      meta: { expected: req.mt5Account, actual: updatedLicense?.mt5Account ?? null },
+    });
+    return { valid: false, error: 'Failed to persist MT5 account binding' };
   }
 
   // 8. Update last checked
@@ -370,13 +419,54 @@ export async function verifyLicense(
     meta: { mt5Account: req.mt5Account, mode: accountState.mode },
   });
 
+  logVerifyDebug('✅ VERIFY SUCCESS', {
+    licenseId: license.id,
+    boundAccount: req.mt5Account,
+    mode: accountState.mode,
+  });
+
   return {
     valid: true,
     sessionToken: session.token,
     expiresAt: session.expiresAt,
     maxTradesPerDay: modeConfig.maxTrades,
     mode: accountState.mode,
+    debug: {
+      boundAccount: req.mt5Account,
+      licenseId: license.id,
+    },
   };
+}
+
+export async function debugBindLicense(
+  licenseKey: string,
+  mt5Account: string,
+  deviceId = 'debug-bind-license',
+): Promise<GoldxLicense> {
+  const licenseHash = hashLicenseKey(licenseKey);
+  const license = await getLicenseByHash(licenseHash);
+
+  if (!license) {
+    throw new Error('License not found');
+  }
+
+  await updateLicense(license.id, {
+    mt5Account,
+    deviceId,
+  });
+
+  const updatedLicense = await getLicenseByHash(licenseHash);
+  if (!updatedLicense) {
+    throw new Error('License disappeared after bind update');
+  }
+
+  await insertAuditLog('license_debug_bound', {
+    licenseId: updatedLicense.id,
+    userId: updatedLicense.userId,
+    meta: { mt5Account, deviceId },
+  });
+
+  return updatedLicense;
 }
 
 // ── Core: Session Validation ────────────────────────────────
@@ -806,4 +896,6 @@ export {
   getModeConfig,
   insertAuditLog,
   cleanExpiredSessions,
+  DEBUG_MODE,
+  SKIP_HMAC,
 };
