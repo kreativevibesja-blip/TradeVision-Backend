@@ -2,6 +2,7 @@
 // GoldX — Controller
 // ============================================================
 
+import crypto from 'crypto';
 import { Request, Response } from 'express';
 import { AuthRequest } from '../middleware/auth';
 import { GoldxSessionRequest } from '../middleware/goldxAuth';
@@ -30,6 +31,7 @@ import {
   DEBUG_MODE,
   SKIP_HMAC,
 } from '../services/goldx/licenseService';
+import { computeHmac, getHmacSecret } from '../services/goldx/crypto';
 import { generateSignal, recordTrade } from '../services/goldx/strategyEngine';
 import { createOrder, captureOrder } from '../services/paypalService';
 import type { GoldxVerifyRequest, GoldxMode } from '../services/goldx/types';
@@ -98,6 +100,55 @@ export const debugBindLicenseHandler = async (req: AuthRequest, res: Response) =
     });
   } catch (err: any) {
     console.error('[GoldX Debug] bindLicense error:', err);
+    res.status(500).json({ error: err?.message ?? 'Internal error' });
+  }
+};
+
+export const debugGoldxHmacHandler = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!DEBUG_MODE) {
+      return res.status(404).json({ error: 'GoldX HMAC debug is disabled' });
+    }
+
+    const body = req.body as Partial<GoldxVerifyRequest> & { payload?: string };
+    const rawPayload = typeof body.payload === 'string' ? body.payload : null;
+    const hasFields = typeof body.licenseKey === 'string'
+      && typeof body.mt5Account === 'string'
+      && typeof body.deviceId === 'string'
+      && typeof body.timestamp === 'number'
+      && typeof body.nonce === 'string';
+
+    if (!rawPayload && !hasFields) {
+      return res.status(400).json({
+        error: 'Provide either payload or licenseKey, mt5Account, deviceId, timestamp, nonce',
+      });
+    }
+
+    const payloadCandidates = rawPayload
+      ? [rawPayload]
+      : Array.from(new Set([
+          `${body.licenseKey}:${body.mt5Account}:${body.deviceId}:${body.timestamp}:${body.nonce}`,
+          `${body.licenseKey!.trim()}:${body.mt5Account!.trim()}:${body.deviceId!.trim()}:${body.timestamp}:${body.nonce!.trim()}`,
+          `${body.licenseKey!.trim()}:${body.mt5Account!.trim()}:${body.deviceId!.trim()}:${body.timestamp! < 1e12 ? body.timestamp : Math.trunc(body.timestamp! / 1000)}:${body.nonce!.trim()}`,
+          `${body.licenseKey!.trim()}:${body.mt5Account!.trim()}:${body.deviceId!.trim()}:${body.timestamp! < 1e12 ? body.timestamp! * 1000 : body.timestamp}:${body.nonce!.trim()}`,
+        ]));
+
+    const secretFingerprint = crypto
+      .createHash('sha256')
+      .update(getHmacSecret())
+      .digest('hex')
+      .slice(0, 16);
+
+    res.json({
+      ok: true,
+      secretFingerprint,
+      candidates: payloadCandidates.map((payload) => ({
+        payload,
+        signature: computeHmac(payload),
+      })),
+    });
+  } catch (err: any) {
+    console.error('[GoldX Debug] hmac error:', err);
     res.status(500).json({ error: err?.message ?? 'Internal error' });
   }
 };
