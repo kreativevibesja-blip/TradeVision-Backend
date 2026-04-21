@@ -1087,6 +1087,20 @@ async function loadLatestScannerPrice(symbol: string): Promise<number | null> {
   return candles[candles.length - 1]?.close ?? null;
 }
 
+async function loadLatestScannerPriceWindow(symbol: string): Promise<LivePriceWindow | null> {
+  const candles = await loadScannerCandles(symbol, 'M15', 2, 1);
+  const latestCandle = candles[candles.length - 1];
+  if (!latestCandle) {
+    return null;
+  }
+
+  return {
+    currentPrice: latestCandle.close,
+    lowPrice: latestCandle.low,
+    highPrice: latestCandle.high,
+  };
+}
+
 async function attachLivePricesToResults(results: ScanResult[]): Promise<ScanResult[]> {
   const openResults = results.filter((result) => result.status === 'active' || result.status === 'triggered');
   if (openResults.length === 0) {
@@ -2257,11 +2271,11 @@ export async function checkZoneProximityAlerts(userId: string): Promise<ScannerA
 
   for (const result of activeResults as ScanResult[]) {
     try {
-      const currentPrice = await loadLatestScannerPrice(result.symbol);
-      if (currentPrice === null) {
+      const priceWindow = await loadLatestScannerPriceWindow(result.symbol);
+      if (!priceWindow) {
         continue;
       }
-      const lifecycleAlerts = await processResultLifecycle(result, currentPrice);
+      const lifecycleAlerts = await processResultLifecycle(result, priceWindow);
       alerts.push(...lifecycleAlerts);
     } catch {
       // Skip symbols that fail to fetch
