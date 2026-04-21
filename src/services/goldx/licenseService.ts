@@ -8,6 +8,7 @@ import {
   generateLicenseKey,
   generateSessionToken,
   hashSessionToken,
+  computeHmac,
   verifyHmac,
   isTimestampValid,
   aesEncrypt,
@@ -36,6 +37,22 @@ function logVerifyDebug(...args: unknown[]) {
   if (DEBUG_MODE) {
     console.log(...args);
   }
+}
+
+function buildHmacPayloadCandidates(req: GoldxVerifyRequest): string[] {
+  const trimmedLicenseKey = req.licenseKey.trim();
+  const trimmedAccount = req.mt5Account.trim();
+  const trimmedDeviceId = req.deviceId.trim();
+  const trimmedNonce = req.nonce.trim();
+  const timestampMs = req.timestamp < 1e12 ? req.timestamp * 1000 : req.timestamp;
+  const timestampSec = req.timestamp < 1e12 ? req.timestamp : Math.trunc(req.timestamp / 1000);
+
+  return Array.from(new Set([
+    `${req.licenseKey}:${req.mt5Account}:${req.deviceId}:${req.timestamp}:${req.nonce}`,
+    `${trimmedLicenseKey}:${trimmedAccount}:${trimmedDeviceId}:${req.timestamp}:${trimmedNonce}`,
+    `${trimmedLicenseKey}:${trimmedAccount}:${trimmedDeviceId}:${timestampSec}:${trimmedNonce}`,
+    `${trimmedLicenseKey}:${trimmedAccount}:${trimmedDeviceId}:${timestampMs}:${trimmedNonce}`,
+  ]));
 }
 
 // Clean nonces older than 10 minutes every 5 minutes
@@ -331,12 +348,18 @@ export async function verifyLicense(
   USED_NONCES.set(req.nonce, Date.now());
 
   // 3. Verify HMAC signature
-  const payload = `${req.licenseKey}:${req.mt5Account}:${req.deviceId}:${req.timestamp}:${req.nonce}`;
-  logVerifyDebug('HMAC PAYLOAD:', payload);
-  if (!SKIP_HMAC && !verifyHmac(payload, signature)) {
+  const payloadCandidates = buildHmacPayloadCandidates(req);
+  logVerifyDebug('HMAC PAYLOAD CANDIDATES:', payloadCandidates);
+  const matchedPayload = payloadCandidates.find((payload) => verifyHmac(payload, signature)) ?? null;
+
+  if (!SKIP_HMAC && !matchedPayload) {
     logVerifyDebug('❌ FAILED: HMAC INVALID');
+    logVerifyDebug('EXPECTED HMAC CANDIDATES:', payloadCandidates.map((payload) => ({ payload, signature: computeHmac(payload) })));
     await insertAuditLog('verify_rejected_hmac', { ip: ip ?? undefined, meta: { mt5Account: req.mt5Account } });
     return { valid: false, error: 'Invalid signature' };
+  }
+  if (matchedPayload) {
+    logVerifyDebug('✅ HMAC MATCHED PAYLOAD:', matchedPayload);
   }
   logVerifyDebug(SKIP_HMAC ? '⚠️ HMAC BYPASSED VIA DEBUG FLAG' : '✅ PASSED: HMAC');
 

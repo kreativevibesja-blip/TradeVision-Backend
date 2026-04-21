@@ -4,7 +4,7 @@
 
 import crypto from 'crypto';
 
-const HMAC_SECRET = process.env.GOLDX_HMAC_SECRET || 'goldx-hmac-secret-change-me';
+const HMAC_SECRET = (process.env.GOLDX_HMAC_SECRET || 'goldx-hmac-secret-change-me').trim();
 const LICENSE_PEPPER = process.env.GOLDX_LICENSE_PEPPER || 'goldx-pepper-change-me';
 const AES_KEY = process.env.GOLDX_AES_KEY || crypto.randomBytes(32).toString('hex');
 const REPLAY_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
@@ -58,9 +58,16 @@ export function computeHmac(payload: string): string {
 
 /** Verify HMAC signature from EA */
 export function verifyHmac(payload: string, signature: string): boolean {
-  const expected = computeHmac(payload);
-  if (expected.length !== signature.length) return false;
-  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
+  const expected = computeHmac(payload).trim().toLowerCase();
+  const normalizedSignature = signature.trim().toLowerCase();
+
+  if (expected.length !== normalizedSignature.length) return false;
+
+  try {
+    return crypto.timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(normalizedSignature, 'hex'));
+  } catch {
+    return false;
+  }
 }
 
 /** Check if timestamp is within replay window */
