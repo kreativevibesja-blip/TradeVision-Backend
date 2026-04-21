@@ -179,6 +179,10 @@ function normalizeScannerSymbol(symbol: string): string {
   return symbol.trim().toUpperCase();
 }
 
+function usesDerivOnlyPriceFeed(symbol: string): boolean {
+  return VOLATILITY_SCANNER_SYMBOL_IDS.includes(normalizeScannerSymbol(symbol) as (typeof VOLATILITY_SCANNER_SYMBOL_IDS)[number]);
+}
+
 function getScannerSpreadThreshold(symbol: string, referencePrice: number): number {
   const normalized = normalizeScannerSymbol(symbol);
   if (normalized === 'XAUUSD') return 1.2;
@@ -2025,10 +2029,12 @@ async function scanSymbol(symbol: string, strategyMode: StrategyMode = 'standard
       return null;
     }
 
-    const liveQuote = await fetchLiveQuoteForSymbol(symbol).catch((error) => {
-      console.error(`[Scanner] Failed to fetch live quote for ${symbol}:`, error);
-      return null;
-    });
+    const liveQuote = usesDerivOnlyPriceFeed(symbol)
+      ? null
+      : await fetchLiveQuoteForSymbol(symbol).catch((error) => {
+          console.error(`[Scanner] Failed to fetch live quote for ${symbol}:`, error);
+          return null;
+        });
     const referencePrice = liveQuote?.price ?? candles[candles.length - 1].close;
     if (liveQuote && !isScannerSpreadAcceptable(symbol, liveQuote.spread, referencePrice)) {
       console.log(`[Scanner] ${symbol} rejected by spread filter (${liveQuote.spread.toFixed(5)})`);
