@@ -145,6 +145,11 @@ export interface GoldxSignal {
   reason: string;
   mode: GoldxMode;
   timestamp: string;
+  sessionType?: GoldxSessionStatus;
+  strategyName?: string;
+  sweepDetected?: boolean;
+  bosConfirmed?: boolean;
+  trendAligned?: boolean;
 }
 
 export interface GoldxVerifyRequest {

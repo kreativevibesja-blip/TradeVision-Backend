@@ -15,7 +15,7 @@ import type {
   GoldxSessionSettings,
   GoldxSessionStatus,
 } from './types';
-import { getModeConfig } from './licenseService';
+import { getModeConfig, insertAuditLog } from './licenseService';
 
 // ── Market Data Types ───────────────────────────────────────
 
@@ -43,6 +43,15 @@ interface RangeZone {
   high: number;
   low: number;
   size: number;
+}
+
+interface NySignalContext {
+  trend: 'buy' | 'sell' | null;
+  sweep: SweepResult | null;
+  bosLevel: number | null;
+  confidence: number;
+  confidenceBoost: number;
+  isNyOpenBoost: boolean;
 }
 
 // ── Config Loader ───────────────────────────────────────────
@@ -206,6 +215,25 @@ function getNewYorkHour(): number {
   return nyTime.getHours();
 }
 
+function getNewYorkTime(): Date {
+  const now = new Date();
+  return new Date(
+    now.toLocaleString('en-US', { timeZone: 'America/New_York' }),
+  );
+}
+
+function isNYSession(): boolean {
+  const nyTime = getNewYorkTime();
+  const hour = nyTime.getHours();
+  return hour >= 8 && hour < 17;
+}
+
+function isNYOpenBoostWindow(): boolean {
+  const nyTime = getNewYorkTime();
+  const hour = nyTime.getHours();
+  return hour >= 8 && hour < 10;
+}
+
 function isHourWithinWindow(hour: number, start: number, end: number): boolean {
   if (start === end) return true;
   if (start < end) return hour >= start && hour < end;
@@ -306,7 +334,7 @@ function applySessionModeConfig(
     },
     tradeControl: {
       ...tradeControl,
-      cooldownMinutes: Math.max(tradeControl.cooldownMinutes, 30),
+      cooldownMinutes: Math.max(tradeControl.cooldownMinutes, 45),
     },
   };
 }
@@ -382,6 +410,109 @@ function detectSweep(
   return null;
 }
 
+function getCandleBodySize(candle: Candle): number {
+  return Math.abs(candle.close - candle.open);
+}
+
+function getTrendDirection(candles: Candle[]): 'buy' | 'sell' | null {
+  if (candles.length < 200) return null;
+
+  const ema50 = calculateEMA(candles, 50);
+  const ema200 = calculateEMA(candles, 200);
+  const current = candles[candles.length - 1];
+
+  if (current.close > ema50 && current.close > ema200 && ema50 > ema200) {
+    return 'buy';
+  }
+
+  if (current.close < ema50 && current.close < ema200 && ema50 < ema200) {
+    return 'sell';
+  }
+
+  return null;
+}
+
+function detectRecentLiquiditySweep(candles: Candle[]): SweepResult | null {
+  if (candles.length < 8) return null;
+
+  const setupCandles = candles.slice(-8);
+  const trigger = setupCandles[setupCandles.length - 1];
+  const previous = setupCandles[setupCandles.length - 2];
+  const reference = setupCandles.slice(0, -2);
+
+  const priorLow = Math.min(...reference.map((c) => c.low));
+  const priorHigh = Math.max(...reference.map((c) => c.high));
+
+  if (previous.low < priorLow && trigger.close > trigger.open && trigger.close > previous.low) {
+    return {
+      direction: 'buy',
+      sweepLevel: previous.low,
+      confirmationClose: trigger.close,
+    };
+  }
+
+  if (previous.high > priorHigh && trigger.close < trigger.open && trigger.close < previous.high) {
+    return {
+      direction: 'sell',
+      sweepLevel: previous.high,
+      confirmationClose: trigger.close,
+    };
+  }
+
+  return null;
+}
+
+function detectBreakOfStructure(
+  candles: Candle[],
+  direction: 'buy' | 'sell',
+): { confirmed: boolean; level: number | null; strength: number } {
+  if (candles.length < 12) {
+    return { confirmed: false, level: null, strength: 0 };
+  }
+
+  const structureWindow = candles.slice(-12, -1);
+  const trigger = candles[candles.length - 1];
+
+  if (direction === 'buy') {
+    const recentHigh = Math.max(...structureWindow.map((c) => c.high));
+    return {
+      confirmed: trigger.close > recentHigh,
+      level: recentHigh,
+      strength: trigger.close - recentHigh,
+    };
+  }
+
+  const recentLow = Math.min(...structureWindow.map((c) => c.low));
+  return {
+    confirmed: trigger.close < recentLow,
+    level: recentLow,
+    strength: recentLow - trigger.close,
+  };
+}
+
+function computePullbackEntry(
+  direction: 'buy' | 'sell',
+  bosLevel: number,
+  currentBid: number,
+  currentAsk: number,
+  currentCandle: Candle,
+): { entry: number; usedPullback: boolean } {
+  const midpoint = (currentCandle.high + currentCandle.low) / 2;
+  const structureRetest = (bosLevel + midpoint) / 2;
+
+  if (direction === 'buy') {
+    const pullbackEntry = Math.min(currentAsk, Math.max(bosLevel, structureRetest));
+    return { entry: pullbackEntry, usedPullback: pullbackEntry < currentAsk };
+  }
+
+  const pullbackEntry = Math.max(currentBid, Math.min(bosLevel, structureRetest));
+  return { entry: pullbackEntry, usedPullback: pullbackEntry > currentBid };
+}
+
+async function isNearMajorNewsWindow(): Promise<boolean> {
+  return false;
+}
+
 // ── Filters ─────────────────────────────────────────────────
 
 function passesFilters(
@@ -428,11 +559,33 @@ function passesFilters(
 
 // ── Trade Control ───────────────────────────────────────────
 
-function passesTradeControl(
+async function getTodayOutcomeCounts(accountState: GoldxAccountState): Promise<{ wins: number; losses: number }> {
+  const dayStart = `${accountState.resetDate}T00:00:00.000Z`;
+  const { data } = await supabase
+    .from('goldx_trade_history')
+    .select('outcome')
+    .eq('license_id', accountState.licenseId)
+    .eq('mt5_account', accountState.mt5Account)
+    .gte('opened_at', dayStart)
+    .not('outcome', 'is', null);
+
+  const rows = (data ?? []) as Array<{ outcome: string | null }>;
+  return rows.reduce(
+    (acc, row) => {
+      if (row.outcome === 'tp') acc.wins += 1;
+      if (row.outcome === 'sl') acc.losses += 1;
+      return acc;
+    },
+    { wins: 0, losses: 0 },
+  );
+}
+
+async function passesTradeControl(
   accountState: GoldxAccountState,
   modeConfig: GoldxModeConfig,
   tradeControl: GoldxTradeControlConfig,
-): { pass: boolean; reason: string } {
+  activeSession: GoldxSessionStatus,
+): Promise<{ pass: boolean; reason: string }> {
   // Max trades per day
   if (accountState.tradesToday >= modeConfig.maxTrades) {
     return { pass: false, reason: `Max trades reached (${modeConfig.maxTrades}/day)` };
@@ -456,6 +609,16 @@ function passesTradeControl(
   // Drawdown stop
   if (tradeControl.dailyDrawdownStopPercent > 0 && accountState.drawdownToday >= tradeControl.dailyDrawdownStopPercent) {
     return { pass: false, reason: `Daily drawdown limit reached (${accountState.drawdownToday.toFixed(2)}%)` };
+  }
+
+  if (activeSession === 'day' || activeSession === 'newYork') {
+    const outcomes = await getTodayOutcomeCounts(accountState);
+    if (outcomes.wins >= 2) {
+      return { pass: false, reason: 'Day mode paused after 2 wins' };
+    }
+    if (outcomes.losses >= 2) {
+      return { pass: false, reason: 'Day mode paused after 2 losses' };
+    }
   }
 
   return { pass: true, reason: 'Trade control passed' };
@@ -514,6 +677,188 @@ function calculateLotSize(
   return Math.max(0.01, Math.round(lotSize * 100) / 100);
 }
 
+function buildNoSignal(
+  now: string,
+  mode: GoldxMode,
+  reason: string,
+  sessionType?: GoldxSessionStatus,
+  extras: Partial<GoldxSignal> = {},
+): GoldxSignal {
+  return {
+    action: 'none',
+    entry: null,
+    stopLoss: null,
+    takeProfit: null,
+    lotSize: null,
+    confidence: 0,
+    reason,
+    mode,
+    timestamp: now,
+    sessionType,
+    ...extras,
+  };
+}
+
+function buildNyConfidence(
+  trendAligned: boolean,
+  sweepDetected: boolean,
+  bosConfirmed: boolean,
+  riskReward: number,
+  isOpenBoost: boolean,
+  bosStrength: number,
+  atr: number,
+): { score: number; boost: number } {
+  let score = 0;
+
+  if (trendAligned) score += 30;
+  if (sweepDetected) score += 30;
+  if (bosConfirmed) score += 20;
+  if (riskReward >= 1.5) score += 20;
+
+  let boost = 0;
+  if (isOpenBoost && bosStrength > atr * 0.15) {
+    boost = 5;
+  }
+
+  return { score: Math.min(100, score + boost), boost };
+}
+
+async function generateNYSessionSignal(
+  candles: Candle[],
+  currentBid: number,
+  currentAsk: number,
+  accountBalance: number,
+  mode: GoldxMode,
+  modeConfig: GoldxModeConfig,
+  strategyConfig: GoldxStrategyConfig,
+  activeSession: GoldxSessionStatus,
+): Promise<GoldxSignal> {
+  const now = new Date().toISOString();
+  const sessionType = activeSession;
+  const noSignal = (reason: string, extras: Partial<GoldxSignal> = {}) =>
+    buildNoSignal(now, mode, reason, sessionType, { strategyName: 'ny-liquidity-bos', ...extras });
+
+  if (!isNYSession()) {
+    return noSignal('Outside New York session');
+  }
+
+  if (await isNearMajorNewsWindow()) {
+    return noSignal('Blocked near major news window');
+  }
+
+  if (candles.length < 220) {
+    return noSignal('Insufficient candle history for NY strategy');
+  }
+
+  const currentCandle = candles[candles.length - 1];
+  const previousCandle = candles[candles.length - 2];
+  const atr = calculateATR(candles);
+  const spreadPoints = (currentAsk - currentBid) * 10;
+  const candleBody = getCandleBodySize(currentCandle);
+  const trend = getTrendDirection(candles);
+
+  if (!trend) {
+    return noSignal('No clear M5/M15 trend alignment', { trendAligned: false });
+  }
+
+  if (spreadPoints > Math.min(strategyConfig.maxSpreadPoints, 18)) {
+    return noSignal('Spread too high for NY setup', { trendAligned: true });
+  }
+
+  if (atr <= 0) {
+    return noSignal('ATR unavailable for NY setup', { trendAligned: true });
+  }
+
+  if (candleBody > atr * 1.2 || getCandleBodySize(previousCandle) > atr * 1.35) {
+    return noSignal('News spike or oversized candle rejected', { trendAligned: true });
+  }
+
+  const sweep = detectRecentLiquiditySweep(candles);
+  if (!sweep || sweep.direction !== trend) {
+    return noSignal('No clean liquidity sweep aligned with trend', {
+      trendAligned: true,
+      sweepDetected: Boolean(sweep),
+    });
+  }
+
+  const bos = detectBreakOfStructure(candles, trend);
+  if (!bos.confirmed || bos.level == null) {
+    return noSignal('Break of structure not confirmed', {
+      trendAligned: true,
+      sweepDetected: true,
+      bosConfirmed: false,
+    });
+  }
+
+  const entryChoice = computePullbackEntry(trend, bos.level, currentBid, currentAsk, currentCandle);
+  const entry = entryChoice.entry;
+  const stopLoss = trend === 'buy'
+    ? sweep.sweepLevel - atr * 0.2
+    : sweep.sweepLevel + atr * 0.2;
+  const risk = Math.abs(entry - stopLoss);
+  if (risk <= 0) {
+    return noSignal('Invalid NY risk distance', {
+      trendAligned: true,
+      sweepDetected: true,
+      bosConfirmed: true,
+    });
+  }
+
+  const nyOpenBoost = isNYOpenBoostWindow();
+  const targetMultiplier = nyOpenBoost ? 1.8 : 1.6;
+  const takeProfit = trend === 'buy'
+    ? entry + risk * targetMultiplier
+    : entry - risk * targetMultiplier;
+  const reward = Math.abs(takeProfit - entry);
+  const riskReward = reward / risk;
+  const confidenceResult = buildNyConfidence(
+    true,
+    true,
+    true,
+    riskReward,
+    nyOpenBoost,
+    bos.strength,
+    atr,
+  );
+  const signalContext: NySignalContext = {
+    trend,
+    sweep,
+    bosLevel: bos.level,
+    confidence: confidenceResult.score,
+    confidenceBoost: confidenceResult.boost,
+    isNyOpenBoost: nyOpenBoost,
+  };
+
+  if (signalContext.confidence < 70) {
+    return noSignal('NY setup confidence below threshold', {
+      confidence: signalContext.confidence,
+      trendAligned: true,
+      sweepDetected: true,
+      bosConfirmed: true,
+    });
+  }
+
+  const lotSize = calculateLotSize(modeConfig.riskPercent, accountBalance, entry, stopLoss);
+  const entryLabel = entryChoice.usedPullback ? 'pullback' : 'immediate';
+
+  return {
+    action: trend,
+    entry: Math.round(entry * 100) / 100,
+    stopLoss: Math.round(stopLoss * 100) / 100,
+    takeProfit: Math.round(takeProfit * 100) / 100,
+    lotSize,
+    confidence: signalContext.confidence,
+    reason: `${trend.toUpperCase()} NY sweep+BOS ${entryLabel} entry at ${entry.toFixed(2)} with ${riskReward.toFixed(2)}R target`,
+    mode,
+    timestamp: now,
+    sessionType,
+    strategyName: 'ny-liquidity-bos',
+    trendAligned: true,
+    sweepDetected: true,
+    bosConfirmed: true,
+  };
+}
+
 // ── Main Signal Generator ───────────────────────────────────
 
 export async function generateSignal(
@@ -534,17 +879,8 @@ export async function generateSignal(
   const activeSession = getActiveTradingSession(sessionMode, sessionSettings);
   const { modeConfig, tradeControl } = applySessionModeConfig(baseModeConfig, baseTradeControl, activeSession);
 
-  const noSignal = (reason: string): GoldxSignal => ({
-    action: 'none',
-    entry: null,
-    stopLoss: null,
-    takeProfit: null,
-    lotSize: null,
-    confidence: 0,
-    reason,
-    mode,
-    timestamp: now,
-  });
+  const noSignal = (reason: string, extras: Partial<GoldxSignal> = {}): GoldxSignal =>
+    buildNoSignal(now, mode, reason, activeSession, extras);
 
   // Time filter
   if (activeSession === 'closed') {
@@ -552,9 +888,22 @@ export async function generateSignal(
   }
 
   // Trade control
-  const tcResult = passesTradeControl(accountState, modeConfig, tradeControl);
+  const tcResult = await passesTradeControl(accountState, modeConfig, tradeControl, activeSession);
   if (!tcResult.pass) {
     return noSignal(tcResult.reason);
+  }
+
+  if (activeSession === 'day' || activeSession === 'newYork') {
+    return generateNYSessionSignal(
+      candles,
+      currentBid,
+      currentAsk,
+      accountBalance,
+      mode,
+      modeConfig,
+      strategyConfig,
+      activeSession,
+    );
   }
 
   // Build market snapshot
@@ -624,6 +973,11 @@ export async function generateSignal(
     reason: `${sweep.direction.toUpperCase()} — Liquidity sweep at ${sweep.sweepLevel.toFixed(2)}, confirmation close at ${sweep.confirmationClose.toFixed(2)}`,
     mode,
     timestamp: now,
+    sessionType: activeSession,
+    strategyName: activeSession === 'night' ? 'night-range-sweep' : 'session-range-sweep',
+    sweepDetected: true,
+    bosConfirmed: false,
+    trendAligned: false,
   };
 }
 
@@ -646,5 +1000,16 @@ export async function recordTrade(
     tp_price: signal.takeProfit,
     lot_size: signal.lotSize,
     mode: signal.mode,
+  });
+
+  await insertAuditLog('goldx_signal_trade_recorded', {
+    licenseId,
+    meta: {
+      sessionType: signal.sessionType ?? null,
+      strategyName: signal.strategyName ?? null,
+      sweepDetected: signal.sweepDetected ?? false,
+      bosConfirmed: signal.bosConfirmed ?? false,
+      confidenceScore: signal.confidence,
+    },
   });
 }
