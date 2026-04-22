@@ -64,7 +64,29 @@ export interface GoldxAccountState {
   profitToday: number;
   drawdownToday: number;
   lastTradeAt: string | null;
+  maxSimultaneousTrades: number;
+  currentOpenTrades: number;
+  dailyTargetPercent: number;
+  lastBatchId: string | null;
+  lastBatchClosedAt: string | null;
+  consecutiveLosingBatches: number;
+  pausedUntil: string | null;
   resetDate: string;
+}
+
+export interface GoldxScalpEntry {
+  lot: number;
+  entry: number;
+  tp: number;
+  sl: number;
+}
+
+export interface GoldxRuntimeTradeState {
+  currentOpenTrades?: number;
+  tradesOpenedLastMinute?: number;
+  profitToday?: number;
+  lastBatchClosedAt?: string | null;
+  losingBatchesInRow?: number;
 }
 
 export interface GoldxAuditLog {
@@ -141,6 +163,11 @@ export interface GoldxSignal {
   stopLoss: number | null;
   takeProfit: number | null;
   lotSize: number | null;
+  entries?: GoldxScalpEntry[];
+  batchId?: string | null;
+  reentryAllowed?: boolean;
+  maxSimultaneousTrades?: number;
+  currentOpenTrades?: number;
   confidence: number;
   reason: string;
   mode: GoldxMode;

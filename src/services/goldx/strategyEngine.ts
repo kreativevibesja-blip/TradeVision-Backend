@@ -7,6 +7,8 @@ import type {
   GoldxAccountState,
   GoldxMode,
   GoldxModeConfig,
+  GoldxRuntimeTradeState,
+  GoldxScalpEntry,
   GoldxSessionMode,
   GoldxSessionStatus,
   GoldxSignal,
@@ -59,6 +61,12 @@ interface EngineTradeControlConfig {
   nightCooldownMinutes: number;
   dayMaxTradesPerDay: number;
   nightMaxTradesPerDay: number;
+  fastReentryCooldownSeconds: number;
+  hybridReentryCooldownSeconds: number;
+  propReentryCooldownSeconds: number;
+  maxTradesPerMinute: number;
+  maxLossPerBatchPercent: number;
+  losingBatchPauseMinutes: number;
 }
 
 interface MarketSnapshot {
@@ -103,7 +111,15 @@ const DEFAULT_TRADE_CONTROL: EngineTradeControlConfig = {
   nightCooldownMinutes: 20,
   dayMaxTradesPerDay: 3,
   nightMaxTradesPerDay: 6,
+  fastReentryCooldownSeconds: 30,
+  hybridReentryCooldownSeconds: 45,
+  propReentryCooldownSeconds: 60,
+  maxTradesPerMinute: 3,
+  maxLossPerBatchPercent: 1,
+  losingBatchPauseMinutes: 60,
 };
+
+const ENTRY_SPLITS = [0.3, 0.25, 0.2, 0.15, 0.1];
 
 function asNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
@@ -168,7 +184,21 @@ async function getTradeControlConfig(): Promise<EngineTradeControlConfig> {
     nightCooldownMinutes: asNumber(value.nightCooldownMinutes, DEFAULT_TRADE_CONTROL.nightCooldownMinutes),
     dayMaxTradesPerDay: asNumber(value.dayMaxTradesPerDay, DEFAULT_TRADE_CONTROL.dayMaxTradesPerDay),
     nightMaxTradesPerDay: asNumber(value.nightMaxTradesPerDay, DEFAULT_TRADE_CONTROL.nightMaxTradesPerDay),
+    fastReentryCooldownSeconds: asNumber(value.fastReentryCooldownSeconds, DEFAULT_TRADE_CONTROL.fastReentryCooldownSeconds),
+    hybridReentryCooldownSeconds: asNumber(value.hybridReentryCooldownSeconds, DEFAULT_TRADE_CONTROL.hybridReentryCooldownSeconds),
+    propReentryCooldownSeconds: asNumber(value.propReentryCooldownSeconds, DEFAULT_TRADE_CONTROL.propReentryCooldownSeconds),
+    maxTradesPerMinute: asNumber(value.maxTradesPerMinute, DEFAULT_TRADE_CONTROL.maxTradesPerMinute),
+    maxLossPerBatchPercent: asNumber(value.maxLossPerBatchPercent, DEFAULT_TRADE_CONTROL.maxLossPerBatchPercent),
+    losingBatchPauseMinutes: asNumber(value.losingBatchPauseMinutes, DEFAULT_TRADE_CONTROL.losingBatchPauseMinutes),
   };
+}
+
+function roundPrice(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+function roundLot(value: number): number {
+  return Math.max(0.01, Math.round(value * 100) / 100);
 }
 
 function calculateATR(candles: Candle[], period = 14): number {
@@ -299,6 +329,9 @@ function buildNoSignal(
     stopLoss: null,
     takeProfit: null,
     lotSize: null,
+    entries: [],
+    batchId: null,
+    reentryAllowed: false,
     confidence: 0,
     reason,
     mode,
@@ -310,9 +343,9 @@ function buildNoSignal(
 }
 
 function clampRiskPercent(mode: GoldxMode, configuredRisk: number): number {
-  if (mode === 'fast') return clamp(configuredRisk, 1, 2);
+  if (mode === 'fast') return clamp(configuredRisk, 0.8, 1);
   if (mode === 'prop') return clamp(configuredRisk, 0.3, 0.7);
-  return clamp(configuredRisk, 0.7, 1.2);
+  return clamp(configuredRisk, 0.6, 1);
 }
 
 function calculateLotSize(
@@ -330,6 +363,67 @@ function calculateLotSize(
   const pipValue = 1;
   const lotSize = riskAmount / (pipDistance * 100 * pipValue);
   return Math.max(0.01, Math.round(lotSize * 100) / 100);
+}
+
+function getModeEntryCap(mode: GoldxMode): number {
+  if (mode === 'fast') return 5;
+  if (mode === 'prop') return 3;
+  return 4;
+}
+
+function getModeReentryCooldownSeconds(mode: GoldxMode, tradeControl: EngineTradeControlConfig): number {
+  if (mode === 'fast') return tradeControl.fastReentryCooldownSeconds;
+  if (mode === 'prop') return tradeControl.propReentryCooldownSeconds;
+  return tradeControl.hybridReentryCooldownSeconds;
+}
+
+function normalizeRuntimeState(
+  accountState: GoldxAccountState,
+  runtimeState?: GoldxRuntimeTradeState,
+): Required<GoldxRuntimeTradeState> {
+  return {
+    currentOpenTrades: runtimeState?.currentOpenTrades ?? accountState.currentOpenTrades ?? 0,
+    tradesOpenedLastMinute: runtimeState?.tradesOpenedLastMinute ?? 0,
+    profitToday: runtimeState?.profitToday ?? accountState.profitToday,
+    lastBatchClosedAt: runtimeState?.lastBatchClosedAt ?? accountState.lastBatchClosedAt ?? null,
+    losingBatchesInRow: runtimeState?.losingBatchesInRow ?? accountState.consecutiveLosingBatches ?? 0,
+  };
+}
+
+function buildBatchId(licenseId: string): string {
+  return `batch_${licenseId.slice(0, 8)}_${Date.now().toString(36)}`;
+}
+
+function buildScalpEntries(
+  action: 'buy' | 'sell',
+  baseLot: number,
+  entry: number,
+  stopLoss: number,
+  takeProfit: number,
+  maxEntries: number,
+): GoldxScalpEntry[] {
+  const selectedWeights = ENTRY_SPLITS.slice(0, maxEntries);
+  const totalWeight = selectedWeights.reduce((sum, value) => sum + value, 0);
+  return selectedWeights.map((weight, index) => {
+    const normalizedWeight = weight / totalWeight;
+    const drift = action === 'buy' ? index * 0.02 : index * -0.02;
+    return {
+      lot: roundLot(baseLot * normalizedWeight),
+      entry: roundPrice(entry + drift),
+      tp: roundPrice(takeProfit),
+      sl: roundPrice(stopLoss),
+    };
+  });
+}
+
+function canReenter(
+  mode: GoldxMode,
+  tradeControl: EngineTradeControlConfig,
+  runtimeState: Required<GoldxRuntimeTradeState>,
+): boolean {
+  if (!runtimeState.lastBatchClosedAt) return true;
+  const elapsedMs = Date.now() - new Date(runtimeState.lastBatchClosedAt).getTime();
+  return elapsedMs >= getModeReentryCooldownSeconds(mode, tradeControl) * 1000;
 }
 
 function computeConfidence(
@@ -371,6 +465,7 @@ async function passesTradeControl(
   accountState: GoldxAccountState,
   tradeControl: EngineTradeControlConfig,
   session: BrokerSession,
+  runtimeState: Required<GoldxRuntimeTradeState>,
 ): Promise<{ pass: boolean; reason: string }> {
   const maxTrades = session === 'day'
     ? tradeControl.dayMaxTradesPerDay
@@ -378,6 +473,29 @@ async function passesTradeControl(
 
   if (accountState.tradesToday >= maxTrades) {
     return { pass: false, reason: `Max trades reached (${maxTrades}/day)` };
+  }
+
+  if (runtimeState.currentOpenTrades >= (accountState.maxSimultaneousTrades || 5)) {
+    return { pass: false, reason: `Open trade cap reached (${runtimeState.currentOpenTrades}/${accountState.maxSimultaneousTrades || 5})` };
+  }
+
+  if (runtimeState.tradesOpenedLastMinute >= tradeControl.maxTradesPerMinute) {
+    return { pass: false, reason: `Per-minute trade cap reached (${tradeControl.maxTradesPerMinute})` };
+  }
+
+  if (runtimeState.profitToday >= (accountState.dailyTargetPercent || tradeControl.dailyProfitStopPercent)) {
+    return { pass: false, reason: `Daily target reached (${runtimeState.profitToday.toFixed(2)}%)` };
+  }
+
+  if (accountState.pausedUntil && new Date(accountState.pausedUntil).getTime() > Date.now()) {
+    return { pass: false, reason: `Loss pause active until ${accountState.pausedUntil}` };
+  }
+
+  if (runtimeState.losingBatchesInRow >= 2 && runtimeState.lastBatchClosedAt) {
+    const elapsedMs = Date.now() - new Date(runtimeState.lastBatchClosedAt).getTime();
+    if (elapsedMs < tradeControl.losingBatchPauseMinutes * 60 * 1000) {
+      return { pass: false, reason: 'Paused after 2 losing batches in a row' };
+    }
   }
 
   const cooldownMinutes = session === 'day'
@@ -418,6 +536,9 @@ function buildFallbackSignal(
   session: BrokerSession,
   snapshot: MarketSnapshot,
   config: EngineStrategyConfig,
+  accountState: GoldxAccountState,
+  tradeControl: EngineTradeControlConfig,
+  runtimeState: Required<GoldxRuntimeTradeState>,
 ): GoldxSignal {
   const [minConfidence, maxConfidence] = config.fallbackConfidenceRange;
   const bullishTrend = snapshot.ema20 >= snapshot.ema50;
@@ -426,11 +547,12 @@ function buildFallbackSignal(
     : (snapshot.range && snapshot.mid <= snapshot.range.midpoint ? 'buy' : 'sell');
 
   const entry = action === 'buy' ? snapshot.ask : snapshot.bid;
-  const fallbackRisk = Math.max(snapshot.atr * 0.6, 0.8);
+  const tpDistance = clamp(snapshot.atr * (mode === 'fast' ? 0.25 : mode === 'prop' ? 0.35 : 0.3), 2, 5);
+  const fallbackRisk = Math.max(snapshot.atr * 0.8, tpDistance * 1.5);
   const stopLoss = action === 'buy' ? entry - fallbackRisk : entry + fallbackRisk;
   const takeProfit = action === 'buy'
-    ? entry + fallbackRisk * 1.35
-    : entry - fallbackRisk * 1.35;
+    ? entry + tpDistance
+    : entry - tpDistance;
   const confidence = clamp(
     computeConfidence({
       trendAlignment: bullishTrend === (action === 'buy'),
@@ -441,13 +563,33 @@ function buildFallbackSignal(
     minConfidence,
     maxConfidence,
   );
+  const availableSlots = Math.max(0, Math.min(
+    getModeEntryCap(mode),
+    (accountState.maxSimultaneousTrades || 5) - runtimeState.currentOpenTrades,
+  ));
+  const entries = availableSlots > 0
+    ? buildScalpEntries(
+        action,
+        calculateLotSize(mode, modeConfig.riskPercent, accountBalance, entry, stopLoss),
+        entry,
+        stopLoss,
+        takeProfit,
+        availableSlots,
+      )
+    : [];
+  const batchId = entries.length > 0 ? buildBatchId(accountState.licenseId) : null;
 
   return {
     action,
-    entry: Math.round(entry * 100) / 100,
-    stopLoss: Math.round(stopLoss * 100) / 100,
-    takeProfit: Math.round(takeProfit * 100) / 100,
-    lotSize: calculateLotSize(mode, modeConfig.riskPercent, accountBalance, entry, stopLoss),
+    entry: roundPrice(entry),
+    stopLoss: roundPrice(stopLoss),
+    takeProfit: roundPrice(takeProfit),
+    lotSize: entries[0]?.lot ?? calculateLotSize(mode, modeConfig.riskPercent, accountBalance, entry, stopLoss),
+    entries,
+    batchId,
+    reentryAllowed: canReenter(mode, tradeControl, runtimeState),
+    maxSimultaneousTrades: accountState.maxSimultaneousTrades || 5,
+    currentOpenTrades: runtimeState.currentOpenTrades,
     confidence,
     reason: session === 'day'
       ? 'Fallback momentum trade in clean market'
@@ -470,6 +612,9 @@ function runNightStrategy(
   accountBalance: number,
   snapshot: MarketSnapshot,
   config: EngineStrategyConfig,
+  accountState: GoldxAccountState,
+  tradeControl: EngineTradeControlConfig,
+  runtimeState: Required<GoldxRuntimeTradeState>,
 ): GoldxSignal {
   if (!snapshot.range) {
     return buildNoSignal(now, mode, 'night', 'Night range unavailable', { strategyName: 'night-mean-reversion' });
@@ -485,7 +630,7 @@ function runNightStrategy(
 
   if (!spreadOkay || !atrOkay) {
     if (spreadOkay || atrOkay) {
-      return buildFallbackSignal(now, mode, modeConfig, accountBalance, 'night', snapshot, config);
+      return buildFallbackSignal(now, mode, modeConfig, accountBalance, 'night', snapshot, config, accountState, tradeControl, runtimeState);
     }
     return buildNoSignal(now, mode, 'night', spreadOkay ? 'ATR too high for night range' : 'Spread too high for night range', {
       strategyName: 'night-mean-reversion',
@@ -493,28 +638,40 @@ function runNightStrategy(
   }
 
   if (!nearHigh && !nearLow) {
-    return buildFallbackSignal(now, mode, modeConfig, accountBalance, 'night', snapshot, config);
+    return buildFallbackSignal(now, mode, modeConfig, accountBalance, 'night', snapshot, config, accountState, tradeControl, runtimeState);
   }
 
   const action = nearLow ? 'buy' : 'sell';
   const entry = action === 'buy' ? snapshot.ask : snapshot.bid;
-  const stopLoss = action === 'buy'
-    ? range.low - snapshot.atr * config.nightSlBufferAtr
-    : range.high + snapshot.atr * config.nightSlBufferAtr;
-  const takeProfit = action === 'buy'
-    ? Math.min(range.midpoint, snapshot.ema20 || range.midpoint)
-    : range.midpoint;
+  const tpDistance = clamp(snapshot.atr * 0.3, 2, 5);
+  const slDistance = Math.max(snapshot.atr * 0.8, tpDistance * 1.5);
+  const stopLoss = action === 'buy' ? entry - slDistance : entry + slDistance;
+  const takeProfit = action === 'buy' ? entry + tpDistance : entry - tpDistance;
   const confidence = computeConfidence({
     lowSpread: snapshot.spread <= config.nightMaxSpreadPoints * 0.7,
     cleanRange: true,
   });
+  const availableSlots = Math.max(0, Math.min(
+    getModeEntryCap(mode),
+    (accountState.maxSimultaneousTrades || 5) - runtimeState.currentOpenTrades,
+  ));
+  const baseLot = calculateLotSize(mode, modeConfig.riskPercent, accountBalance, entry, stopLoss);
+  const entries = availableSlots > 0
+    ? buildScalpEntries(action, baseLot, entry, stopLoss, takeProfit, availableSlots)
+    : [];
+  const batchId = entries.length > 0 ? buildBatchId(accountState.licenseId) : null;
 
   return {
     action,
-    entry: Math.round(entry * 100) / 100,
-    stopLoss: Math.round(stopLoss * 100) / 100,
-    takeProfit: Math.round(takeProfit * 100) / 100,
-    lotSize: calculateLotSize(mode, modeConfig.riskPercent, accountBalance, entry, stopLoss),
+    entry: roundPrice(entry),
+    stopLoss: roundPrice(stopLoss),
+    takeProfit: roundPrice(takeProfit),
+    lotSize: entries[0]?.lot ?? baseLot,
+    entries,
+    batchId,
+    reentryAllowed: canReenter(mode, tradeControl, runtimeState),
+    maxSimultaneousTrades: accountState.maxSimultaneousTrades || 5,
+    currentOpenTrades: runtimeState.currentOpenTrades,
     confidence,
     reason: action === 'buy'
       ? 'Night mean reversion buy near range low'
@@ -537,6 +694,9 @@ function runDayStrategy(
   accountBalance: number,
   snapshot: MarketSnapshot,
   config: EngineStrategyConfig,
+  accountState: GoldxAccountState,
+  tradeControl: EngineTradeControlConfig,
+  runtimeState: Required<GoldxRuntimeTradeState>,
 ): GoldxSignal {
   const lookback = Math.max(5, config.dayBreakoutLookbackCandles);
   const structureCandles = snapshot.candles.slice(-(lookback + 1), -1);
@@ -563,7 +723,7 @@ function runDayStrategy(
 
   if (!lowSpread || !atrSane) {
     if (lowSpread || atrSane) {
-      return buildFallbackSignal(now, mode, modeConfig, accountBalance, 'day', snapshot, config);
+      return buildFallbackSignal(now, mode, modeConfig, accountBalance, 'day', snapshot, config, accountState, tradeControl, runtimeState);
     }
     return buildNoSignal(now, mode, 'day', lowSpread ? 'ATR sanity check failed' : 'Spread too high for day breakout', {
       strategyName: 'day-breakout-momentum',
@@ -572,7 +732,7 @@ function runDayStrategy(
   }
 
   if (!action || !breakoutStrength) {
-    return buildFallbackSignal(now, mode, modeConfig, accountBalance, 'day', snapshot, config);
+    return buildFallbackSignal(now, mode, modeConfig, accountBalance, 'day', snapshot, config, accountState, tradeControl, runtimeState);
   }
 
   const entry = action === 'buy' ? snapshot.ask : snapshot.bid;
@@ -591,22 +751,34 @@ function runDayStrategy(
     });
   }
 
-  const rrTarget = breakoutStrength ? config.dayRiskRewardMax : config.dayRiskRewardMin;
-  const takeProfit = action === 'buy'
-    ? entry + risk * rrTarget
-    : entry - risk * rrTarget;
+  const tpDistance = clamp(snapshot.atr * (mode === 'fast' ? 0.25 : mode === 'prop' ? 0.35 : 0.3), 2, 5);
+  const takeProfit = action === 'buy' ? entry + tpDistance : entry - tpDistance;
   const confidence = computeConfidence({
     trendAlignment: true,
     lowSpread: snapshot.spread <= config.dayMaxSpreadPoints * 0.75,
     strongBreakout: breakoutStrength,
   });
+  const availableSlots = Math.max(0, Math.min(
+    getModeEntryCap(mode),
+    (accountState.maxSimultaneousTrades || 5) - runtimeState.currentOpenTrades,
+  ));
+  const baseLot = calculateLotSize(mode, modeConfig.riskPercent, accountBalance, entry, stopLoss);
+  const entries = availableSlots > 0
+    ? buildScalpEntries(action, baseLot, entry, stopLoss, takeProfit, availableSlots)
+    : [];
+  const batchId = entries.length > 0 ? buildBatchId(accountState.licenseId) : null;
 
   return {
     action,
-    entry: Math.round(entry * 100) / 100,
-    stopLoss: Math.round(stopLoss * 100) / 100,
-    takeProfit: Math.round(takeProfit * 100) / 100,
-    lotSize: calculateLotSize(mode, modeConfig.riskPercent, accountBalance, entry, stopLoss),
+    entry: roundPrice(entry),
+    stopLoss: roundPrice(stopLoss),
+    takeProfit: roundPrice(takeProfit),
+    lotSize: entries[0]?.lot ?? baseLot,
+    entries,
+    batchId,
+    reentryAllowed: canReenter(mode, tradeControl, runtimeState),
+    maxSimultaneousTrades: accountState.maxSimultaneousTrades || 5,
+    currentOpenTrades: runtimeState.currentOpenTrades,
     confidence,
     reason: action === 'buy'
       ? 'Day momentum breakout buy above recent high'
@@ -628,6 +800,7 @@ export async function generateSignal(
   currentBid: number,
   currentAsk: number,
   accountBalance: number = 10000,
+  runtimeTradeState?: GoldxRuntimeTradeState,
 ): Promise<GoldxSignal> {
   const now = new Date().toISOString();
   const mode = accountState.mode;
@@ -641,6 +814,7 @@ export async function generateSignal(
 
   const brokerSession = getSessionType(strategyConfig);
   const session = resolveAllowedSession(sessionMode, brokerSession);
+  const normalizedRuntimeState = normalizeRuntimeState(accountState, runtimeTradeState);
   const noSignal = (reason: string, extras: Partial<GoldxSignal> = {}): GoldxSignal =>
     buildNoSignal(now, mode, session, reason, extras);
 
@@ -648,9 +822,18 @@ export async function generateSignal(
     return noSignal('Outside configured trading session', { strategyName: 'session-router' });
   }
 
-  const tradeControlCheck = await passesTradeControl(accountState, tradeControl, session);
+  const tradeControlCheck = await passesTradeControl(accountState, tradeControl, session, normalizedRuntimeState);
   if (!tradeControlCheck.pass) {
     return noSignal(tradeControlCheck.reason, { strategyName: 'trade-control' });
+  }
+
+  if (!canReenter(mode, tradeControl, normalizedRuntimeState)) {
+    return noSignal('Re-entry cooldown active', {
+      strategyName: 'reentry-guard',
+      reentryAllowed: false,
+      currentOpenTrades: normalizedRuntimeState.currentOpenTrades,
+      maxSimultaneousTrades: accountState.maxSimultaneousTrades || 5,
+    });
   }
 
   if (!candles.length) {
@@ -659,10 +842,16 @@ export async function generateSignal(
 
   const snapshot = buildSnapshot(candles, currentBid, currentAsk, strategyConfig);
   const decision = session === 'night'
-    ? runNightStrategy(now, mode, baseModeConfig, accountBalance, snapshot, strategyConfig)
-    : runDayStrategy(now, mode, baseModeConfig, accountBalance, snapshot, strategyConfig);
+    ? runNightStrategy(now, mode, baseModeConfig, accountBalance, snapshot, strategyConfig, accountState, tradeControl, normalizedRuntimeState)
+    : runDayStrategy(now, mode, baseModeConfig, accountBalance, snapshot, strategyConfig, accountState, tradeControl, normalizedRuntimeState);
 
   logDebug(strategyConfig, snapshot, session, `${decision.action}:${decision.reason}`);
+  console.log('SCALP ENGINE', {
+    batchId: decision.batchId ?? null,
+    openTrades: normalizedRuntimeState.currentOpenTrades,
+    profitToday: normalizedRuntimeState.profitToday,
+    reentryAllowed: decision.reentryAllowed ?? false,
+  });
   return decision;
 }
 
@@ -673,17 +862,49 @@ export async function recordTrade(
 ): Promise<void> {
   if (signal.action === 'none') return;
 
-  await supabase.from('goldx_trade_history').insert({
-    license_id: licenseId,
-    mt5_account: mt5Account,
-    symbol: 'XAUUSD',
-    direction: signal.action,
-    entry_price: signal.entry,
-    sl_price: signal.stopLoss,
-    tp_price: signal.takeProfit,
-    lot_size: signal.lotSize,
-    mode: signal.mode,
-  });
+  const entries = signal.entries?.length
+    ? signal.entries
+    : (signal.entry != null && signal.stopLoss != null && signal.takeProfit != null && signal.lotSize != null)
+      ? [{ lot: signal.lotSize, entry: signal.entry, tp: signal.takeProfit, sl: signal.stopLoss }]
+      : [];
+
+  if (!entries.length) return;
+
+  await supabase.from('goldx_trade_history').insert(
+    entries.map((entry, index) => ({
+      license_id: licenseId,
+      mt5_account: mt5Account,
+      symbol: 'XAUUSD',
+      direction: signal.action,
+      entry_price: entry.entry,
+      sl_price: entry.sl,
+      tp_price: entry.tp,
+      lot_size: entry.lot,
+      mode: signal.mode,
+      batch_id: signal.batchId ?? null,
+      batch_index: index + 1,
+    })),
+  );
+
+  const { data: state } = await supabase
+    .from('goldx_account_state')
+    .select('id, trades_today, current_open_trades')
+    .eq('license_id', licenseId)
+    .eq('mt5_account', mt5Account)
+    .maybeSingle();
+
+  if (state) {
+    await supabase
+      .from('goldx_account_state')
+      .update({
+        trades_today: (Number(state.trades_today ?? 0) + entries.length),
+        current_open_trades: Number(state.current_open_trades ?? 0) + entries.length,
+        last_trade_at: new Date().toISOString(),
+        last_batch_id: signal.batchId ?? null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', state.id);
+  }
 
   await markOnboardingStateByLicenseId(licenseId, { setupCompleted: true });
 
@@ -693,6 +914,8 @@ export async function recordTrade(
       session: signal.session ?? null,
       sessionType: signal.sessionType ?? null,
       strategyName: signal.strategyName ?? null,
+      batchId: signal.batchId ?? null,
+      entryCount: entries.length,
       sweepDetected: signal.sweepDetected ?? false,
       bosConfirmed: signal.bosConfirmed ?? false,
       confidenceScore: signal.confidence,

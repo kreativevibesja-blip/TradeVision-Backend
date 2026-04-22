@@ -42,7 +42,7 @@ import {
 import { computeHmac, getHmacSecret } from '../services/goldx/crypto';
 import { generateSignal, getCurrentSessionStatus, recordTrade } from '../services/goldx/strategyEngine';
 import { createOrder, captureOrder } from '../services/paypalService';
-import type { GoldxVerifyRequest, GoldxMode, GoldxSessionMode } from '../services/goldx/types';
+import type { GoldxVerifyRequest, GoldxMode, GoldxSessionMode, GoldxRuntimeTradeState } from '../services/goldx/types';
 
 // ── Public ──────────────────────────────────────────────────
 
@@ -177,11 +177,26 @@ export const getSignalHandler = async (req: GoldxSessionRequest, res: Response) 
       bid?: number;
       ask?: number;
       accountBalance?: number;
+      currentOpenTrades?: number;
+      tradesOpenedLastMinute?: number;
+      profitToday?: number;
+      lastBatchClosedAt?: string | null;
+      losingBatchesInRow?: number;
     };
 
     if (!candles?.length || !bid || !ask) {
       return res.status(400).json({ error: 'Market data required (candles, bid, ask)' });
     }
+
+    const runtimeTradeState: GoldxRuntimeTradeState = {
+      currentOpenTrades: typeof req.body.currentOpenTrades === 'number' ? req.body.currentOpenTrades : undefined,
+      tradesOpenedLastMinute: typeof req.body.tradesOpenedLastMinute === 'number' ? req.body.tradesOpenedLastMinute : undefined,
+      profitToday: typeof req.body.profitToday === 'number' ? req.body.profitToday : undefined,
+      lastBatchClosedAt: typeof req.body.lastBatchClosedAt === 'string' || req.body.lastBatchClosedAt === null
+        ? req.body.lastBatchClosedAt
+        : undefined,
+      losingBatchesInRow: typeof req.body.losingBatchesInRow === 'number' ? req.body.losingBatchesInRow : undefined,
+    };
 
     const signal = await generateSignal(
       accountState,
@@ -189,6 +204,7 @@ export const getSignalHandler = async (req: GoldxSessionRequest, res: Response) 
       bid,
       ask,
       accountBalance ?? 10000,
+      runtimeTradeState,
     );
 
     // Record trade if signal is actionable
