@@ -145,6 +145,7 @@ export interface GoldxSignal {
   reason: string;
   mode: GoldxMode;
   timestamp: string;
+  session?: 'night' | 'day' | 'off';
   sessionType?: GoldxSessionStatus;
   strategyName?: string;
   sweepDetected?: boolean;
