@@ -49,6 +49,11 @@ const DEFAULT_SUPPORT_WHATSAPP_NUMBER = '18762797956';
 const DEFAULT_SUPPORT_WHATSAPP_MESSAGE = 'Hi TradeVision AI, I need support.';
 
 const VALID_ANNOUNCEMENT_TYPES: AnnouncementType[] = ['update', 'maintenance', 'discount', 'new_feature', 'security', 'event'];
+const VALID_ANNOUNCEMENT_TARGET_PLANS = ['PRO', 'TOP_TIER', 'GOLDX'] as const;
+type AnnouncementTargetPlan = typeof VALID_ANNOUNCEMENT_TARGET_PLANS[number];
+
+const isAnnouncementTargetPlan = (value: unknown): value is AnnouncementTargetPlan =>
+  typeof value === 'string' && (VALID_ANNOUNCEMENT_TARGET_PLANS as readonly string[]).includes(value);
 
 const parseAnnouncementContent = (content: string): AnnouncementContentPayload => {
   try {
@@ -60,7 +65,7 @@ const parseAnnouncementContent = (content: string): AnnouncementContentPayload =
         expiresAt: typeof parsed.expiresAt === 'string' && parsed.expiresAt.trim().length > 0 ? parsed.expiresAt : null,
         type: VALID_ANNOUNCEMENT_TYPES.includes(parsed.type as AnnouncementType) ? (parsed.type as AnnouncementType) : undefined,
         couponCode: typeof parsed.couponCode === 'string' && parsed.couponCode.trim().length > 0 ? parsed.couponCode : null,
-        targetPlan: parsed.targetPlan === 'PRO' || parsed.targetPlan === 'TOP_TIER' ? parsed.targetPlan : null,
+        targetPlan: isAnnouncementTargetPlan(parsed.targetPlan) ? parsed.targetPlan : null,
       };
     }
   } catch {
@@ -642,7 +647,7 @@ export const createAnnouncement = async (req: Request, res: Response) => {
         expiresAt: getExpiryFromRequest(durationValue, durationUnit),
         type: announcementType,
         couponCode: announcementType === 'discount' && typeof couponCode === 'string' ? couponCode.trim().toUpperCase() : null,
-        targetPlan: targetPlan === 'PRO' || targetPlan === 'TOP_TIER' ? targetPlan : null,
+        targetPlan: isAnnouncementTargetPlan(targetPlan) ? targetPlan : null,
       }),
     });
     return res.json({ announcement: mapAnnouncementRecord(announcement) });
@@ -663,7 +668,7 @@ export const updateAnnouncement = async (req: Request, res: Response) => {
             expiresAt: clearExpiry ? null : getExpiryFromRequest(durationValue, durationUnit),
             type: announcementType,
             couponCode: announcementType === 'discount' && typeof couponCode === 'string' ? couponCode.trim().toUpperCase() : null,
-            targetPlan: targetPlan === 'PRO' || targetPlan === 'TOP_TIER' ? targetPlan : null,
+            targetPlan: isAnnouncementTargetPlan(targetPlan) ? targetPlan : null,
           })
         : undefined;
     const announcement = await updateAnnouncementRecord(id, {
