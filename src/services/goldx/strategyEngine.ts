@@ -1,5 +1,5 @@
 // ============================================================
-// GoldX — XAUUSD Night Scalping Strategy Engine
+// GoldX — XAUUSD Session-Based Strategy Engine
 // ============================================================
 
 import { supabase } from '../../lib/supabase';
@@ -10,6 +10,10 @@ import type {
   GoldxStrategyConfig,
   GoldxTradeControlConfig,
   GoldxAccountState,
+  GoldxFilterStrictness,
+  GoldxSessionMode,
+  GoldxSessionSettings,
+  GoldxSessionStatus,
 } from './types';
 import { getModeConfig } from './licenseService';
 
@@ -77,6 +81,73 @@ async function getTradeControlConfig(): Promise<GoldxTradeControlConfig> {
   };
 }
 
+const DEFAULT_SESSION_SETTINGS: GoldxSessionSettings = {
+  daySession: { start: 8, end: 17 },
+  nightSession: { start: 0, end: 6 },
+  asianSession: { start: 19, end: 4 },
+  londonSession: { start: 3, end: 12 },
+  newYorkSession: { start: 8, end: 17 },
+  dayTradingEnabled: true,
+  asianTradingEnabled: true,
+  londonTradingEnabled: true,
+  newYorkTradingEnabled: true,
+};
+
+async function getSessionSettings(): Promise<GoldxSessionSettings> {
+  const { data } = await supabase
+    .from('goldx_settings')
+    .select('value')
+    .eq('key', 'sessionSchedule')
+    .single();
+
+  const raw = data?.value;
+  if (!raw || typeof raw !== 'object') {
+    return DEFAULT_SESSION_SETTINGS;
+  }
+
+  const value = raw as Record<string, unknown>;
+  const daySession = value.daySession as Record<string, unknown> | undefined;
+  const nightSession = value.nightSession as Record<string, unknown> | undefined;
+  const asianSession = value.asianSession as Record<string, unknown> | undefined;
+  const londonSession = value.londonSession as Record<string, unknown> | undefined;
+  const newYorkSession = value.newYorkSession as Record<string, unknown> | undefined;
+
+  return {
+    daySession: {
+      start: typeof daySession?.start === 'number' ? daySession.start : DEFAULT_SESSION_SETTINGS.daySession.start,
+      end: typeof daySession?.end === 'number' ? daySession.end : DEFAULT_SESSION_SETTINGS.daySession.end,
+    },
+    nightSession: {
+      start: typeof nightSession?.start === 'number' ? nightSession.start : DEFAULT_SESSION_SETTINGS.nightSession.start,
+      end: typeof nightSession?.end === 'number' ? nightSession.end : DEFAULT_SESSION_SETTINGS.nightSession.end,
+    },
+    asianSession: {
+      start: typeof asianSession?.start === 'number' ? asianSession.start : DEFAULT_SESSION_SETTINGS.asianSession.start,
+      end: typeof asianSession?.end === 'number' ? asianSession.end : DEFAULT_SESSION_SETTINGS.asianSession.end,
+    },
+    londonSession: {
+      start: typeof londonSession?.start === 'number' ? londonSession.start : DEFAULT_SESSION_SETTINGS.londonSession.start,
+      end: typeof londonSession?.end === 'number' ? londonSession.end : DEFAULT_SESSION_SETTINGS.londonSession.end,
+    },
+    newYorkSession: {
+      start: typeof newYorkSession?.start === 'number' ? newYorkSession.start : DEFAULT_SESSION_SETTINGS.newYorkSession.start,
+      end: typeof newYorkSession?.end === 'number' ? newYorkSession.end : DEFAULT_SESSION_SETTINGS.newYorkSession.end,
+    },
+    dayTradingEnabled: typeof value.dayTradingEnabled === 'boolean'
+      ? value.dayTradingEnabled
+      : DEFAULT_SESSION_SETTINGS.dayTradingEnabled,
+    asianTradingEnabled: typeof value.asianTradingEnabled === 'boolean'
+      ? value.asianTradingEnabled
+      : DEFAULT_SESSION_SETTINGS.asianTradingEnabled,
+    londonTradingEnabled: typeof value.londonTradingEnabled === 'boolean'
+      ? value.londonTradingEnabled
+      : DEFAULT_SESSION_SETTINGS.londonTradingEnabled,
+    newYorkTradingEnabled: typeof value.newYorkTradingEnabled === 'boolean'
+      ? value.newYorkTradingEnabled
+      : DEFAULT_SESSION_SETTINGS.newYorkTradingEnabled,
+  };
+}
+
 // ── Indicator Helpers ───────────────────────────────────────
 
 function calculateATR(candles: Candle[], period = 14): number {
@@ -126,30 +197,118 @@ function parseTimeString(time: string): { hours: number; minutes: number } {
   return { hours: h, minutes: m };
 }
 
-function isWithinTradingSession(config: GoldxStrategyConfig): boolean {
+function getNewYorkHour(): number {
   const now = new Date();
-  const utcHours = now.getUTCHours();
-  const utcMinutes = now.getUTCMinutes();
-  const currentMinutes = utcHours * 60 + utcMinutes;
+  const nyTime = new Date(
+    now.toLocaleString('en-US', { timeZone: 'America/New_York' }),
+  );
 
-  const start = parseTimeString(config.sessionStart);
-  const end = parseTimeString(config.sessionEnd);
-  const startMinutes = start.hours * 60 + start.minutes;
-  const endMinutes = end.hours * 60 + end.minutes;
-
-  return currentMinutes >= startMinutes && currentMinutes <= endMinutes;
+  return nyTime.getHours();
 }
 
-function isPastLastEntry(config: GoldxStrategyConfig): boolean {
-  const now = new Date();
-  const utcHours = now.getUTCHours();
-  const utcMinutes = now.getUTCMinutes();
-  const currentMinutes = utcHours * 60 + utcMinutes;
+function isHourWithinWindow(hour: number, start: number, end: number): boolean {
+  if (start === end) return true;
+  if (start < end) return hour >= start && hour < end;
+  return hour >= start || hour < end;
+}
 
-  const last = parseTimeString(config.lastEntryTime);
-  const lastMinutes = last.hours * 60 + last.minutes;
+function getActiveTradingSession(
+  sessionMode: GoldxSessionMode,
+  sessionSettings: GoldxSessionSettings,
+): GoldxSessionStatus {
+  const hour = getNewYorkHour();
+  const inNight = isHourWithinWindow(
+    hour,
+    sessionSettings.nightSession.start,
+    sessionSettings.nightSession.end,
+  );
+  const inDay = Boolean(sessionSettings.dayTradingEnabled) && isHourWithinWindow(
+    hour,
+    sessionSettings.daySession.start,
+    sessionSettings.daySession.end,
+  );
+  const inAsian = Boolean(sessionSettings.asianTradingEnabled) && isHourWithinWindow(
+    hour,
+    sessionSettings.asianSession.start,
+    sessionSettings.asianSession.end,
+  );
+  const inLondon = Boolean(sessionSettings.londonTradingEnabled) && isHourWithinWindow(
+    hour,
+    sessionSettings.londonSession.start,
+    sessionSettings.londonSession.end,
+  );
+  const inNewYork = Boolean(sessionSettings.newYorkTradingEnabled) && isHourWithinWindow(
+    hour,
+    sessionSettings.newYorkSession.start,
+    sessionSettings.newYorkSession.end,
+  );
 
-  return currentMinutes > lastMinutes;
+  if (sessionMode === 'night') {
+    return inNight ? 'night' : 'closed';
+  }
+  if (sessionMode === 'day') {
+    return inDay ? 'day' : 'closed';
+  }
+  if (sessionMode === 'all') {
+    if (inNewYork) return 'newYork';
+    if (inLondon) return 'london';
+    if (inAsian) return 'asian';
+    return 'closed';
+  }
+  if (inNight) return 'night';
+  if (inDay) return 'day';
+  return 'closed';
+}
+
+export async function isWithinTradingSession(sessionMode: GoldxSessionMode): Promise<boolean> {
+  const sessionSettings = await getSessionSettings();
+  return getActiveTradingSession(sessionMode, sessionSettings) !== 'closed';
+}
+
+export async function getCurrentSessionStatus(sessionMode: GoldxSessionMode): Promise<GoldxSessionStatus> {
+  const sessionSettings = await getSessionSettings();
+  return getActiveTradingSession(sessionMode, sessionSettings);
+}
+
+function tightenFilterStrictness(strictness: GoldxFilterStrictness): GoldxFilterStrictness {
+  if (strictness === 'loose') return 'normal';
+  return 'strict';
+}
+
+function applySessionModeConfig(
+  modeConfig: GoldxModeConfig,
+  tradeControl: GoldxTradeControlConfig,
+  activeSession: GoldxSessionStatus,
+): { modeConfig: GoldxModeConfig; tradeControl: GoldxTradeControlConfig } {
+  if (activeSession === 'closed' || activeSession === 'night' || activeSession === 'asian') {
+    return { modeConfig, tradeControl };
+  }
+
+  if (activeSession === 'london') {
+    return {
+      modeConfig: {
+        ...modeConfig,
+        maxTrades: Math.min(modeConfig.maxTrades, 5),
+        filterStrictness: tightenFilterStrictness(modeConfig.filterStrictness),
+      },
+      tradeControl: {
+        ...tradeControl,
+        cooldownMinutes: Math.max(tradeControl.cooldownMinutes, 20),
+      },
+    };
+  }
+
+  return {
+    modeConfig: {
+      ...modeConfig,
+      maxTrades: Math.min(modeConfig.maxTrades, 3),
+      filterStrictness: tightenFilterStrictness(modeConfig.filterStrictness),
+    },
+    tradeControl: {
+      ...tradeControl,
+      cooldownMinutes: Math.max(tradeControl.cooldownMinutes, 30),
+    },
+  };
 }
 
 // ── Range Detection ─────────────────────────────────────────
@@ -230,16 +389,28 @@ function passesFilters(
   range: RangeZone,
   config: GoldxStrategyConfig,
   modeConfig: GoldxModeConfig,
+  activeSession: GoldxSessionStatus,
 ): { pass: boolean; reason: string } {
+  const atrMultiplier = activeSession === 'day' || activeSession === 'newYork'
+    ? Math.min(config.atrMaxMultiplier, 1.1)
+    : activeSession === 'london'
+      ? Math.min(config.atrMaxMultiplier, 1.25)
+    : config.atrMaxMultiplier;
+  const maxSpreadPoints = activeSession === 'day' || activeSession === 'newYork'
+    ? Math.min(config.maxSpreadPoints, 20)
+    : activeSession === 'london'
+      ? Math.min(config.maxSpreadPoints, 24)
+    : config.maxSpreadPoints;
+
   // ATR filter
-  const atrThreshold = range.size * config.atrMaxMultiplier;
+  const atrThreshold = range.size * atrMultiplier;
   if (snapshot.atr > atrThreshold) {
     return { pass: false, reason: `ATR ${snapshot.atr.toFixed(2)} exceeds range threshold ${atrThreshold.toFixed(2)}` };
   }
 
   // Spread filter
-  if (snapshot.spread > config.maxSpreadPoints) {
-    return { pass: false, reason: `Spread ${snapshot.spread.toFixed(1)} exceeds max ${config.maxSpreadPoints}` };
+  if (snapshot.spread > maxSpreadPoints) {
+    return { pass: false, reason: `Spread ${snapshot.spread.toFixed(1)} exceeds max ${maxSpreadPoints}` };
   }
 
   // Strict mode: tighter filters
@@ -247,7 +418,7 @@ function passesFilters(
     if (snapshot.atr > range.size * (config.atrMaxMultiplier * 0.7)) {
       return { pass: false, reason: 'Strict mode: ATR too high relative to range' };
     }
-    if (snapshot.spread > config.maxSpreadPoints * 0.6) {
+    if (snapshot.spread > maxSpreadPoints * 0.6) {
       return { pass: false, reason: 'Strict mode: spread too wide' };
     }
   }
@@ -297,21 +468,29 @@ function calculateTargets(
   entry: number,
   sweepLevel: number,
   snapshot: MarketSnapshot,
+  activeSession: GoldxSessionStatus,
 ): { stopLoss: number; takeProfit: number } {
-  const buffer = snapshot.atr * 0.3;
+  const isNewYorkSession = activeSession === 'day' || activeSession === 'newYork';
+  const isLondonSession = activeSession === 'london';
+  const buffer = snapshot.atr * (isNewYorkSession ? 0.2 : isLondonSession ? 0.25 : 0.3);
+  const targetMultiplier = isNewYorkSession ? 1.5 : isLondonSession ? 1.75 : 2;
 
   if (direction === 'buy') {
     const stopLoss = sweepLevel - buffer;
     // TP = VWAP or EMA20, whichever is further from entry
-    const tpVwap = snapshot.vwap > entry ? snapshot.vwap : entry + (entry - stopLoss) * 2;
-    const tpEma = snapshot.ema20 > entry ? snapshot.ema20 : entry + (entry - stopLoss) * 2;
-    const takeProfit = Math.max(tpVwap, tpEma);
+    const tpVwap = snapshot.vwap > entry ? snapshot.vwap : entry + (entry - stopLoss) * targetMultiplier;
+    const tpEma = snapshot.ema20 > entry ? snapshot.ema20 : entry + (entry - stopLoss) * targetMultiplier;
+    const takeProfit = isNewYorkSession
+      ? Math.min(Math.max(tpVwap, tpEma), entry + (entry - stopLoss) * targetMultiplier)
+      : Math.max(tpVwap, tpEma);
     return { stopLoss, takeProfit };
   } else {
     const stopLoss = sweepLevel + buffer;
-    const tpVwap = snapshot.vwap < entry ? snapshot.vwap : entry - (stopLoss - entry) * 2;
-    const tpEma = snapshot.ema20 < entry ? snapshot.ema20 : entry - (stopLoss - entry) * 2;
-    const takeProfit = Math.min(tpVwap, tpEma);
+    const tpVwap = snapshot.vwap < entry ? snapshot.vwap : entry - (stopLoss - entry) * targetMultiplier;
+    const tpEma = snapshot.ema20 < entry ? snapshot.ema20 : entry - (stopLoss - entry) * targetMultiplier;
+    const takeProfit = isNewYorkSession
+      ? Math.max(Math.min(tpVwap, tpEma), entry - (stopLoss - entry) * targetMultiplier)
+      : Math.min(tpVwap, tpEma);
     return { stopLoss, takeProfit };
   }
 }
@@ -346,10 +525,14 @@ export async function generateSignal(
 ): Promise<GoldxSignal> {
   const now = new Date().toISOString();
   const mode = accountState.mode;
+  const sessionMode = accountState.sessionMode ?? 'hybrid';
 
   const strategyConfig = await getStrategyConfig();
-  const modeConfig = await getModeConfig(mode);
-  const tradeControl = await getTradeControlConfig();
+  const sessionSettings = await getSessionSettings();
+  const baseModeConfig = await getModeConfig(mode);
+  const baseTradeControl = await getTradeControlConfig();
+  const activeSession = getActiveTradingSession(sessionMode, sessionSettings);
+  const { modeConfig, tradeControl } = applySessionModeConfig(baseModeConfig, baseTradeControl, activeSession);
 
   const noSignal = (reason: string): GoldxSignal => ({
     action: 'none',
@@ -364,11 +547,8 @@ export async function generateSignal(
   });
 
   // Time filter
-  if (!isWithinTradingSession(strategyConfig)) {
+  if (activeSession === 'closed') {
     return noSignal('Outside trading session');
-  }
-  if (isPastLastEntry(strategyConfig)) {
-    return noSignal('Past last entry time');
   }
 
   // Trade control
@@ -401,7 +581,7 @@ export async function generateSignal(
   }
 
   // Filters
-  const filterResult = passesFilters(snapshot, range, strategyConfig, modeConfig);
+  const filterResult = passesFilters(snapshot, range, strategyConfig, modeConfig, activeSession);
   if (!filterResult.pass) {
     return noSignal(filterResult.reason);
   }
@@ -414,7 +594,13 @@ export async function generateSignal(
 
   // Calculate targets
   const entry = sweep.direction === 'buy' ? currentAsk : currentBid;
-  const { stopLoss, takeProfit } = calculateTargets(sweep.direction, entry, sweep.sweepLevel, snapshot);
+  const { stopLoss, takeProfit } = calculateTargets(
+    sweep.direction,
+    entry,
+    sweep.sweepLevel,
+    snapshot,
+    activeSession,
+  );
 
   // Lot size
   const lotSize = calculateLotSize(modeConfig.riskPercent, accountBalance, entry, stopLoss);

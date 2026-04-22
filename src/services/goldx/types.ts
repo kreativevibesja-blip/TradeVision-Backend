@@ -3,11 +3,13 @@
 // ============================================================
 
 export type GoldxMode = 'fast' | 'prop' | 'hybrid';
+export type GoldxSessionMode = 'night' | 'day' | 'hybrid' | 'all';
 export type GoldxLicenseStatus = 'active' | 'expired' | 'revoked';
 export type GoldxSubscriptionStatus = 'active' | 'cancelled' | 'expired' | 'past_due';
 export type GoldxTradeDirection = 'buy' | 'sell';
 export type GoldxTradeOutcome = 'tp' | 'sl' | 'be' | 'manual';
 export type GoldxFilterStrictness = 'loose' | 'normal' | 'strict';
+export type GoldxSessionStatus = 'day' | 'night' | 'asian' | 'london' | 'newYork' | 'closed';
 
 export interface GoldxPlan {
   id: string;
@@ -57,6 +59,7 @@ export interface GoldxAccountState {
   licenseId: string;
   mt5Account: string;
   mode: GoldxMode;
+  sessionMode: GoldxSessionMode;
   tradesToday: number;
   profitToday: number;
   drawdownToday: number;
@@ -113,6 +116,23 @@ export interface GoldxTradeControlConfig {
   cooldownMinutes: number;
   dailyProfitStopPercent: number;
   dailyDrawdownStopPercent: number;
+}
+
+export interface GoldxSessionWindow {
+  start: number;
+  end: number;
+}
+
+export interface GoldxSessionSettings {
+  daySession: GoldxSessionWindow;
+  nightSession: GoldxSessionWindow;
+  asianSession: GoldxSessionWindow;
+  londonSession: GoldxSessionWindow;
+  newYorkSession: GoldxSessionWindow;
+  dayTradingEnabled?: boolean;
+  asianTradingEnabled?: boolean;
+  londonTradingEnabled?: boolean;
+  newYorkTradingEnabled?: boolean;
 }
 
 export interface GoldxSignal {

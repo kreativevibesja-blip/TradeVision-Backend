@@ -18,6 +18,7 @@ import {
   // User
   getMyGoldxSubscription,
   setMyGoldxMode,
+  setMyGoldxSessionMode,
   cancelMyGoldxSubscription,
   createGoldxPayment,
   captureGoldxPayment,
@@ -62,6 +63,7 @@ router.post('/signal', goldxSignalLimiter, authenticateGoldxSession, getSignalHa
 // ── User Endpoints (Supabase auth) ──────────────────────────
 router.get('/me', authenticate, getMyGoldxSubscription);
 router.post('/me/mode', authenticate, setMyGoldxMode);
+router.post('/set-session-mode', authenticate, setMyGoldxSessionMode);
 router.post('/me/cancel', authenticate, cancelMyGoldxSubscription);
 router.post('/payment/create', authenticate, createGoldxPayment);
 router.post('/payment/capture', authenticate, captureGoldxPayment);

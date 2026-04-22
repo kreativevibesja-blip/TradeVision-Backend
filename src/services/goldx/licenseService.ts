@@ -25,6 +25,7 @@ import type {
   GoldxVerifyRequest,
   GoldxVerifyResponse,
   GoldxMode,
+  GoldxSessionMode,
   GoldxModeConfig,
 } from './types';
 
@@ -187,6 +188,20 @@ async function getOrCreateAccountState(
 
   if (existing) {
     const state = snakeToCamel(existing) as unknown as GoldxAccountState;
+    if (!state.sessionMode) {
+      const { data: updatedWithSession } = await supabase
+        .from('goldx_account_state')
+        .update({
+          session_mode: 'hybrid',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', state.id)
+        .select()
+        .single();
+      if (updatedWithSession) {
+        return snakeToCamel(updatedWithSession) as unknown as GoldxAccountState;
+      }
+    }
     // Reset daily counters if new day
     if (state.resetDate !== today) {
       const { data: updated } = await supabase
@@ -212,6 +227,7 @@ async function getOrCreateAccountState(
       license_id: licenseId,
       mt5_account: mt5Account,
       mode,
+      session_mode: 'hybrid',
       reset_date: today,
     })
     .select()
@@ -898,6 +914,16 @@ export async function setUserMode(userId: string, mode: GoldxMode): Promise<void
   await updateAccountState(
     (await getOrCreateAccountState(license.id, license.mt5Account)).id,
     { mode },
+  );
+}
+
+export async function setUserSessionMode(userId: string, sessionMode: GoldxSessionMode): Promise<void> {
+  const license = await getUserLicense(userId);
+  if (!license) throw new Error('No active license');
+  if (!license.mt5Account) throw new Error('No MT5 account bound');
+  await updateAccountState(
+    (await getOrCreateAccountState(license.id, license.mt5Account)).id,
+    { sessionMode },
   );
 }
 

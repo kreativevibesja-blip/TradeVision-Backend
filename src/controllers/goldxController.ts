@@ -14,6 +14,7 @@ import {
   getUserLicense,
   getUserAccountState,
   setUserMode,
+  setUserSessionMode,
   getGoldxPlan,
   adminGrantGoldxAccess,
   adminGetAllLicenses,
@@ -32,9 +33,9 @@ import {
   SKIP_HMAC,
 } from '../services/goldx/licenseService';
 import { computeHmac, getHmacSecret } from '../services/goldx/crypto';
-import { generateSignal, recordTrade } from '../services/goldx/strategyEngine';
+import { generateSignal, getCurrentSessionStatus, recordTrade } from '../services/goldx/strategyEngine';
 import { createOrder, captureOrder } from '../services/paypalService';
-import type { GoldxVerifyRequest, GoldxMode } from '../services/goldx/types';
+import type { GoldxVerifyRequest, GoldxMode, GoldxSessionMode } from '../services/goldx/types';
 
 // ── Public ──────────────────────────────────────────────────
 
@@ -206,6 +207,9 @@ export const getMyGoldxSubscription = async (req: AuthRequest, res: Response) =>
       getUserAccountState(req.user.id),
       consumePendingDashboardGrant(req.user.id),
     ]);
+    const sessionStatus = accountState
+      ? await getCurrentSessionStatus(accountState.sessionMode ?? 'hybrid')
+      : null;
 
     res.json({
       subscription: sub
@@ -225,7 +229,12 @@ export const getMyGoldxSubscription = async (req: AuthRequest, res: Response) =>
             createdAt: license.createdAt,
           }
         : null,
-      accountState,
+      accountState: accountState
+        ? {
+            ...accountState,
+            sessionStatus,
+          }
+        : null,
       latestGrant,
     });
   } catch (err) {
@@ -246,6 +255,22 @@ export const setMyGoldxMode = async (req: AuthRequest, res: Response) => {
   } catch (err: any) {
     console.error('[GoldX] setMode error:', err);
     res.status(400).json({ error: err.message ?? 'Failed to set mode' });
+  }
+};
+
+export const setMyGoldxSessionMode = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Auth required' });
+    const { sessionMode } = req.body as { sessionMode: GoldxSessionMode };
+    if (!['day', 'night', 'hybrid', 'all'].includes(sessionMode)) {
+      return res.status(400).json({ error: 'Invalid session mode' });
+    }
+    await setUserSessionMode(req.user.id, sessionMode);
+    const sessionStatus = await getCurrentSessionStatus(sessionMode);
+    res.json({ success: true, sessionMode, sessionStatus });
+  } catch (err: any) {
+    console.error('[GoldX] setSessionMode error:', err);
+    res.status(400).json({ error: err.message ?? 'Failed to set session mode' });
   }
 };
 
