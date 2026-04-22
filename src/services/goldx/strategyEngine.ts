@@ -15,7 +15,7 @@ import type {
   GoldxSessionSettings,
   GoldxSessionStatus,
 } from './types';
-import { getModeConfig, insertAuditLog } from './licenseService';
+import { getModeConfig, insertAuditLog, markOnboardingStateByLicenseId } from './licenseService';
 
 // ── Market Data Types ───────────────────────────────────────
 
@@ -1001,6 +1001,8 @@ export async function recordTrade(
     lot_size: signal.lotSize,
     mode: signal.mode,
   });
+
+  await markOnboardingStateByLicenseId(licenseId, { setupCompleted: true });
 
   await insertAuditLog('goldx_signal_trade_recorded', {
     licenseId,

@@ -152,6 +152,43 @@ export interface GoldxSignal {
   trendAligned?: boolean;
 }
 
+export type GoldxSetupRequestStatus = 'pending' | 'in_progress' | 'completed';
+
+export interface GoldxOnboardingState {
+  userId: string;
+  hasDownloadedEa: boolean;
+  hasConnectedMt5: boolean;
+  setupCompleted: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GoldxSetupRequest {
+  id: string;
+  userId: string;
+  mt5Login: string;
+  server: string;
+  email: string;
+  note: string | null;
+  status: GoldxSetupRequestStatus;
+  internalNotes: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GoldxMaskedSetupRequest {
+  id: string;
+  userId: string;
+  mt5LoginMasked: string;
+  server: string;
+  emailMasked: string;
+  notePreview: string | null;
+  status: GoldxSetupRequestStatus;
+  internalNotesPreview: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface GoldxVerifyRequest {
   licenseKey: string;
   mt5Account: string;

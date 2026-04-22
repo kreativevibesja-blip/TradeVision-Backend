@@ -19,6 +19,8 @@ import {
   getMyGoldxSubscription,
   setMyGoldxMode,
   setMyGoldxSessionMode,
+  downloadGoldxEa,
+  createGoldxSetupRequest,
   cancelMyGoldxSubscription,
   createGoldxPayment,
   captureGoldxPayment,
@@ -32,6 +34,8 @@ import {
   adminGetGoldxSettings,
   adminUpdateGoldxSettings,
   adminGetGoldxTradeHistory,
+  adminGetGoldxSetupRequests,
+  adminUpdateGoldxSetupRequest,
   adminGrantGoldxAccessToUser,
 } from '../controllers/goldxController';
 
@@ -47,6 +51,8 @@ router.get('/', (_req, res) => {
       verifyLicense: '/api/goldx/license/verify',
       signal: '/api/goldx/signal',
       me: '/api/goldx/me',
+      downloadEa: '/api/goldx/download-ea',
+      setupRequest: '/api/goldx/setup-request',
       createPayment: '/api/goldx/payment/create',
       capturePayment: '/api/goldx/payment/capture',
       adminDashboard: '/api/goldx/admin/dashboard',
@@ -64,6 +70,8 @@ router.post('/signal', goldxSignalLimiter, authenticateGoldxSession, getSignalHa
 router.get('/me', authenticate, getMyGoldxSubscription);
 router.post('/me/mode', authenticate, setMyGoldxMode);
 router.post('/set-session-mode', authenticate, setMyGoldxSessionMode);
+router.get('/download-ea', authenticate, downloadGoldxEa);
+router.post('/setup-request', authenticate, createGoldxSetupRequest);
 router.post('/me/cancel', authenticate, cancelMyGoldxSubscription);
 router.post('/payment/create', authenticate, createGoldxPayment);
 router.post('/payment/capture', authenticate, captureGoldxPayment);
@@ -78,6 +86,8 @@ router.get('/admin/audit-logs', authenticate, requireAdmin, adminGetGoldxAuditLo
 router.get('/admin/settings', authenticate, requireAdmin, adminGetGoldxSettings);
 router.post('/admin/settings', authenticate, requireAdmin, adminUpdateGoldxSettings);
 router.get('/admin/trade-history', authenticate, requireAdmin, adminGetGoldxTradeHistory);
+router.get('/admin/setup-requests', authenticate, requireAdmin, adminGetGoldxSetupRequests);
+router.post('/admin/setup-requests/:requestId', authenticate, requireAdmin, adminUpdateGoldxSetupRequest);
 router.post('/admin/users/:userId/grant', authenticate, requireAdmin, adminGrantGoldxAccessToUser);
 
 export default router;

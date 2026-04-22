@@ -26,6 +26,13 @@ import {
   adminUpdateSettings,
   adminGetSettings,
   adminGetTradeHistory,
+  getOnboardingState,
+  updateOnboardingState,
+  getLatestSetupRequest,
+  createSetupRequest,
+  adminGetSetupRequests,
+  adminUpdateSetupRequest,
+  getEaDownloadUrl,
   insertAuditLog,
   consumePendingDashboardGrant,
   debugBindLicense,
@@ -207,6 +214,10 @@ export const getMyGoldxSubscription = async (req: AuthRequest, res: Response) =>
       getUserAccountState(req.user.id),
       consumePendingDashboardGrant(req.user.id),
     ]);
+    const [onboardingState, latestSetupRequest] = await Promise.all([
+      getOnboardingState(req.user.id),
+      getLatestSetupRequest(req.user.id),
+    ]);
     const sessionStatus = accountState
       ? await getCurrentSessionStatus(accountState.sessionMode ?? 'hybrid')
       : null;
@@ -233,6 +244,17 @@ export const getMyGoldxSubscription = async (req: AuthRequest, res: Response) =>
         ? {
             ...accountState,
             sessionStatus,
+          }
+        : null,
+      onboardingState,
+      setupRequest: latestSetupRequest
+        ? {
+            id: latestSetupRequest.id,
+            server: latestSetupRequest.server,
+            email: latestSetupRequest.email,
+            status: latestSetupRequest.status,
+            createdAt: latestSetupRequest.createdAt,
+            updatedAt: latestSetupRequest.updatedAt,
           }
         : null,
       latestGrant,
@@ -284,6 +306,65 @@ export const cancelMyGoldxSubscription = async (req: AuthRequest, res: Response)
   } catch (err) {
     console.error('[GoldX] cancelSubscription error:', err);
     res.status(500).json({ error: 'Internal error' });
+  }
+};
+
+export const downloadGoldxEa = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Auth required' });
+    const subscription = await getUserSubscription(req.user.id);
+    if (!subscription) {
+      return res.status(403).json({ error: 'Active GoldX access required' });
+    }
+
+    const downloadUrl = await getEaDownloadUrl();
+    if (!downloadUrl) {
+      return res.status(404).json({ error: 'EA download is not configured yet. Request assisted setup or contact support.' });
+    }
+
+    await updateOnboardingState(req.user.id, { hasDownloadedEa: true });
+    await insertAuditLog('goldx_ea_download_requested', {
+      userId: req.user.id,
+      meta: { delivery: 'url' },
+    });
+
+    res.json({ success: true, downloadUrl });
+  } catch (err: any) {
+    console.error('[GoldX] downloadEA error:', err);
+    res.status(500).json({ error: err?.message ?? 'Internal error' });
+  }
+};
+
+export const createGoldxSetupRequest = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Auth required' });
+    const subscription = await getUserSubscription(req.user.id);
+    if (!subscription) {
+      return res.status(403).json({ error: 'GoldX access required' });
+    }
+
+    const { mt5Login, server, email, note } = req.body as {
+      mt5Login?: string;
+      server?: string;
+      email?: string;
+      note?: string;
+    };
+
+    if (!mt5Login?.trim() || !server?.trim() || !email?.trim()) {
+      return res.status(400).json({ error: 'mt5Login, server, and email are required' });
+    }
+
+    await createSetupRequest(req.user.id, {
+      mt5Login,
+      server,
+      email,
+      note,
+    });
+
+    res.json({ success: true });
+  } catch (err: any) {
+    console.error('[GoldX] setupRequest error:', err);
+    res.status(500).json({ error: err?.message ?? 'Internal error' });
   }
 };
 
@@ -448,6 +529,38 @@ export const adminGetGoldxTradeHistory = async (req: AuthRequest, res: Response)
   } catch (err) {
     console.error('[GoldX Admin] getTradeHistory error:', err);
     res.status(500).json({ error: 'Internal error' });
+  }
+};
+
+export const adminGetGoldxSetupRequests = async (_req: AuthRequest, res: Response) => {
+  try {
+    const requests = await adminGetSetupRequests();
+    res.json(requests);
+  } catch (err) {
+    console.error('[GoldX Admin] setup requests error:', err);
+    res.status(500).json({ error: 'Internal error' });
+  }
+};
+
+export const adminUpdateGoldxSetupRequest = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Auth required' });
+    const { requestId } = req.params;
+    const { status, internalNotes } = req.body as {
+      status?: 'pending' | 'in_progress' | 'completed';
+      internalNotes?: string | null;
+    };
+
+    if (!requestId) return res.status(400).json({ error: 'requestId required' });
+    if (status && !['pending', 'in_progress', 'completed'].includes(status)) {
+      return res.status(400).json({ error: 'Invalid status' });
+    }
+
+    await adminUpdateSetupRequest(requestId, req.user.id, { status, internalNotes });
+    res.json({ success: true });
+  } catch (err: any) {
+    console.error('[GoldX Admin] update setup request error:', err);
+    res.status(500).json({ error: err?.message ?? 'Internal error' });
   }
 };
 

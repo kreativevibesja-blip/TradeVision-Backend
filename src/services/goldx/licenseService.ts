@@ -27,6 +27,10 @@ import type {
   GoldxMode,
   GoldxSessionMode,
   GoldxModeConfig,
+  GoldxOnboardingState,
+  GoldxSetupRequest,
+  GoldxMaskedSetupRequest,
+  GoldxSetupRequestStatus,
 } from './types';
 
 const SESSION_TTL_MINUTES = 10;
@@ -314,6 +318,204 @@ export async function consumePendingDashboardGrant(
   };
 }
 
+function maskValue(value: string, visibleStart = 2, visibleEnd = 2): string {
+  if (!value) return '';
+  if (value.length <= visibleStart + visibleEnd) return '*'.repeat(value.length);
+  return `${value.slice(0, visibleStart)}${'*'.repeat(Math.max(3, value.length - visibleStart - visibleEnd))}${value.slice(-visibleEnd)}`;
+}
+
+function maskEmail(value: string): string {
+  const [localPart, domain] = value.split('@');
+  if (!localPart || !domain) return maskValue(value, 2, 0);
+  return `${maskValue(localPart, 1, 1)}@${domain}`;
+}
+
+export async function getOrCreateOnboardingState(userId: string): Promise<GoldxOnboardingState> {
+  const { data: existing } = await supabase
+    .from('goldx_onboarding_state')
+    .select('*')
+    .eq('user_id', userId)
+    .maybeSingle();
+
+  if (existing) {
+    return snakeToCamel(existing) as unknown as GoldxOnboardingState;
+  }
+
+  const { data, error } = await supabase
+    .from('goldx_onboarding_state')
+    .insert({ user_id: userId })
+    .select()
+    .single();
+
+  if (error || !data) {
+    throw new Error(`Failed to create onboarding state: ${error?.message ?? 'Unknown error'}`);
+  }
+
+  return snakeToCamel(data) as unknown as GoldxOnboardingState;
+}
+
+export async function updateOnboardingState(
+  userId: string,
+  updates: Partial<Pick<GoldxOnboardingState, 'hasDownloadedEa' | 'hasConnectedMt5' | 'setupCompleted'>>,
+): Promise<GoldxOnboardingState> {
+  await getOrCreateOnboardingState(userId);
+
+  const payload: Record<string, unknown> = {
+    updated_at: new Date().toISOString(),
+  };
+
+  if (typeof updates.hasDownloadedEa === 'boolean') payload.has_downloaded_ea = updates.hasDownloadedEa;
+  if (typeof updates.hasConnectedMt5 === 'boolean') payload.has_connected_mt5 = updates.hasConnectedMt5;
+  if (typeof updates.setupCompleted === 'boolean') payload.setup_completed = updates.setupCompleted;
+
+  const { data, error } = await supabase
+    .from('goldx_onboarding_state')
+    .update(payload)
+    .eq('user_id', userId)
+    .select()
+    .single();
+
+  if (error || !data) {
+    throw new Error(`Failed to update onboarding state: ${error?.message ?? 'Unknown error'}`);
+  }
+
+  return snakeToCamel(data) as unknown as GoldxOnboardingState;
+}
+
+export async function getOnboardingState(userId: string): Promise<GoldxOnboardingState> {
+  return getOrCreateOnboardingState(userId);
+}
+
+export async function markOnboardingStateByLicenseId(
+  licenseId: string,
+  updates: Partial<Pick<GoldxOnboardingState, 'hasDownloadedEa' | 'hasConnectedMt5' | 'setupCompleted'>>,
+): Promise<void> {
+  const { data } = await supabase
+    .from('goldx_licenses')
+    .select('user_id')
+    .eq('id', licenseId)
+    .single();
+
+  const userId = (data as Record<string, unknown> | null)?.user_id;
+  if (typeof userId !== 'string') return;
+  await updateOnboardingState(userId, updates);
+}
+
+export async function getLatestSetupRequest(userId: string): Promise<GoldxSetupRequest | null> {
+  const { data } = await supabase
+    .from('goldx_setup_requests')
+    .select('*')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (!data) return null;
+  const row = snakeToCamel(data) as unknown as GoldxSetupRequest;
+  return {
+    ...row,
+    mt5Login: aesDecrypt((data as Record<string, unknown>).mt5_login as string),
+    email: aesDecrypt((data as Record<string, unknown>).email as string),
+    note: typeof (data as Record<string, unknown>).note === 'string' ? aesDecrypt((data as Record<string, unknown>).note as string) : null,
+    internalNotes: typeof (data as Record<string, unknown>).internal_notes === 'string' ? aesDecrypt((data as Record<string, unknown>).internal_notes as string) : null,
+  };
+}
+
+export async function createSetupRequest(
+  userId: string,
+  input: { mt5Login: string; server: string; email: string; note?: string | null },
+): Promise<void> {
+  const { error } = await supabase
+    .from('goldx_setup_requests')
+    .insert({
+      user_id: userId,
+      mt5_login: aesEncrypt(input.mt5Login.trim()),
+      server: input.server.trim(),
+      email: aesEncrypt(input.email.trim()),
+      note: input.note?.trim() ? aesEncrypt(input.note.trim()) : null,
+      status: 'pending',
+    });
+
+  if (error) throw new Error(`Failed to create setup request: ${error.message}`);
+
+  await insertAuditLog('goldx_setup_requested', {
+    userId,
+    meta: { server: input.server.trim() },
+  });
+}
+
+async function readMaskedSetupRequest(row: Record<string, unknown>): Promise<GoldxMaskedSetupRequest> {
+  const mt5Login = aesDecrypt(row.mt5_login as string);
+  const email = aesDecrypt(row.email as string);
+  const note = typeof row.note === 'string' ? aesDecrypt(row.note) : null;
+  const internalNotes = typeof row.internal_notes === 'string' ? aesDecrypt(row.internal_notes) : null;
+
+  return {
+    id: row.id as string,
+    userId: row.user_id as string,
+    mt5LoginMasked: maskValue(mt5Login, 2, 2),
+    server: row.server as string,
+    emailMasked: maskEmail(email),
+    notePreview: note ? `${note.slice(0, 80)}${note.length > 80 ? '...' : ''}` : null,
+    status: row.status as GoldxSetupRequestStatus,
+    internalNotesPreview: internalNotes ? `${internalNotes.slice(0, 80)}${internalNotes.length > 80 ? '...' : ''}` : null,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+  };
+}
+
+export async function adminGetSetupRequests(): Promise<GoldxMaskedSetupRequest[]> {
+  const { data } = await supabase
+    .from('goldx_setup_requests')
+    .select('*')
+    .order('created_at', { ascending: false });
+
+  const rows = (data ?? []) as Record<string, unknown>[];
+  return Promise.all(rows.map(readMaskedSetupRequest));
+}
+
+export async function adminUpdateSetupRequest(
+  requestId: string,
+  adminUserId: string,
+  updates: { status?: GoldxSetupRequestStatus; internalNotes?: string | null },
+): Promise<void> {
+  const payload: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  if (updates.status) payload.status = updates.status;
+  if (typeof updates.internalNotes === 'string') payload.internal_notes = aesEncrypt(updates.internalNotes.trim());
+  if (updates.internalNotes === null) payload.internal_notes = null;
+
+  const { error } = await supabase
+    .from('goldx_setup_requests')
+    .update(payload)
+    .eq('id', requestId);
+
+  if (error) throw new Error(`Failed to update setup request: ${error.message}`);
+
+  await insertAuditLog('goldx_setup_request_updated', {
+    userId: adminUserId,
+    meta: { requestId, status: updates.status ?? null },
+  });
+}
+
+export async function getEaDownloadUrl(): Promise<string | null> {
+  const envUrl = process.env.GOLDX_EA_DOWNLOAD_URL?.trim();
+  if (envUrl) return envUrl;
+
+  const { data } = await supabase
+    .from('goldx_settings')
+    .select('value')
+    .eq('key', 'eaDownload')
+    .maybeSingle();
+
+  const value = data?.value;
+  if (!value) return null;
+  if (typeof value === 'string') return value;
+  if (typeof value === 'object' && value && typeof (value as Record<string, unknown>).url === 'string') {
+    return (value as Record<string, unknown>).url as string;
+  }
+  return null;
+}
+
 // ── Mode Config ─────────────────────────────────────────────
 
 async function getModeConfig(mode: GoldxMode): Promise<GoldxModeConfig> {
@@ -450,6 +652,7 @@ export async function verifyLicense(
   // 10. Get account state for mode config
   const accountState = await getOrCreateAccountState(license.id, req.mt5Account);
   const modeConfig = await getModeConfig(accountState.mode);
+  await updateOnboardingState(license.userId, { hasConnectedMt5: true });
 
   await insertAuditLog('verify_success', {
     licenseId: license.id,
