@@ -7,6 +7,7 @@ export type GoldxSessionMode = 'night' | 'day' | 'hybrid' | 'all';
 export type GoldxLicenseStatus = 'active' | 'expired' | 'revoked';
 export type GoldxSubscriptionStatus = 'active' | 'cancelled' | 'expired' | 'past_due';
 export type GoldxTradeDirection = 'buy' | 'sell';
+export type GoldxSignalAction = 'burst_buy' | 'burst_sell' | 'none';
 export type GoldxTradeOutcome = 'tp' | 'sl' | 'be' | 'manual';
 export type GoldxFilterStrictness = 'loose' | 'normal' | 'strict';
 export type GoldxSessionStatus = 'day' | 'night' | 'asian' | 'london' | 'newYork' | 'closed';
@@ -71,6 +72,9 @@ export interface GoldxAccountState {
   lastBatchClosedAt: string | null;
   consecutiveLosingBatches: number;
   pausedUntil: string | null;
+  burstActive: boolean;
+  burstTradesOpened: number;
+  maxBurstTrades: number;
   resetDate: string;
 }
 
@@ -87,6 +91,10 @@ export interface GoldxRuntimeTradeState {
   profitToday?: number;
   lastBatchClosedAt?: string | null;
   losingBatchesInRow?: number;
+  burstActive?: boolean;
+  burstTradesOpened?: number;
+  burstsLastHour?: number;
+  burstLossesInRow?: number;
 }
 
 export interface GoldxAuditLog {
@@ -158,7 +166,7 @@ export interface GoldxSessionSettings {
 }
 
 export interface GoldxSignal {
-  action: 'buy' | 'sell' | 'none';
+  action: GoldxSignalAction;
   entry: number | null;
   stopLoss: number | null;
   takeProfit: number | null;
@@ -166,6 +174,13 @@ export interface GoldxSignal {
   entries?: GoldxScalpEntry[];
   batchId?: string | null;
   reentryAllowed?: boolean;
+  burstActive?: boolean;
+  burstTradesOpened?: number;
+  maxBurstTrades?: number;
+  maxTrades?: number;
+  burstDelayMsMin?: number;
+  burstDelayMsMax?: number;
+  closeOnMomentumLoss?: boolean;
   maxSimultaneousTrades?: number;
   currentOpenTrades?: number;
   confidence: number;

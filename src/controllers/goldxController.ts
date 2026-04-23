@@ -182,6 +182,10 @@ export const getSignalHandler = async (req: GoldxSessionRequest, res: Response) 
       profitToday?: number;
       lastBatchClosedAt?: string | null;
       losingBatchesInRow?: number;
+      burstActive?: boolean;
+      burstTradesOpened?: number;
+      burstsLastHour?: number;
+      burstLossesInRow?: number;
     };
 
     if (!candles?.length || !bid || !ask) {
@@ -196,6 +200,10 @@ export const getSignalHandler = async (req: GoldxSessionRequest, res: Response) 
         ? req.body.lastBatchClosedAt
         : undefined,
       losingBatchesInRow: typeof req.body.losingBatchesInRow === 'number' ? req.body.losingBatchesInRow : undefined,
+      burstActive: typeof req.body.burstActive === 'boolean' ? req.body.burstActive : undefined,
+      burstTradesOpened: typeof req.body.burstTradesOpened === 'number' ? req.body.burstTradesOpened : undefined,
+      burstsLastHour: typeof req.body.burstsLastHour === 'number' ? req.body.burstsLastHour : undefined,
+      burstLossesInRow: typeof req.body.burstLossesInRow === 'number' ? req.body.burstLossesInRow : undefined,
     };
 
     const signal = await generateSignal(

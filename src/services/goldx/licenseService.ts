@@ -192,11 +192,25 @@ async function getOrCreateAccountState(
 
   if (existing) {
     const state = snakeToCamel(existing) as unknown as GoldxAccountState;
-    if (!state.sessionMode) {
+    if (
+      !state.sessionMode
+      || state.maxSimultaneousTrades == null
+      || state.currentOpenTrades == null
+      || state.dailyTargetPercent == null
+      || state.burstActive == null
+      || state.burstTradesOpened == null
+      || state.maxBurstTrades == null
+    ) {
       const { data: updatedWithSession } = await supabase
         .from('goldx_account_state')
         .update({
-          session_mode: 'hybrid',
+          session_mode: state.sessionMode ?? 'hybrid',
+          max_simultaneous_trades: state.maxSimultaneousTrades ?? 10,
+          current_open_trades: state.currentOpenTrades ?? 0,
+          daily_target_percent: state.dailyTargetPercent ?? 3,
+          burst_active: state.burstActive ?? false,
+          burst_trades_opened: state.burstTradesOpened ?? 0,
+          max_burst_trades: state.maxBurstTrades ?? 10,
           updated_at: new Date().toISOString(),
         })
         .eq('id', state.id)
@@ -232,6 +246,12 @@ async function getOrCreateAccountState(
       mt5_account: mt5Account,
       mode,
       session_mode: 'hybrid',
+      max_simultaneous_trades: 10,
+      current_open_trades: 0,
+      daily_target_percent: 3,
+      burst_active: false,
+      burst_trades_opened: 0,
+      max_burst_trades: 10,
       reset_date: today,
     })
     .select()
