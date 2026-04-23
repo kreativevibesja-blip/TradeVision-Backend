@@ -18,6 +18,7 @@ import {
   // User
   getMyGoldxSubscription,
   setMyGoldxMode,
+  setMyGoldxLotSize,
   setMyGoldxSessionMode,
   downloadGoldxEa,
   createGoldxSetupRequest,
@@ -69,6 +70,7 @@ router.post('/signal', goldxSignalLimiter, authenticateGoldxSession, getSignalHa
 // ── User Endpoints (Supabase auth) ──────────────────────────
 router.get('/me', authenticate, getMyGoldxSubscription);
 router.post('/me/mode', authenticate, setMyGoldxMode);
+router.post('/settings/lot-size', authenticate, setMyGoldxLotSize);
 router.post('/set-session-mode', authenticate, setMyGoldxSessionMode);
 router.get('/download-ea', authenticate, downloadGoldxEa);
 router.post('/setup-request', authenticate, createGoldxSetupRequest);

@@ -4,6 +4,7 @@
 
 export type GoldxMode = 'fast' | 'prop' | 'hybrid';
 export type GoldxSessionMode = 'night' | 'day' | 'hybrid' | 'all';
+export type GoldxLotMode = 'auto' | 'manual';
 export type GoldxLicenseStatus = 'active' | 'expired' | 'revoked';
 export type GoldxSubscriptionStatus = 'active' | 'cancelled' | 'expired' | 'past_due';
 export type GoldxTradeDirection = 'buy' | 'sell';
@@ -60,6 +61,8 @@ export interface GoldxAccountState {
   licenseId: string;
   mt5Account: string;
   mode: GoldxMode;
+  lotMode: GoldxLotMode;
+  userLotSize: number | null;
   sessionMode: GoldxSessionMode;
   tradesToday: number;
   profitToday: number;
@@ -171,6 +174,9 @@ export interface GoldxSignal {
   stopLoss: number | null;
   takeProfit: number | null;
   lotSize: number | null;
+  lotSizeUsed?: number | null;
+  lotMode?: GoldxLotMode;
+  userLot?: number | null;
   entries?: GoldxScalpEntry[];
   batchId?: string | null;
   reentryAllowed?: boolean;

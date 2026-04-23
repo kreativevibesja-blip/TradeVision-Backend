@@ -97,6 +97,11 @@ const DEFAULT_TRADE_CONTROL: EngineTradeControlConfig = {
 };
 
 const BURST_ENTRY_SPLITS = [0.18, 0.16, 0.14, 0.12, 0.1, 0.09, 0.08, 0.06, 0.04, 0.03];
+const MAX_LOT_BY_MODE: Record<GoldxMode, number> = {
+  fast: 1.0,
+  hybrid: 0.75,
+  prop: 0.5,
+};
 
 function asNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
@@ -184,6 +189,10 @@ function roundPrice(value: number): number {
 
 function roundLot(value: number): number {
   return Math.max(0.01, Math.round(value * 100) / 100);
+}
+
+function floorLot(value: number): number {
+  return Math.floor(value * 100) / 100;
 }
 
 function getBrokerMinutes(config: EngineStrategyConfig): number {
@@ -362,6 +371,38 @@ function calculateLotSize(
   return Math.max(0.01, Math.round((riskAmount / (pipDistance * 100)) * 100) / 100);
 }
 
+function capLotByBalance(lotSize: number, accountBalance: number): number {
+  if (accountBalance <= 0) return lotSize;
+  const maxAffordableLot = floorLot(accountBalance / 1000);
+  return Math.min(lotSize, maxAffordableLot);
+}
+
+function resolveExecutionLot(
+  mode: GoldxMode,
+  configuredRiskPercent: number,
+  accountState: GoldxAccountState,
+  accountBalance: number,
+  entry: number,
+  stopLoss: number,
+): { lotSize: number; lotMode: GoldxAccountState['lotMode']; userLot: number | null } {
+  const userLot = typeof accountState.userLotSize === 'number' && Number.isFinite(accountState.userLotSize)
+    ? clamp(accountState.userLotSize, 0.01, 5.0)
+    : null;
+
+  let lotSize = accountState.lotMode === 'manual' && userLot != null
+    ? userLot
+    : calculateLotSize(mode, configuredRiskPercent, accountBalance, entry, stopLoss);
+
+  lotSize = Math.min(lotSize, MAX_LOT_BY_MODE[mode]);
+  lotSize = capLotByBalance(lotSize, accountBalance);
+
+  return {
+    lotSize: lotSize > 0 ? floorLot(lotSize) : 0,
+    lotMode: accountState.lotMode,
+    userLot,
+  };
+}
+
 function buildBatchId(licenseId: string): string {
   return `burst_${licenseId.slice(0, 8)}_${Date.now().toString(36)}`;
 }
@@ -473,7 +514,19 @@ function buildBurstSignal(
   const slDistance = Math.max(snapshot.atr * strategyConfig.burstSlAtrMultiplier, tpDistance * 2);
   const stopLoss = direction === 'buy' ? entry - slDistance : entry + slDistance;
   const takeProfit = direction === 'buy' ? entry + tpDistance : entry - tpDistance;
-  const baseLot = calculateLotSize(mode, modeConfig.riskPercent, accountBalance, entry, stopLoss);
+  const lotConfig = resolveExecutionLot(mode, modeConfig.riskPercent, accountState, accountBalance, entry, stopLoss);
+  const baseLot = lotConfig.lotSize;
+  if (baseLot < 0.01) {
+    return buildNoSignal(now, mode, session, 'Account balance too low for the minimum safe lot size', {
+      strategyName: 'burst-risk-cap',
+      lotMode: lotConfig.lotMode,
+      userLot: lotConfig.userLot,
+      lotSizeUsed: null,
+      reentryAllowed: canReenter(mode, tradeControl, runtimeState),
+      currentOpenTrades: runtimeState.currentOpenTrades,
+      maxSimultaneousTrades: 10,
+    });
+  }
   const trendAligned = direction === 'buy'
     ? snapshot.current.close > snapshot.ema20 && snapshot.ema20 >= snapshot.ema50
     : snapshot.current.close < snapshot.ema20 && snapshot.ema20 <= snapshot.ema50;
@@ -525,6 +578,9 @@ function buildBurstSignal(
     stopLoss: roundPrice(stopLoss),
     takeProfit: roundPrice(takeProfit),
     lotSize: entries[0]?.lot ?? null,
+    lotSizeUsed: baseLot,
+    lotMode: lotConfig.lotMode,
+    userLot: lotConfig.userLot,
     entries,
     batchId,
     reentryAllowed: true,

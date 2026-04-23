@@ -14,6 +14,7 @@ import {
   getUserLicense,
   getUserAccountState,
   setUserMode,
+  setUserLotSettings,
   setUserSessionMode,
   getGoldxPlan,
   adminGrantGoldxAccess,
@@ -42,7 +43,7 @@ import {
 import { computeHmac, getHmacSecret } from '../services/goldx/crypto';
 import { generateSignal, getCurrentSessionStatus, recordTrade } from '../services/goldx/strategyEngine';
 import { createOrder, captureOrder } from '../services/paypalService';
-import type { GoldxVerifyRequest, GoldxMode, GoldxSessionMode, GoldxRuntimeTradeState } from '../services/goldx/types';
+import type { GoldxVerifyRequest, GoldxMode, GoldxSessionMode, GoldxRuntimeTradeState, GoldxLotMode } from '../services/goldx/types';
 
 // ── Public ──────────────────────────────────────────────────
 
@@ -317,6 +318,28 @@ export const setMyGoldxSessionMode = async (req: AuthRequest, res: Response) => 
   } catch (err: any) {
     console.error('[GoldX] setSessionMode error:', err);
     res.status(400).json({ error: err.message ?? 'Failed to set session mode' });
+  }
+};
+
+export const setMyGoldxLotSize = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Auth required' });
+    const { lotSize, mode } = req.body as { lotSize?: number | null; mode?: GoldxLotMode };
+
+    if (!mode || !['auto', 'manual'].includes(mode)) {
+      return res.status(400).json({ error: 'Invalid lot mode' });
+    }
+
+    const updatedState = await setUserLotSettings(req.user.id, mode, lotSize);
+    res.json({
+      success: true,
+      lotSizeUsed: updatedState.lotMode === 'manual' ? updatedState.userLotSize : null,
+      lotMode: updatedState.lotMode,
+      userLot: updatedState.userLotSize,
+    });
+  } catch (err: any) {
+    console.error('[GoldX] setLotSize error:', err);
+    res.status(400).json({ error: err.message ?? 'Failed to set lot size' });
   }
 };
 

@@ -25,6 +25,7 @@ import type {
   GoldxVerifyRequest,
   GoldxVerifyResponse,
   GoldxMode,
+  GoldxLotMode,
   GoldxSessionMode,
   GoldxModeConfig,
   GoldxOnboardingState,
@@ -194,6 +195,8 @@ async function getOrCreateAccountState(
     const state = snakeToCamel(existing) as unknown as GoldxAccountState;
     if (
       !state.sessionMode
+      || !state.lotMode
+      || state.userLotSize === undefined
       || state.maxSimultaneousTrades == null
       || state.currentOpenTrades == null
       || state.dailyTargetPercent == null
@@ -204,6 +207,8 @@ async function getOrCreateAccountState(
       const { data: updatedWithSession } = await supabase
         .from('goldx_account_state')
         .update({
+          lot_mode: state.lotMode ?? 'auto',
+          user_lot_size: state.userLotSize ?? null,
           session_mode: state.sessionMode ?? 'hybrid',
           max_simultaneous_trades: state.maxSimultaneousTrades ?? 10,
           current_open_trades: state.currentOpenTrades ?? 0,
@@ -245,6 +250,8 @@ async function getOrCreateAccountState(
       license_id: licenseId,
       mt5_account: mt5Account,
       mode,
+      lot_mode: 'auto',
+      user_lot_size: null,
       session_mode: 'hybrid',
       max_simultaneous_trades: 10,
       current_open_trades: 0,
@@ -1148,6 +1155,45 @@ export async function setUserSessionMode(userId: string, sessionMode: GoldxSessi
     (await getOrCreateAccountState(license.id, license.mt5Account)).id,
     { sessionMode },
   );
+}
+
+export async function setUserLotSettings(
+  userId: string,
+  lotMode: GoldxLotMode,
+  lotSize?: number | null,
+): Promise<GoldxAccountState> {
+  const license = await getUserLicense(userId);
+  if (!license) throw new Error('No active license');
+  if (!license.mt5Account) throw new Error('No MT5 account bound');
+
+  const accountState = await getOrCreateAccountState(license.id, license.mt5Account);
+  const normalizedLotSize = lotSize == null ? null : Number(lotSize);
+
+  if (!['auto', 'manual'].includes(lotMode)) {
+    throw new Error('Invalid lot mode');
+  }
+
+  if (lotMode === 'manual') {
+    if (normalizedLotSize == null || !Number.isFinite(normalizedLotSize)) {
+      throw new Error('lotSize is required when mode is manual');
+    }
+    if (normalizedLotSize < 0.01 || normalizedLotSize > 5.0) {
+      throw new Error('lotSize must be between 0.01 and 5.0');
+    }
+  } else if (normalizedLotSize != null && (!Number.isFinite(normalizedLotSize) || normalizedLotSize < 0.01 || normalizedLotSize > 5.0)) {
+    throw new Error('lotSize must be between 0.01 and 5.0');
+  }
+
+  await updateAccountState(accountState.id, {
+    lotMode,
+    userLotSize: lotMode === 'manual' ? normalizedLotSize : null,
+  });
+
+  return {
+    ...accountState,
+    lotMode,
+    userLotSize: lotMode === 'manual' ? normalizedLotSize : null,
+  };
 }
 
 export async function getGoldxPlan(): Promise<GoldxPlan | null> {
