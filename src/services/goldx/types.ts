@@ -258,3 +258,12 @@ export interface GoldxVerifyResponse {
     licenseId: string;
   };
 }
+
+export interface GoldxRealtimeConfig {
+  lotMode: GoldxLotMode;
+  userLotSize: number | null;
+  mode: GoldxMode;
+  maxTrades: number;
+  cooldown: number;
+  burstEnabled: boolean;
+}

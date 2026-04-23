@@ -55,3 +55,12 @@ export const goldxSignalLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
+
+/** Rate limiter for realtime config polling */
+export const goldxConfigLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  message: { error: 'Too many config requests' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});

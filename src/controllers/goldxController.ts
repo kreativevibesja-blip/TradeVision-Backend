@@ -35,12 +35,13 @@ import {
   adminUpdateSetupRequest,
   getEaDownloadUrl,
   insertAuditLog,
+  getRealtimeConfigForAccount,
   consumePendingDashboardGrant,
   debugBindLicense,
   DEBUG_MODE,
   SKIP_HMAC,
 } from '../services/goldx/licenseService';
-import { computeHmac, getHmacSecret } from '../services/goldx/crypto';
+import { computeHmac, getHmacSecret, hashLicenseKey } from '../services/goldx/crypto';
 import { generateSignal, getCurrentSessionStatus, recordTrade } from '../services/goldx/strategyEngine';
 import { createOrder, captureOrder } from '../services/paypalService';
 import type { GoldxVerifyRequest, GoldxMode, GoldxSessionMode, GoldxRuntimeTradeState, GoldxLotMode } from '../services/goldx/types';
@@ -224,6 +225,41 @@ export const getSignalHandler = async (req: GoldxSessionRequest, res: Response) 
     res.json(signal);
   } catch (err) {
     console.error('[GoldX] getSignal error:', err);
+    res.status(500).json({ error: 'Internal error' });
+  }
+};
+
+export const getRealtimeConfigHandler = async (req: GoldxSessionRequest, res: Response) => {
+  try {
+    const license = req.goldxLicense;
+    if (!license) {
+      return res.status(401).json({ error: 'Session context missing' });
+    }
+
+    const account = typeof req.query.account === 'string' ? req.query.account.trim() : '';
+    const licenseKey = ((req.headers['x-goldx-license-key'] as string | undefined) ?? '').trim();
+
+    if (!account) {
+      return res.status(400).json({ error: 'account query is required' });
+    }
+    if (!licenseKey) {
+      return res.status(400).json({ error: 'License key header required' });
+    }
+    if (!license.mt5Account || license.mt5Account !== account) {
+      return res.status(403).json({ error: 'Account does not match session license' });
+    }
+    if (hashLicenseKey(licenseKey) !== license.licenseHash) {
+      return res.status(403).json({ error: 'License key does not match session' });
+    }
+
+    const config = await getRealtimeConfigForAccount(account);
+    if (!config) {
+      return res.status(404).json({ error: 'Config not found for account' });
+    }
+
+    res.json(config);
+  } catch (err) {
+    console.error('[GoldX] getRealtimeConfig error:', err);
     res.status(500).json({ error: 'Internal error' });
   }
 };

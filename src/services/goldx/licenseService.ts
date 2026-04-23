@@ -32,6 +32,7 @@ import type {
   GoldxSetupRequest,
   GoldxMaskedSetupRequest,
   GoldxSetupRequestStatus,
+  GoldxRealtimeConfig,
 } from './types';
 
 const SESSION_TTL_MINUTES = 10;
@@ -86,6 +87,20 @@ export async function getLicenseByHash(hash: string): Promise<GoldxLicense | nul
     .select('*')
     .eq('license_hash', hash)
     .single();
+  if (error || !data) return null;
+  return snakeToCamel(data) as unknown as GoldxLicense;
+}
+
+export async function getLicenseByMt5Account(mt5Account: string): Promise<GoldxLicense | null> {
+  const { data, error } = await supabase
+    .from('goldx_licenses')
+    .select('*')
+    .eq('mt5_account', mt5Account)
+    .eq('status', 'active')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
   if (error || !data) return null;
   return snakeToCamel(data) as unknown as GoldxLicense;
 }
@@ -561,6 +576,54 @@ async function getModeConfig(mode: GoldxMode): Promise<GoldxModeConfig> {
   if (!data?.value) return defaults[mode];
   const parsed = typeof data.value === 'string' ? JSON.parse(data.value) : data.value;
   return parsed[mode] ?? defaults[mode];
+}
+
+async function getTradeControlConfig(): Promise<{
+  fastReentryCooldownSeconds: number;
+  hybridReentryCooldownSeconds: number;
+  propReentryCooldownSeconds: number;
+}> {
+  const { data } = await supabase
+    .from('goldx_settings')
+    .select('value')
+    .eq('key', 'tradeControl')
+    .maybeSingle();
+
+  const value = (data?.value ?? {}) as Record<string, unknown>;
+  return {
+    fastReentryCooldownSeconds: typeof value.fastReentryCooldownSeconds === 'number' ? value.fastReentryCooldownSeconds : 120,
+    hybridReentryCooldownSeconds: typeof value.hybridReentryCooldownSeconds === 'number' ? value.hybridReentryCooldownSeconds : 180,
+    propReentryCooldownSeconds: typeof value.propReentryCooldownSeconds === 'number' ? value.propReentryCooldownSeconds : 300,
+  };
+}
+
+function getRealtimeCooldownSeconds(
+  mode: GoldxMode,
+  tradeControl: { fastReentryCooldownSeconds: number; hybridReentryCooldownSeconds: number; propReentryCooldownSeconds: number },
+): number {
+  if (mode === 'fast') return tradeControl.fastReentryCooldownSeconds;
+  if (mode === 'prop') return tradeControl.propReentryCooldownSeconds;
+  return tradeControl.hybridReentryCooldownSeconds;
+}
+
+export async function getRealtimeConfigForAccount(mt5Account: string): Promise<GoldxRealtimeConfig | null> {
+  const license = await getLicenseByMt5Account(mt5Account);
+  if (!license?.mt5Account) return null;
+
+  const [accountState, modeConfig, tradeControl] = await Promise.all([
+    getOrCreateAccountState(license.id, license.mt5Account),
+    getModeConfig(license.mt5Account ? (await getOrCreateAccountState(license.id, license.mt5Account)).mode : 'hybrid'),
+    getTradeControlConfig(),
+  ]);
+
+  return {
+    lotMode: accountState.lotMode,
+    userLotSize: accountState.userLotSize,
+    mode: accountState.mode,
+    maxTrades: modeConfig.maxTrades,
+    cooldown: getRealtimeCooldownSeconds(accountState.mode, tradeControl),
+    burstEnabled: accountState.maxBurstTrades > 0,
+  };
 }
 
 // ── Core: License Verification ──────────────────────────────

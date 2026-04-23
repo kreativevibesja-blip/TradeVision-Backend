@@ -6,6 +6,7 @@ import { Router } from 'express';
 import { authenticate, requireAdmin } from '../middleware/auth';
 import {
   authenticateGoldxSession,
+  goldxConfigLimiter,
   goldxVerifyLimiter,
   goldxSignalLimiter,
 } from '../middleware/goldxAuth';
@@ -14,6 +15,7 @@ import {
   getGoldxPlanPublic,
   // EA
   verifyLicenseHandler,
+  getRealtimeConfigHandler,
   getSignalHandler,
   // User
   getMyGoldxSubscription,
@@ -65,6 +67,7 @@ router.get('/plan', getGoldxPlanPublic);
 
 // ── EA Endpoints (HMAC-signed, no Supabase auth) ────────────
 router.post('/license/verify', goldxVerifyLimiter, verifyLicenseHandler);
+router.get('/config', goldxConfigLimiter, authenticateGoldxSession, getRealtimeConfigHandler);
 router.post('/signal', goldxSignalLimiter, authenticateGoldxSession, getSignalHandler);
 
 // ── User Endpoints (Supabase auth) ──────────────────────────
