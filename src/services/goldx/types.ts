@@ -208,6 +208,8 @@ export interface GoldxSignal {
     atr?: number;
     currentClose?: number;
     previousClose?: number | null;
+    currentBody?: number;
+    previousBody?: number | null;
     buyCurrent?: boolean;
     buyPrevious?: boolean;
     sellCurrent?: boolean;

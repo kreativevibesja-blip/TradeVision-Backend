@@ -327,12 +327,18 @@ function buildNoSignal(
 }
 
 function isMomentumCandle(candle: Candle, atr: number, direction: TradeDirection, bodyAtrMultiplier: number): boolean {
+  const candleRange = Math.max(candle.high - candle.low, 0);
   const body = Math.abs(candle.close - candle.open);
-  if (atr <= 0 || body < atr * bodyAtrMultiplier) return false;
+  if (atr <= 0) return false;
+
+  const requiredBody = Math.max(atr * bodyAtrMultiplier, candleRange * 0.22);
+  const wickAllowance = Math.max(atr * 0.22, candleRange * 0.3);
+  if (body < requiredBody) return false;
+
   if (direction === 'buy') {
-    return candle.close > candle.open && candle.close >= candle.high - atr * 0.1;
+    return candle.close > candle.open && candle.close >= candle.high - wickAllowance;
   }
-  return candle.close < candle.open && candle.close <= candle.low + atr * 0.1;
+  return candle.close < candle.open && candle.close <= candle.low + wickAllowance;
 }
 
 function isTrendAligned(snapshot: MarketSnapshot, direction: TradeDirection): boolean {
@@ -548,6 +554,8 @@ function buildBurstSignal(
         atr: snapshot.atr,
         currentClose: snapshot.current.close,
         previousClose: snapshot.previous?.close ?? null,
+        currentBody: Math.abs(snapshot.current.close - snapshot.current.open),
+        previousBody: snapshot.previous ? Math.abs(snapshot.previous.close - snapshot.previous.open) : null,
         buyCurrent: diagnostics.buyCurrent,
         buyPrevious: diagnostics.buyPrevious,
         sellCurrent: diagnostics.sellCurrent,
