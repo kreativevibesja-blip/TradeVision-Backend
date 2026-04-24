@@ -44,7 +44,7 @@ import {
   SKIP_HMAC,
 } from '../services/goldx/licenseService';
 import { computeHmac, getHmacSecret, hashLicenseKey } from '../services/goldx/crypto';
-import { generateSignal, getCurrentSessionStatus, recordTrade } from '../services/goldx/strategyEngine';
+import { generateSignal, getCurrentSessionStatus, reportTradeExecution } from '../services/goldx/strategyEngine';
 import { createOrder, captureOrder } from '../services/paypalService';
 import type { GoldxVerifyRequest, GoldxMode, GoldxSessionMode, GoldxRuntimeTradeState, GoldxLotMode } from '../services/goldx/types';
 
@@ -219,15 +219,64 @@ export const getSignalHandler = async (req: GoldxSessionRequest, res: Response) 
       runtimeTradeState,
     );
 
-    // Record trade if signal is actionable
-    if (signal.action !== 'none' && license.mt5Account) {
-      await recordTrade(license.id, license.mt5Account, signal);
-    }
-
     res.json(signal);
   } catch (err) {
     console.error('[GoldX] getSignal error:', err);
     res.status(500).json({ error: 'Internal error' });
+  }
+};
+
+export const reportTradeExecutionHandler = async (req: GoldxSessionRequest, res: Response) => {
+  try {
+    const license = req.goldxLicense;
+    if (!license?.mt5Account) {
+      return res.status(401).json({ error: 'Session context missing' });
+    }
+
+    const {
+      action,
+      entryPrice,
+      stopLoss,
+      takeProfit,
+      lotSize,
+      mode,
+      batchId,
+      batchIndex,
+      burstActive,
+      burstTradesOpened,
+      maxBurstTrades,
+      reason,
+      orderTicket,
+      dealTicket,
+    } = req.body as Record<string, unknown>;
+
+    if (typeof action !== 'string' || typeof entryPrice !== 'number' || typeof stopLoss !== 'number' || typeof takeProfit !== 'number' || typeof lotSize !== 'number') {
+      return res.status(400).json({ error: 'Execution payload is incomplete' });
+    }
+
+    await reportTradeExecution(license.id, license.mt5Account, {
+      action,
+      entryPrice,
+      stopLoss,
+      takeProfit,
+      lotSize,
+      mode: mode === 'fast' || mode === 'prop' || mode === 'hybrid'
+        ? mode
+        : (req.goldxAccountState?.mode ?? 'hybrid'),
+      batchId: typeof batchId === 'string' ? batchId : null,
+      batchIndex: typeof batchIndex === 'number' ? batchIndex : 1,
+      burstActive: typeof burstActive === 'boolean' ? burstActive : false,
+      burstTradesOpened: typeof burstTradesOpened === 'number' ? burstTradesOpened : 1,
+      maxBurstTrades: typeof maxBurstTrades === 'number' ? maxBurstTrades : 10,
+      reason: typeof reason === 'string' ? reason : null,
+      orderTicket: typeof orderTicket === 'string' ? orderTicket : null,
+      dealTicket: typeof dealTicket === 'string' ? dealTicket : null,
+    });
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('[GoldX] reportTradeExecution error:', err);
+    return res.status(500).json({ error: 'Internal error' });
   }
 };
 

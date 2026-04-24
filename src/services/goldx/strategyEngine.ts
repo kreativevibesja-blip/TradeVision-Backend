@@ -392,10 +392,88 @@ function toBurstAction(direction: TradeDirection): GoldxSignalAction {
   return direction === 'buy' ? 'burst_buy' : 'burst_sell';
 }
 
-function toTradeDirection(action: GoldxSignalAction): TradeDirection | null {
-  if (action === 'burst_buy') return 'buy';
-  if (action === 'burst_sell') return 'sell';
+function toTradeDirection(action: string): TradeDirection | null {
+  if (action === 'burst_buy' || action === 'buy') return 'buy';
+  if (action === 'burst_sell' || action === 'sell') return 'sell';
   return null;
+}
+
+async function persistTradeHistory(
+  licenseId: string,
+  mt5Account: string,
+  options: {
+    direction: TradeDirection;
+    mode: GoldxMode;
+    entries: Array<{ lot: number; entry: number; tp: number; sl: number }>;
+    batchId?: string | null;
+    batchIndexStart?: number;
+    burstActive?: boolean;
+    burstTradesOpened?: number;
+    maxBurstTrades?: number;
+    auditEvent: string;
+    auditMeta: Record<string, unknown>;
+  },
+): Promise<void> {
+  const {
+    direction,
+    mode,
+    entries,
+    batchId,
+    batchIndexStart = 1,
+    burstActive = false,
+    burstTradesOpened = entries.length,
+    maxBurstTrades = 10,
+    auditEvent,
+    auditMeta,
+  } = options;
+
+  if (!entries.length) return;
+
+  await supabase.from('goldx_trade_history').insert(
+    entries.map((entry, index) => ({
+      license_id: licenseId,
+      mt5_account: mt5Account,
+      symbol: 'XAUUSD',
+      direction,
+      entry_price: entry.entry,
+      sl_price: entry.sl,
+      tp_price: entry.tp,
+      lot_size: entry.lot,
+      mode,
+      batch_id: batchId ?? null,
+      batch_index: batchIndexStart + index,
+    })),
+  );
+
+  const { data: state } = await supabase
+    .from('goldx_account_state')
+    .select('id, trades_today, current_open_trades')
+    .eq('license_id', licenseId)
+    .eq('mt5_account', mt5Account)
+    .maybeSingle();
+
+  if (state) {
+    await supabase
+      .from('goldx_account_state')
+      .update({
+        trades_today: Number(state.trades_today ?? 0) + entries.length,
+        current_open_trades: Number(state.current_open_trades ?? 0) + entries.length,
+        last_trade_at: new Date().toISOString(),
+        last_batch_id: batchId ?? null,
+        burst_active: burstActive,
+        burst_trades_opened: burstTradesOpened,
+        max_burst_trades: maxBurstTrades,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', state.id);
+  }
+
+  await markOnboardingStateByLicenseId(licenseId, { setupCompleted: true });
+
+  await insertAuditLog(auditEvent, {
+    licenseId,
+    meta: auditMeta,
+  });
 }
 
 function clampRiskPercent(mode: GoldxMode, configuredRisk: number): number {
@@ -815,56 +893,71 @@ export async function recordTrade(
 
   if (!entries.length) return;
 
-  await supabase.from('goldx_trade_history').insert(
-    entries.map((entry, index) => ({
-      license_id: licenseId,
-      mt5_account: mt5Account,
-      symbol: 'XAUUSD',
-      direction: tradeDirection,
-      entry_price: entry.entry,
-      sl_price: entry.sl,
-      tp_price: entry.tp,
-      lot_size: entry.lot,
-      mode: signal.mode,
-      batch_id: signal.batchId ?? null,
-      batch_index: index + 1,
-    })),
-  );
-
-  const { data: state } = await supabase
-    .from('goldx_account_state')
-    .select('id, trades_today, current_open_trades')
-    .eq('license_id', licenseId)
-    .eq('mt5_account', mt5Account)
-    .maybeSingle();
-
-  if (state) {
-    await supabase
-      .from('goldx_account_state')
-      .update({
-        trades_today: Number(state.trades_today ?? 0) + entries.length,
-        current_open_trades: Number(state.current_open_trades ?? 0) + entries.length,
-        last_trade_at: new Date().toISOString(),
-        last_batch_id: signal.batchId ?? null,
-        burst_active: signal.burstActive ?? false,
-        burst_trades_opened: signal.burstTradesOpened ?? entries.length,
-        max_burst_trades: signal.maxBurstTrades ?? 10,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', state.id);
-  }
-
-  await markOnboardingStateByLicenseId(licenseId, { setupCompleted: true });
-
-  await insertAuditLog('goldx_signal_trade_recorded', {
-    licenseId,
-    meta: {
+  await persistTradeHistory(licenseId, mt5Account, {
+    direction: tradeDirection,
+    mode: signal.mode,
+    entries,
+    batchId: signal.batchId ?? null,
+    burstActive: signal.burstActive ?? false,
+    burstTradesOpened: signal.burstTradesOpened ?? entries.length,
+    maxBurstTrades: signal.maxBurstTrades ?? 10,
+    auditEvent: 'goldx_signal_trade_recorded',
+    auditMeta: {
       action: signal.action,
       batchId: signal.batchId ?? null,
       strategyName: signal.strategyName ?? null,
       entryCount: entries.length,
       confidenceScore: signal.confidence,
       maxTrades: signal.maxTrades ?? entries.length,
+    },
+  });
+}
+
+export async function reportTradeExecution(
+  licenseId: string,
+  mt5Account: string,
+  execution: {
+    action: string;
+    entryPrice: number;
+    stopLoss: number;
+    takeProfit: number;
+    lotSize: number;
+    mode: GoldxMode;
+    batchId?: string | null;
+    batchIndex?: number;
+    burstActive?: boolean;
+    burstTradesOpened?: number;
+    maxBurstTrades?: number;
+    reason?: string | null;
+    orderTicket?: string | null;
+    dealTicket?: string | null;
+  },
+): Promise<void> {
+  const tradeDirection = toTradeDirection(execution.action);
+  if (!tradeDirection) return;
+
+  await persistTradeHistory(licenseId, mt5Account, {
+    direction: tradeDirection,
+    mode: execution.mode,
+    entries: [{
+      lot: execution.lotSize,
+      entry: execution.entryPrice,
+      tp: execution.takeProfit,
+      sl: execution.stopLoss,
+    }],
+    batchId: execution.batchId ?? null,
+    batchIndexStart: execution.batchIndex ?? 1,
+    burstActive: execution.burstActive ?? false,
+    burstTradesOpened: execution.burstTradesOpened ?? 1,
+    maxBurstTrades: execution.maxBurstTrades ?? 10,
+    auditEvent: 'goldx_execution_reported',
+    auditMeta: {
+      action: execution.action,
+      reason: execution.reason ?? null,
+      orderTicket: execution.orderTicket ?? null,
+      dealTicket: execution.dealTicket ?? null,
+      batchId: execution.batchId ?? null,
+      batchIndex: execution.batchIndex ?? 1,
     },
   });
 }

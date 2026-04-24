@@ -18,6 +18,7 @@ import {
   getRealtimeConfigHandler,
   getSignalHandler,
   getSignalByAccountHandler,
+  reportTradeExecutionHandler,
   // User
   getMyGoldxSubscription,
   setMyGoldxMode,
@@ -71,6 +72,7 @@ router.get('/signal', goldxSignalLimiter, getSignalByAccountHandler);
 router.post('/license/verify', goldxVerifyLimiter, verifyLicenseHandler);
 router.get('/config', goldxConfigLimiter, authenticateGoldxSession, getRealtimeConfigHandler);
 router.post('/signal', goldxSignalLimiter, authenticateGoldxSession, getSignalHandler);
+router.post('/execution', goldxSignalLimiter, authenticateGoldxSession, reportTradeExecutionHandler);
 
 // ── User Endpoints (Supabase auth) ──────────────────────────
 router.get('/me', authenticate, getMyGoldxSubscription);
