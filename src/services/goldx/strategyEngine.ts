@@ -348,6 +348,32 @@ function isTrendAligned(snapshot: MarketSnapshot, direction: TradeDirection): bo
   return snapshot.ema20 <= snapshot.ema50;
 }
 
+function isContinuationTrigger(snapshot: MarketSnapshot, direction: TradeDirection): boolean {
+  if (!snapshot.previous || snapshot.atr <= 0) {
+    return false;
+  }
+
+  const currentBody = Math.abs(snapshot.current.close - snapshot.current.open);
+  const previousBody = Math.abs(snapshot.previous.close - snapshot.previous.open);
+  const minBody = snapshot.atr * 0.08;
+
+  if (direction === 'buy') {
+    return isTrendAligned(snapshot, 'buy')
+      && snapshot.current.close > snapshot.ema20
+      && snapshot.previous.close > snapshot.ema20
+      && snapshot.current.close > snapshot.current.open
+      && snapshot.previous.close > snapshot.previous.open
+      && (currentBody >= minBody || previousBody >= minBody);
+  }
+
+  return isTrendAligned(snapshot, 'sell')
+    && snapshot.current.close < snapshot.ema20
+    && snapshot.previous.close < snapshot.ema20
+    && snapshot.current.close < snapshot.current.open
+    && snapshot.previous.close < snapshot.previous.open
+    && (currentBody >= minBody || previousBody >= minBody);
+}
+
 function getBurstTriggerDiagnostics(snapshot: MarketSnapshot, config: EngineStrategyConfig) {
   const triggerMultiplier = Math.max(0.12, config.momentumBodyAtrMultiplier * 0.72);
   const buyCurrent = snapshot.current.close > snapshot.ema20
@@ -364,6 +390,8 @@ function getBurstTriggerDiagnostics(snapshot: MarketSnapshot, config: EngineStra
     && (snapshot.previous as Candle).close < snapshot.ema20
     && isTrendAligned(snapshot, 'sell')
     && isMomentumCandle(snapshot.previous as Candle, snapshot.atr, 'sell', triggerMultiplier);
+  const buyContinuation = isContinuationTrigger(snapshot, 'buy');
+  const sellContinuation = isContinuationTrigger(snapshot, 'sell');
 
   return {
     triggerMultiplier,
@@ -371,17 +399,19 @@ function getBurstTriggerDiagnostics(snapshot: MarketSnapshot, config: EngineStra
     buyPrevious,
     sellCurrent,
     sellPrevious,
+    buyContinuation,
+    sellContinuation,
   };
 }
 
 function resolveBurstDirection(snapshot: MarketSnapshot, config: EngineStrategyConfig): TradeDirection | null {
   const diagnostics = getBurstTriggerDiagnostics(snapshot, config);
-  const { buyCurrent, buyPrevious, sellCurrent, sellPrevious } = diagnostics;
-  if (buyCurrent || buyPrevious) {
+  const { buyCurrent, buyPrevious, sellCurrent, sellPrevious, buyContinuation, sellContinuation } = diagnostics;
+  if (buyCurrent || buyPrevious || buyContinuation) {
     return 'buy';
   }
 
-  if (sellCurrent || sellPrevious) {
+  if (sellCurrent || sellPrevious || sellContinuation) {
     return 'sell';
   }
 
