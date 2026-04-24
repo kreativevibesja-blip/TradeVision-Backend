@@ -16,7 +16,7 @@ import scannerRoutes from './routes/scannerRoutes';
 import notificationRoutes from './routes/notificationRoutes';
 import commandCenterRoutes from './routes/commandCenterRoutes';
 import radarRoutes from './routes/radarRoutes';
-import goldxRoutes from './routes/goldxRoutes';
+import goldxRoutes from './routes/goldx';
 import debugRoutes from './routes/debugRoutes';
 import { startQueueWorker } from './workers/queueWorker';
 import { startSystem } from './server/start';

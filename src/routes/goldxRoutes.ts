@@ -17,6 +17,7 @@ import {
   verifyLicenseHandler,
   getRealtimeConfigHandler,
   getSignalHandler,
+  getSignalByAccountHandler,
   // User
   getMyGoldxSubscription,
   setMyGoldxMode,
@@ -64,6 +65,7 @@ router.get('/', (_req, res) => {
 });
 
 router.get('/plan', getGoldxPlanPublic);
+router.get('/signal', goldxSignalLimiter, getSignalByAccountHandler);
 
 // ── EA Endpoints (HMAC-signed, no Supabase auth) ────────────
 router.post('/license/verify', goldxVerifyLimiter, verifyLicenseHandler);

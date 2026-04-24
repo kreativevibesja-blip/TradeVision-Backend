@@ -13,6 +13,8 @@ import {
   getUserSubscription,
   getUserLicense,
   getUserAccountState,
+  getLicenseByMt5Account,
+  getOrCreateAccountState,
   setUserMode,
   setUserLotSettings,
   setUserSessionMode,
@@ -226,6 +228,41 @@ export const getSignalHandler = async (req: GoldxSessionRequest, res: Response) 
   } catch (err) {
     console.error('[GoldX] getSignal error:', err);
     res.status(500).json({ error: 'Internal error' });
+  }
+};
+
+export const getSignalByAccountHandler = async (req: Request, res: Response) => {
+  try {
+    console.log('Signal endpoint hit');
+
+    const account = typeof req.query.account === 'string' ? req.query.account.trim() : '';
+
+    if (!account) {
+      return res.status(400).json({ error: 'Missing account' });
+    }
+
+    const license = await getLicenseByMt5Account(account);
+    if (!license?.mt5Account) {
+      return res.status(404).json({ error: 'Account not found' });
+    }
+
+    const accountState = await getOrCreateAccountState(license.id, license.mt5Account);
+
+    // Mock market data for browser-level smoke testing until live candle ingestion is wired.
+    const candles = [
+      { time: Date.now() - 60_000 * 2, open: 2300.0, high: 2300.4, low: 2299.8, close: 2300.1, volume: 100 },
+      { time: Date.now() - 60_000, open: 2300.1, high: 2300.5, low: 2299.9, close: 2300.2, volume: 120 },
+      { time: Date.now(), open: 2300.2, high: 2300.6, low: 2300.0, close: 2300.3, volume: 140 },
+    ];
+    const bid = 2300;
+    const ask = 2300.2;
+
+    const signal = await generateSignal(accountState, candles, bid, ask, 10000);
+
+    return res.json(signal);
+  } catch (err) {
+    console.error('Signal error:', err);
+    return res.status(500).json({ error: 'Internal error' });
   }
 };
 
