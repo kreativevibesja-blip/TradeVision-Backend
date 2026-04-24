@@ -620,17 +620,23 @@ export async function generateSignal(
   const mode = accountState.mode;
   const sessionMode = accountState.sessionMode ?? 'hybrid';
 
-  const [strategyConfig, tradeControl, modeConfig] = await Promise.all([
+  const [strategyConfig, tradeControl, resolvedModeConfig] = await Promise.all([
     getStrategyConfig(),
     getTradeControlConfig(),
     getModeConfig(mode),
   ]);
+  const modeConfig = !resolvedModeConfig.maxTrades || resolvedModeConfig.maxTrades <= 0
+    ? { ...resolvedModeConfig, maxTrades: 5 }
+    : resolvedModeConfig;
 
   const session = resolveAllowedSession(sessionMode, getSessionType(strategyConfig));
   const runtimeState = normalizeRuntimeState(accountState, runtimeTradeState);
   if (session === 'off') {
     return buildNoSignal(now, mode, session, 'Outside configured trading session', { strategyName: 'burst-router' });
   }
+
+  console.log('Trades today:', accountState.tradesToday);
+  console.log('Max trades:', modeConfig.maxTrades);
 
   const gate = passesTradeControl(accountState, tradeControl, runtimeState);
   if (!gate.pass) {

@@ -38,6 +38,7 @@ import type {
 const SESSION_TTL_MINUTES = 10;
 const DEBUG_MODE = process.env.DEBUG_LICENSE === 'true';
 const SKIP_HMAC = process.env.SKIP_HMAC === 'true';
+const FORCE_MODE_CONFIG_OVERRIDE = process.env.GOLDX_FORCE_MODE_CONFIG === 'true';
 const USED_NONCES = new Map<string, number>();
 
 function logVerifyDebug(...args: unknown[]) {
@@ -561,21 +562,58 @@ export async function getEaDownloadUrl(): Promise<string | null> {
 // ── Mode Config ─────────────────────────────────────────────
 
 async function getModeConfig(mode: GoldxMode): Promise<GoldxModeConfig> {
-  const { data } = await supabase
-    .from('goldx_settings')
-    .select('value')
-    .eq('key', 'modes')
-    .single();
-
   const defaults: Record<GoldxMode, GoldxModeConfig> = {
     fast: { riskPercent: 2.0, maxTrades: 6, filterStrictness: 'loose' },
     prop: { riskPercent: 0.5, maxTrades: 3, filterStrictness: 'strict' },
     hybrid: { riskPercent: 1.0, maxTrades: 4, filterStrictness: 'normal' },
   };
 
-  if (!data?.value) return defaults[mode];
-  const parsed = typeof data.value === 'string' ? JSON.parse(data.value) : data.value;
-  return parsed[mode] ?? defaults[mode];
+  if (FORCE_MODE_CONFIG_OVERRIDE) {
+    const config: GoldxModeConfig = {
+      riskPercent: 1,
+      maxTrades: 10,
+      filterStrictness: 'normal',
+    };
+    console.log('Mode config:', config);
+    return config;
+  }
+
+  const { data } = await supabase
+    .from('goldx_settings')
+    .select('value')
+    .eq('key', 'modes')
+    .maybeSingle();
+
+  const fallback = defaults[mode];
+  let parsed: Record<string, unknown> = {};
+
+  try {
+    parsed = typeof data?.value === 'string'
+      ? JSON.parse(data.value)
+      : ((data?.value as Record<string, unknown> | null) ?? {});
+  } catch {
+    parsed = {};
+  }
+
+  const rawModeConfig = ((parsed[mode] as Record<string, unknown> | undefined) ?? {});
+  const config: GoldxModeConfig = {
+    riskPercent: typeof rawModeConfig.riskPercent === 'number' && Number.isFinite(rawModeConfig.riskPercent)
+      ? rawModeConfig.riskPercent
+      : fallback.riskPercent,
+    maxTrades: typeof rawModeConfig.maxTrades === 'number' && Number.isFinite(rawModeConfig.maxTrades)
+      ? rawModeConfig.maxTrades
+      : fallback.maxTrades,
+    filterStrictness: rawModeConfig.filterStrictness === 'loose' || rawModeConfig.filterStrictness === 'normal' || rawModeConfig.filterStrictness === 'strict'
+      ? rawModeConfig.filterStrictness
+      : fallback.filterStrictness,
+  };
+
+  if (!config.maxTrades || config.maxTrades <= 0) {
+    config.maxTrades = 5;
+  }
+
+  console.log('Mode config:', config);
+  return config;
 }
 
 async function getTradeControlConfig(): Promise<{
