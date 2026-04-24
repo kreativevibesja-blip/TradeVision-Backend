@@ -203,6 +203,16 @@ export interface GoldxSignal {
     tradesToday: number;
     maxTrades: number;
     currentOpenTrades: number;
+    ema20?: number;
+    ema50?: number;
+    atr?: number;
+    currentClose?: number;
+    previousClose?: number | null;
+    buyCurrent?: boolean;
+    buyPrevious?: boolean;
+    sellCurrent?: boolean;
+    sellPrevious?: boolean;
+    triggerMultiplier?: number;
   };
 }
 

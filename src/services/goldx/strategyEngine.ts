@@ -335,13 +335,50 @@ function isMomentumCandle(candle: Candle, atr: number, direction: TradeDirection
   return candle.close < candle.open && candle.close <= candle.low + atr * 0.1;
 }
 
+function isTrendAligned(snapshot: MarketSnapshot, direction: TradeDirection): boolean {
+  if (direction === 'buy') {
+    return snapshot.ema20 >= snapshot.ema50;
+  }
+  return snapshot.ema20 <= snapshot.ema50;
+}
+
+function getBurstTriggerDiagnostics(snapshot: MarketSnapshot, config: EngineStrategyConfig) {
+  const triggerMultiplier = Math.max(0.12, config.momentumBodyAtrMultiplier * 0.72);
+  const buyCurrent = snapshot.current.close > snapshot.ema20
+    && isTrendAligned(snapshot, 'buy')
+    && isMomentumCandle(snapshot.current, snapshot.atr, 'buy', triggerMultiplier);
+  const buyPrevious = Boolean(snapshot.previous)
+    && (snapshot.previous as Candle).close > snapshot.ema20
+    && isTrendAligned(snapshot, 'buy')
+    && isMomentumCandle(snapshot.previous as Candle, snapshot.atr, 'buy', triggerMultiplier);
+  const sellCurrent = snapshot.current.close < snapshot.ema20
+    && isTrendAligned(snapshot, 'sell')
+    && isMomentumCandle(snapshot.current, snapshot.atr, 'sell', triggerMultiplier);
+  const sellPrevious = Boolean(snapshot.previous)
+    && (snapshot.previous as Candle).close < snapshot.ema20
+    && isTrendAligned(snapshot, 'sell')
+    && isMomentumCandle(snapshot.previous as Candle, snapshot.atr, 'sell', triggerMultiplier);
+
+  return {
+    triggerMultiplier,
+    buyCurrent,
+    buyPrevious,
+    sellCurrent,
+    sellPrevious,
+  };
+}
+
 function resolveBurstDirection(snapshot: MarketSnapshot, config: EngineStrategyConfig): TradeDirection | null {
-  if (snapshot.current.close > snapshot.ema20 && isMomentumCandle(snapshot.current, snapshot.atr, 'buy', config.momentumBodyAtrMultiplier)) {
+  const diagnostics = getBurstTriggerDiagnostics(snapshot, config);
+  const { buyCurrent, buyPrevious, sellCurrent, sellPrevious } = diagnostics;
+  if (buyCurrent || buyPrevious) {
     return 'buy';
   }
-  if (snapshot.current.close < snapshot.ema20 && isMomentumCandle(snapshot.current, snapshot.atr, 'sell', config.momentumBodyAtrMultiplier)) {
+
+  if (sellCurrent || sellPrevious) {
     return 'sell';
   }
+
   return null;
 }
 
@@ -495,11 +532,28 @@ function buildBurstSignal(
 ): GoldxSignal {
   const direction = resolveBurstDirection(snapshot, strategyConfig);
   if (!direction) {
+    const diagnostics = getBurstTriggerDiagnostics(snapshot, strategyConfig);
     return buildNoSignal(now, mode, session, 'Burst trigger not confirmed', {
       strategyName: 'burst-momentum',
+      reason: `Burst trigger not confirmed | buyCurrent=${diagnostics.buyCurrent} buyPrevious=${diagnostics.buyPrevious} sellCurrent=${diagnostics.sellCurrent} sellPrevious=${diagnostics.sellPrevious} ema20=${snapshot.ema20.toFixed(2)} ema50=${snapshot.ema50.toFixed(2)} currentClose=${snapshot.current.close.toFixed(2)} previousClose=${snapshot.previous?.close?.toFixed(2) ?? 'null'} atr=${snapshot.atr.toFixed(2)} triggerMultiplier=${diagnostics.triggerMultiplier.toFixed(2)}`,
       reentryAllowed: canReenter(mode, tradeControl, runtimeState),
       currentOpenTrades: runtimeState.currentOpenTrades,
       maxSimultaneousTrades: 10,
+      debug: {
+        tradesToday: accountState.tradesToday,
+        maxTrades: modeConfig.maxTrades,
+        currentOpenTrades: runtimeState.currentOpenTrades,
+        ema20: snapshot.ema20,
+        ema50: snapshot.ema50,
+        atr: snapshot.atr,
+        currentClose: snapshot.current.close,
+        previousClose: snapshot.previous?.close ?? null,
+        buyCurrent: diagnostics.buyCurrent,
+        buyPrevious: diagnostics.buyPrevious,
+        sellCurrent: diagnostics.sellCurrent,
+        sellPrevious: diagnostics.sellPrevious,
+        triggerMultiplier: diagnostics.triggerMultiplier,
+      },
     });
   }
 
