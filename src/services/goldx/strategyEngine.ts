@@ -1,8 +1,11 @@
-// ============================================================
-// GoldX — Burst Scalping Engine
-// ============================================================
-
 import { supabase } from '../../lib/supabase';
+import { generateDaySignal } from './dayStrategy';
+import { generateHybridSignal, generateUnifiedSignal } from './hybridStrategy';
+import { analyzeMarketRegime, buildSnapshot, clamp, floorLot, roundLot, type Candle } from './indicators';
+import { getModeConfig, insertAuditLog, markOnboardingStateByLicenseId } from './licenseService';
+import { generateNightSignal } from './nightStrategy';
+import { getSessionType, normalizeSessionMode, resolveAllowedSession, toSessionStatus, type BrokerSession } from './session';
+import type { EngineStrategyConfig, EngineTradeControlConfig, StrategyCandidate, StrategyContext, StrategyEvaluation } from './strategyModels';
 import type {
   GoldxAccountState,
   GoldxMode,
@@ -12,90 +15,52 @@ import type {
   GoldxSessionMode,
   GoldxSessionStatus,
   GoldxSignal,
-  GoldxSignalAction,
 } from './types';
-import { getModeConfig, insertAuditLog, markOnboardingStateByLicenseId } from './licenseService';
 
-type BrokerSession = 'night' | 'day' | 'off';
 type TradeDirection = 'buy' | 'sell';
-
-interface Candle {
-  time: number;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
-}
-
-interface EngineStrategyConfig {
-  symbol: string;
-  timeframe: string;
-  brokerOffset: number;
-  debugLogging: boolean;
-  dayMaxSpreadPoints: number;
-  nightMaxSpreadPoints: number;
-  stableAtrMultiplier: number;
-  momentumBodyAtrMultiplier: number;
-  microTpAtrMultiplier: number;
-  burstSlAtrMultiplier: number;
-}
-
-interface EngineTradeControlConfig {
-  dailyProfitStopPercent: number;
-  dailyDrawdownStopPercent: number;
-  fastReentryCooldownSeconds: number;
-  hybridReentryCooldownSeconds: number;
-  propReentryCooldownSeconds: number;
-  maxTradesPerMinute: number;
-  maxLossPerBatchPercent: number;
-  maxBurstsPerHour: number;
-  burstLossStreakLimit: number;
-  burstDelayMsMin: number;
-  burstDelayMsMax: number;
-}
-
-interface MarketSnapshot {
-  bid: number;
-  ask: number;
-  mid: number;
-  spread: number;
-  atr: number;
-  ema20: number;
-  ema50: number;
-  averageRange: number;
-  candles: Candle[];
-  current: Candle;
-  previous: Candle | null;
-}
 
 const DEFAULT_STRATEGY_CONFIG: EngineStrategyConfig = {
   symbol: 'XAUUSD',
   timeframe: 'M5',
-  brokerOffset: 2,
   debugLogging: true,
   dayMaxSpreadPoints: 24,
-  nightMaxSpreadPoints: 20,
-  stableAtrMultiplier: 1.35,
-  momentumBodyAtrMultiplier: 0.25,
-  microTpAtrMultiplier: 0.2,
-  burstSlAtrMultiplier: 0.6,
+  nightMaxSpreadPoints: 18,
+  stableAtrMultiplier: 1.25,
+  momentumBodyAtrMultiplier: 0.2,
+  microTpAtrMultiplier: 0.35,
+  burstSlAtrMultiplier: 0.8,
+  dayPullbackMinPct: 0.3,
+  dayPullbackMaxPct: 0.5,
+  nightSweepAtrBuffer: 0.22,
+  confidenceThreshold: 65,
+  dayTpMin: 2.0,
+  dayTpMax: 5.0,
+  daySlMin: 5.0,
+  daySlMax: 10.0,
+  nightTpMin: 1.5,
+  nightTpMax: 4.0,
+  nightSlMin: 3.0,
+  nightSlMax: 6.0,
+  softCooldownFastSeconds: 10,
+  softCooldownHybridSeconds: 18,
+  softCooldownPropSeconds: 30,
+  softOpenTradeLimit: 6,
+  defaultBurstEntries: 3,
+  maxBurstEntries: 10,
 };
 
 const DEFAULT_TRADE_CONTROL: EngineTradeControlConfig = {
   dailyProfitStopPercent: 3.0,
   dailyDrawdownStopPercent: 2.0,
-  fastReentryCooldownSeconds: 120,
-  hybridReentryCooldownSeconds: 180,
-  propReentryCooldownSeconds: 300,
   maxTradesPerMinute: 10,
   maxLossPerBatchPercent: 1.5,
-  maxBurstsPerHour: 3,
+  maxBurstsPerHour: 6,
   burstLossStreakLimit: 3,
   burstDelayMsMin: 300,
   burstDelayMsMax: 800,
 };
 
+const HARD_OPEN_TRADE_LIMIT = 10;
 const BURST_ENTRY_SPLITS = [0.18, 0.16, 0.14, 0.12, 0.1, 0.09, 0.08, 0.06, 0.04, 0.03];
 const MAX_LOT_BY_MODE: Record<GoldxMode, number> = {
   fast: 1.0,
@@ -118,7 +83,6 @@ async function getStrategyConfig(): Promise<EngineStrategyConfig> {
   return {
     symbol: typeof value.symbol === 'string' ? value.symbol : DEFAULT_STRATEGY_CONFIG.symbol,
     timeframe: typeof value.timeframe === 'string' ? value.timeframe : DEFAULT_STRATEGY_CONFIG.timeframe,
-    brokerOffset: asNumber(value.brokerOffset, DEFAULT_STRATEGY_CONFIG.brokerOffset),
     debugLogging: typeof value.debugLogging === 'boolean' ? value.debugLogging : DEFAULT_STRATEGY_CONFIG.debugLogging,
     dayMaxSpreadPoints: asNumber(value.dayMaxSpreadPoints, DEFAULT_STRATEGY_CONFIG.dayMaxSpreadPoints),
     nightMaxSpreadPoints: asNumber(value.nightMaxSpreadPoints, DEFAULT_STRATEGY_CONFIG.nightMaxSpreadPoints),
@@ -126,6 +90,24 @@ async function getStrategyConfig(): Promise<EngineStrategyConfig> {
     momentumBodyAtrMultiplier: asNumber(value.momentumBodyAtrMultiplier, DEFAULT_STRATEGY_CONFIG.momentumBodyAtrMultiplier),
     microTpAtrMultiplier: asNumber(value.microTpAtrMultiplier, DEFAULT_STRATEGY_CONFIG.microTpAtrMultiplier),
     burstSlAtrMultiplier: asNumber(value.burstSlAtrMultiplier, DEFAULT_STRATEGY_CONFIG.burstSlAtrMultiplier),
+    dayPullbackMinPct: asNumber(value.dayPullbackMinPct, DEFAULT_STRATEGY_CONFIG.dayPullbackMinPct),
+    dayPullbackMaxPct: asNumber(value.dayPullbackMaxPct, DEFAULT_STRATEGY_CONFIG.dayPullbackMaxPct),
+    nightSweepAtrBuffer: asNumber(value.nightSweepAtrBuffer, DEFAULT_STRATEGY_CONFIG.nightSweepAtrBuffer),
+    confidenceThreshold: asNumber(value.confidenceThreshold, DEFAULT_STRATEGY_CONFIG.confidenceThreshold),
+    dayTpMin: asNumber(value.dayTpMin, DEFAULT_STRATEGY_CONFIG.dayTpMin),
+    dayTpMax: asNumber(value.dayTpMax, DEFAULT_STRATEGY_CONFIG.dayTpMax),
+    daySlMin: asNumber(value.daySlMin, DEFAULT_STRATEGY_CONFIG.daySlMin),
+    daySlMax: asNumber(value.daySlMax, DEFAULT_STRATEGY_CONFIG.daySlMax),
+    nightTpMin: asNumber(value.nightTpMin, DEFAULT_STRATEGY_CONFIG.nightTpMin),
+    nightTpMax: asNumber(value.nightTpMax, DEFAULT_STRATEGY_CONFIG.nightTpMax),
+    nightSlMin: asNumber(value.nightSlMin, DEFAULT_STRATEGY_CONFIG.nightSlMin),
+    nightSlMax: asNumber(value.nightSlMax, DEFAULT_STRATEGY_CONFIG.nightSlMax),
+    softCooldownFastSeconds: asNumber(value.softCooldownFastSeconds, DEFAULT_STRATEGY_CONFIG.softCooldownFastSeconds),
+    softCooldownHybridSeconds: asNumber(value.softCooldownHybridSeconds, DEFAULT_STRATEGY_CONFIG.softCooldownHybridSeconds),
+    softCooldownPropSeconds: asNumber(value.softCooldownPropSeconds, DEFAULT_STRATEGY_CONFIG.softCooldownPropSeconds),
+    softOpenTradeLimit: asNumber(value.softOpenTradeLimit, DEFAULT_STRATEGY_CONFIG.softOpenTradeLimit),
+    defaultBurstEntries: asNumber(value.defaultBurstEntries, DEFAULT_STRATEGY_CONFIG.defaultBurstEntries),
+    maxBurstEntries: asNumber(value.maxBurstEntries, DEFAULT_STRATEGY_CONFIG.maxBurstEntries),
   };
 }
 
@@ -140,9 +122,6 @@ async function getTradeControlConfig(): Promise<EngineTradeControlConfig> {
   return {
     dailyProfitStopPercent: asNumber(value.dailyProfitStopPercent, DEFAULT_TRADE_CONTROL.dailyProfitStopPercent),
     dailyDrawdownStopPercent: asNumber(value.dailyDrawdownStopPercent, DEFAULT_TRADE_CONTROL.dailyDrawdownStopPercent),
-    fastReentryCooldownSeconds: asNumber(value.fastReentryCooldownSeconds, DEFAULT_TRADE_CONTROL.fastReentryCooldownSeconds),
-    hybridReentryCooldownSeconds: asNumber(value.hybridReentryCooldownSeconds, DEFAULT_TRADE_CONTROL.hybridReentryCooldownSeconds),
-    propReentryCooldownSeconds: asNumber(value.propReentryCooldownSeconds, DEFAULT_TRADE_CONTROL.propReentryCooldownSeconds),
     maxTradesPerMinute: asNumber(value.maxTradesPerMinute, DEFAULT_TRADE_CONTROL.maxTradesPerMinute),
     maxLossPerBatchPercent: asNumber(value.maxLossPerBatchPercent, DEFAULT_TRADE_CONTROL.maxLossPerBatchPercent),
     maxBurstsPerHour: asNumber(value.maxBurstsPerHour, DEFAULT_TRADE_CONTROL.maxBurstsPerHour),
@@ -152,139 +131,28 @@ async function getTradeControlConfig(): Promise<EngineTradeControlConfig> {
   };
 }
 
-function calculateATR(candles: Candle[], period = 14): number {
-  if (candles.length < period + 1) return 0;
-  const trs: number[] = [];
-  for (let index = 1; index < candles.length; index += 1) {
-    const current = candles[index];
-    const previous = candles[index - 1];
-    const tr = Math.max(
-      current.high - current.low,
-      Math.abs(current.high - previous.close),
-      Math.abs(current.low - previous.close),
-    );
-    trs.push(tr);
-  }
-  const recent = trs.slice(-period);
-  return recent.reduce((sum, value) => sum + value, 0) / recent.length;
-}
-
-function calculateEMA(candles: Candle[], period: number): number {
-  if (candles.length === 0) return 0;
-  const multiplier = 2 / (period + 1);
-  let ema = candles[0].close;
-  for (let index = 1; index < candles.length; index += 1) {
-    ema = (candles[index].close - ema) * multiplier + ema;
-  }
-  return ema;
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value));
-}
-
-function roundPrice(value: number): number {
-  return Math.round(value * 100) / 100;
-}
-
-function roundLot(value: number): number {
-  return Math.max(0.01, Math.round(value * 100) / 100);
-}
-
-function floorLot(value: number): number {
-  return Math.floor(value * 100) / 100;
-}
-
-function getBrokerMinutes(config: EngineStrategyConfig): number {
-  const now = new Date();
-  const offsetHours = ((now.getUTCHours() + config.brokerOffset) % 24 + 24) % 24;
-  return offsetHours * 60 + now.getUTCMinutes();
-}
-
-function getSessionType(config: EngineStrategyConfig): BrokerSession {
-  const minutes = getBrokerMinutes(config);
-  if (minutes >= 0 && minutes <= 6 * 60) return 'night';
-  if (minutes >= 8 * 60 && minutes <= 17 * 60) return 'day';
-  return 'off';
-}
-
-function resolveAllowedSession(sessionMode: GoldxSessionMode, brokerSession: BrokerSession): BrokerSession {
-  if (sessionMode === 'night') return brokerSession === 'night' ? 'night' : 'off';
-  if (sessionMode === 'day') return brokerSession === 'day' ? 'day' : 'off';
-  if (sessionMode === 'hybrid' || sessionMode === 'all') return brokerSession;
-  return 'off';
-}
-
-export async function isWithinTradingSession(sessionMode: GoldxSessionMode): Promise<boolean> {
-  const config = await getStrategyConfig();
-  return resolveAllowedSession(sessionMode, getSessionType(config)) !== 'off';
-}
-
-export async function getCurrentSessionStatus(sessionMode: GoldxSessionMode): Promise<GoldxSessionStatus> {
-  const config = await getStrategyConfig();
-  const session = resolveAllowedSession(sessionMode, getSessionType(config));
-  if (session === 'day') return 'day';
-  if (session === 'night') return 'night';
-  return 'closed';
-}
-
-function getRecentAverageRange(candles: Candle[], count = 20): number {
-  const window = candles.slice(-count);
-  if (!window.length) return 0;
-  return window.reduce((sum, candle) => sum + (candle.high - candle.low), 0) / window.length;
-}
-
-function buildSnapshot(candles: Candle[], bid: number, ask: number): MarketSnapshot {
-  const current = candles[candles.length - 1];
-  const previous = candles.length > 1 ? candles[candles.length - 2] : null;
-  return {
-    bid,
-    ask,
-    mid: (bid + ask) / 2,
-    spread: (ask - bid) * 10,
-    atr: calculateATR(candles),
-    ema20: calculateEMA(candles, 20),
-    ema50: calculateEMA(candles, 50),
-    averageRange: getRecentAverageRange(candles, 20),
-    candles,
-    current,
-    previous,
-  };
-}
-
-function getModeBurstCap(mode: GoldxMode, accountState: GoldxAccountState): number {
-  const accountCap = clamp(accountState.maxBurstTrades || 10, 3, 10);
-  if (mode === 'fast') return Math.min(accountCap, 10);
-  if (mode === 'prop') return Math.min(accountCap, 4);
-  return Math.min(accountCap, 6);
-}
-
-function getModeReentryCooldownSeconds(mode: GoldxMode, tradeControl: EngineTradeControlConfig): number {
-  if (mode === 'fast') return tradeControl.fastReentryCooldownSeconds;
-  if (mode === 'prop') return tradeControl.propReentryCooldownSeconds;
-  return tradeControl.hybridReentryCooldownSeconds;
+function getSoftCooldownSeconds(mode: GoldxMode, strategyConfig: EngineStrategyConfig): number {
+  if (mode === 'fast') return strategyConfig.softCooldownFastSeconds;
+  if (mode === 'prop') return strategyConfig.softCooldownPropSeconds;
+  return strategyConfig.softCooldownHybridSeconds;
 }
 
 function canReenter(
   mode: GoldxMode,
-  tradeControl: EngineTradeControlConfig,
+  strategyConfig: EngineStrategyConfig,
   runtimeState: Required<GoldxRuntimeTradeState>,
 ): boolean {
   if (!runtimeState.lastBatchClosedAt) return true;
   const elapsedMs = Date.now() - new Date(runtimeState.lastBatchClosedAt).getTime();
-  return elapsedMs >= getModeReentryCooldownSeconds(mode, tradeControl) * 1000;
+  return elapsedMs >= getSoftCooldownSeconds(mode, strategyConfig) * 1000;
 }
 
 function normalizeRuntimeState(
   accountState: GoldxAccountState,
   runtimeState?: GoldxRuntimeTradeState,
 ): Required<GoldxRuntimeTradeState> {
-  const fallbackOpenTrades = typeof runtimeState?.currentOpenTrades === 'number'
-    ? runtimeState.currentOpenTrades
-    : 0;
-
   return {
-    currentOpenTrades: fallbackOpenTrades,
+    currentOpenTrades: typeof runtimeState?.currentOpenTrades === 'number' ? runtimeState.currentOpenTrades : 0,
     tradesOpenedLastMinute: runtimeState?.tradesOpenedLastMinute ?? 0,
     profitToday: runtimeState?.profitToday ?? accountState.profitToday,
     lastBatchClosedAt: runtimeState?.lastBatchClosedAt ?? accountState.lastBatchClosedAt ?? null,
@@ -294,6 +162,10 @@ function normalizeRuntimeState(
     burstsLastHour: runtimeState?.burstsLastHour ?? 0,
     burstLossesInRow: runtimeState?.burstLossesInRow ?? 0,
   };
+}
+
+function signalSession(session: BrokerSession): 'day' | 'night' | 'off' {
+  return session === 'inactive' ? 'off' : session;
 }
 
 function buildNoSignal(
@@ -314,118 +186,432 @@ function buildNoSignal(
     reentryAllowed: false,
     burstActive: false,
     burstTradesOpened: 0,
-    maxBurstTrades: 10,
-    maxTrades: 10,
+    maxBurstTrades: HARD_OPEN_TRADE_LIMIT,
+    maxTrades: 0,
     confidence: 0,
     reason,
     mode,
     timestamp: now,
-    session,
-    sessionType: session === 'off' ? 'closed' : session,
+    session: signalSession(session),
+    sessionType: toSessionStatus(session),
     ...extras,
   };
 }
 
-function isMomentumCandle(candle: Candle, atr: number, direction: TradeDirection, bodyAtrMultiplier: number): boolean {
-  const candleRange = Math.max(candle.high - candle.low, 0);
-  const body = Math.abs(candle.close - candle.open);
-  if (atr <= 0) return false;
-
-  const requiredBody = Math.max(atr * bodyAtrMultiplier, candleRange * 0.22);
-  const wickAllowance = Math.max(atr * 0.22, candleRange * 0.3);
-  if (body < requiredBody) return false;
-
-  if (direction === 'buy') {
-    return candle.close > candle.open && candle.close >= candle.high - wickAllowance;
-  }
-  return candle.close < candle.open && candle.close <= candle.low + wickAllowance;
+function toTradeDirection(action: string): TradeDirection | null {
+  if (action === 'buy' || action === 'burst_buy') return 'buy';
+  if (action === 'sell' || action === 'burst_sell') return 'sell';
+  return null;
 }
 
-function isTrendAligned(snapshot: MarketSnapshot, direction: TradeDirection): boolean {
-  if (direction === 'buy') {
-    return snapshot.ema20 >= snapshot.ema50;
-  }
-  return snapshot.ema20 <= snapshot.ema50;
+function clampRiskPercent(mode: GoldxMode, configuredRisk: number): number {
+  if (mode === 'fast') return clamp(configuredRisk, 0.8, 1.2);
+  if (mode === 'prop') return clamp(configuredRisk, 0.3, 0.6);
+  return clamp(configuredRisk, 0.5, 0.9);
 }
 
-function isContinuationTrigger(snapshot: MarketSnapshot, direction: TradeDirection): boolean {
-  if (!snapshot.previous || snapshot.atr <= 0) {
-    return false;
-  }
-
-  const currentBody = Math.abs(snapshot.current.close - snapshot.current.open);
-  const previousBody = Math.abs(snapshot.previous.close - snapshot.previous.open);
-  const minBody = snapshot.atr * 0.08;
-
-  if (direction === 'buy') {
-    return isTrendAligned(snapshot, 'buy')
-      && snapshot.current.close > snapshot.ema20
-      && snapshot.previous.close > snapshot.ema20
-      && snapshot.current.close > snapshot.current.open
-      && snapshot.previous.close > snapshot.previous.open
-      && (currentBody >= minBody || previousBody >= minBody);
-  }
-
-  return isTrendAligned(snapshot, 'sell')
-    && snapshot.current.close < snapshot.ema20
-    && snapshot.previous.close < snapshot.ema20
-    && snapshot.current.close < snapshot.current.open
-    && snapshot.previous.close < snapshot.previous.open
-    && (currentBody >= minBody || previousBody >= minBody);
+function calculateLotSize(
+  mode: GoldxMode,
+  configuredRiskPercent: number,
+  accountBalance: number,
+  entry: number,
+  stopLoss: number,
+): number {
+  const riskPercent = clampRiskPercent(mode, configuredRiskPercent);
+  const riskAmount = accountBalance * (riskPercent / 100);
+  const distance = Math.abs(entry - stopLoss);
+  if (distance <= 0) return 0.01;
+  return Math.max(0.01, Math.round((riskAmount / (distance * 100)) * 100) / 100);
 }
 
-function getBurstTriggerDiagnostics(snapshot: MarketSnapshot, config: EngineStrategyConfig) {
-  const triggerMultiplier = Math.max(0.12, config.momentumBodyAtrMultiplier * 0.72);
-  const buyCurrent = snapshot.current.close > snapshot.ema20
-    && isTrendAligned(snapshot, 'buy')
-    && isMomentumCandle(snapshot.current, snapshot.atr, 'buy', triggerMultiplier);
-  const buyPrevious = Boolean(snapshot.previous)
-    && (snapshot.previous as Candle).close > snapshot.ema20
-    && isTrendAligned(snapshot, 'buy')
-    && isMomentumCandle(snapshot.previous as Candle, snapshot.atr, 'buy', triggerMultiplier);
-  const sellCurrent = snapshot.current.close < snapshot.ema20
-    && isTrendAligned(snapshot, 'sell')
-    && isMomentumCandle(snapshot.current, snapshot.atr, 'sell', triggerMultiplier);
-  const sellPrevious = Boolean(snapshot.previous)
-    && (snapshot.previous as Candle).close < snapshot.ema20
-    && isTrendAligned(snapshot, 'sell')
-    && isMomentumCandle(snapshot.previous as Candle, snapshot.atr, 'sell', triggerMultiplier);
-  const buyContinuation = isContinuationTrigger(snapshot, 'buy');
-  const sellContinuation = isContinuationTrigger(snapshot, 'sell');
+function capLotByBalance(lotSize: number, accountBalance: number): number {
+  if (accountBalance <= 0) return lotSize;
+  const maxAffordableLot = floorLot(accountBalance / 1000);
+  return Math.min(lotSize, maxAffordableLot);
+}
+
+function resolveExecutionLot(
+  mode: GoldxMode,
+  configuredRiskPercent: number,
+  accountState: GoldxAccountState,
+  accountBalance: number,
+  entry: number,
+  stopLoss: number,
+): { lotSize: number; lotMode: GoldxAccountState['lotMode']; userLot: number | null } {
+  const userLot = typeof accountState.userLotSize === 'number' && Number.isFinite(accountState.userLotSize)
+    ? clamp(accountState.userLotSize, 0.01, 5.0)
+    : null;
+
+  let lotSize = accountState.lotMode === 'manual' && userLot != null
+    ? userLot
+    : calculateLotSize(mode, configuredRiskPercent, accountBalance, entry, stopLoss);
+
+  lotSize = Math.min(lotSize, MAX_LOT_BY_MODE[mode]);
+  lotSize = capLotByBalance(lotSize, accountBalance);
 
   return {
-    triggerMultiplier,
-    buyCurrent,
-    buyPrevious,
-    sellCurrent,
-    sellPrevious,
-    buyContinuation,
-    sellContinuation,
+    lotSize: lotSize > 0 ? floorLot(lotSize) : 0,
+    lotMode: accountState.lotMode,
+    userLot,
   };
 }
 
-function resolveBurstDirection(snapshot: MarketSnapshot, config: EngineStrategyConfig): TradeDirection | null {
-  const diagnostics = getBurstTriggerDiagnostics(snapshot, config);
-  const { buyCurrent, buyPrevious, sellCurrent, sellPrevious, buyContinuation, sellContinuation } = diagnostics;
-  if (buyCurrent || buyPrevious || buyContinuation) {
-    return 'buy';
-  }
-
-  if (sellCurrent || sellPrevious || sellContinuation) {
-    return 'sell';
-  }
-
-  return null;
+function buildBatchId(licenseId: string): string {
+  return `burst_${licenseId.slice(0, 8)}_${Date.now().toString(36)}`;
 }
 
-function toBurstAction(direction: TradeDirection): GoldxSignalAction {
-  return direction === 'buy' ? 'burst_buy' : 'burst_sell';
+function getModeBurstCap(mode: GoldxMode, accountState: GoldxAccountState, config: EngineStrategyConfig): number {
+  const configuredCap = Number(accountState.maxBurstTrades ?? 0);
+  const fallback = mode === 'fast' ? 5 : mode === 'hybrid' ? 4 : 3;
+  return clamp(configuredCap > 0 ? configuredCap : fallback, 1, config.maxBurstEntries);
 }
 
-function toTradeDirection(action: string): TradeDirection | null {
-  if (action === 'burst_buy' || action === 'buy') return 'buy';
-  if (action === 'burst_sell' || action === 'sell') return 'sell';
-  return null;
+function buildEntries(
+  direction: TradeDirection,
+  baseLot: number,
+  candidate: StrategyCandidate,
+  entryCount: number,
+): GoldxScalpEntry[] {
+  const weights = BURST_ENTRY_SPLITS.slice(0, entryCount);
+  const totalWeight = weights.reduce((sum, value) => sum + value, 0) || entryCount;
+  const step = Math.max(0.01, Math.min(0.08, Math.abs(candidate.takeProfit - candidate.entry) * 0.08));
+
+  return weights.map((weight, index) => ({
+    lot: roundLot(baseLot * (weight / totalWeight)),
+    entry: candidate.entry + (direction === 'buy' ? index * step : index * -step),
+    tp: candidate.takeProfit,
+    sl: candidate.stopLoss,
+  }));
+}
+
+function calculateProjectedLossPercent(entries: GoldxScalpEntry[], accountBalance: number): number {
+  if (!entries.length || accountBalance <= 0) return 0;
+  const projectedLoss = entries.reduce((sum, entry) => sum + (entry.lot * Math.abs(entry.entry - entry.sl) * 100), 0);
+  return (projectedLoss / accountBalance) * 100;
+}
+
+function passesTradeControl(
+  accountState: GoldxAccountState,
+  tradeControl: EngineTradeControlConfig,
+  runtimeState: Required<GoldxRuntimeTradeState>,
+): { pass: boolean; reason: string } {
+  if (runtimeState.currentOpenTrades >= HARD_OPEN_TRADE_LIMIT) {
+    return { pass: false, reason: `Hard open trade limit reached (${HARD_OPEN_TRADE_LIMIT})` };
+  }
+  if (runtimeState.tradesOpenedLastMinute >= tradeControl.maxTradesPerMinute) {
+    return { pass: false, reason: `Per-minute trade cap reached (${tradeControl.maxTradesPerMinute})` };
+  }
+  if (runtimeState.burstsLastHour >= tradeControl.maxBurstsPerHour) {
+    return { pass: false, reason: `Max bursts per hour reached (${tradeControl.maxBurstsPerHour})` };
+  }
+  if (runtimeState.burstLossesInRow >= tradeControl.burstLossStreakLimit) {
+    return { pass: false, reason: `Burst paused after ${tradeControl.burstLossStreakLimit} losses in a row` };
+  }
+  if (runtimeState.profitToday >= Math.min(accountState.dailyTargetPercent || tradeControl.dailyProfitStopPercent, tradeControl.dailyProfitStopPercent)) {
+    return { pass: false, reason: `Daily target reached (${runtimeState.profitToday.toFixed(2)}%)` };
+  }
+  if (accountState.drawdownToday >= tradeControl.dailyDrawdownStopPercent) {
+    return { pass: false, reason: `Daily drawdown limit reached (${accountState.drawdownToday.toFixed(2)}%)` };
+  }
+  if (accountState.pausedUntil && new Date(accountState.pausedUntil).getTime() > Date.now()) {
+    return { pass: false, reason: `Loss pause active until ${accountState.pausedUntil}` };
+  }
+  return { pass: true, reason: 'Trade control passed' };
+}
+
+function logDebug(config: EngineStrategyConfig, payload: Record<string, unknown>): void {
+  if (!config.debugLogging) return;
+  console.log('GoldX Strategy Debug', payload);
+}
+
+function dispatchStrategy(sessionMode: ReturnType<typeof normalizeSessionMode>, context: StrategyContext): StrategyEvaluation {
+  if (sessionMode === 'day') return generateDaySignal(context);
+  if (sessionMode === 'night') return generateNightSignal(context);
+  if (sessionMode === 'all_sessions') return generateUnifiedSignal(context);
+  return generateHybridSignal(context);
+}
+
+function buildSignalFromEvaluation(
+  evaluation: StrategyEvaluation,
+  context: StrategyContext,
+  modeConfig: GoldxModeConfig,
+  accountBalance: number,
+): GoldxSignal {
+  const { now, mode, session, accountState, runtimeState, config, tradeControl } = context;
+  const debugBase = {
+    mode: context.sessionMode,
+    session: signalSession(session),
+    trend: context.regime.trending,
+    rangeDetected: context.regime.ranging,
+    spread: context.snapshot.spread,
+    atr: context.snapshot.atr,
+    reason: evaluation.reason,
+    tradesToday: accountState.tradesToday,
+    maxTrades: modeConfig.maxTrades,
+    currentOpenTrades: runtimeState.currentOpenTrades,
+    confidence: evaluation.candidate?.confidence ?? 0,
+  };
+
+  if (!evaluation.candidate) {
+    return buildNoSignal(now, mode, session, evaluation.reason, {
+      strategyName: 'strategy-dispatcher',
+      reentryAllowed: canReenter(mode, config, runtimeState),
+      currentOpenTrades: runtimeState.currentOpenTrades,
+      maxSimultaneousTrades: HARD_OPEN_TRADE_LIMIT,
+      maxTrades: modeConfig.maxTrades,
+      debug: { ...debugBase, ...evaluation.debug },
+    });
+  }
+
+  const candidate = evaluation.candidate;
+  const lotConfig = resolveExecutionLot(mode, modeConfig.riskPercent, accountState, accountBalance, candidate.entry, candidate.stopLoss);
+  let baseLot = lotConfig.lotSize * (candidate.lotMultiplier ?? 1);
+  baseLot = Math.min(baseLot, MAX_LOT_BY_MODE[mode]);
+  baseLot = capLotByBalance(baseLot, accountBalance);
+
+  if (baseLot < 0.01) {
+    return buildNoSignal(now, mode, session, 'Account balance too low for the minimum safe lot size', {
+      strategyName: candidate.strategyName,
+      lotMode: lotConfig.lotMode,
+      userLot: lotConfig.userLot,
+      currentOpenTrades: runtimeState.currentOpenTrades,
+      maxSimultaneousTrades: HARD_OPEN_TRADE_LIMIT,
+      maxTrades: modeConfig.maxTrades,
+      debug: { ...debugBase, ...evaluation.debug, ...candidate.debug },
+    });
+  }
+
+  const availableSlots = Math.max(0, HARD_OPEN_TRADE_LIMIT - runtimeState.currentOpenTrades);
+  if (availableSlots <= 0) {
+    return buildNoSignal(now, mode, session, `Hard open trade limit reached (${HARD_OPEN_TRADE_LIMIT})`, {
+      strategyName: candidate.strategyName,
+      currentOpenTrades: runtimeState.currentOpenTrades,
+      maxSimultaneousTrades: HARD_OPEN_TRADE_LIMIT,
+      maxTrades: modeConfig.maxTrades,
+      debug: { ...debugBase, ...evaluation.debug, ...candidate.debug },
+    });
+  }
+
+  let entryCount = Math.min(
+    candidate.entriesCount,
+    getModeBurstCap(mode, accountState, config),
+    config.maxBurstEntries,
+    availableSlots,
+  );
+
+  if (runtimeState.currentOpenTrades >= config.softOpenTradeLimit) {
+    entryCount = Math.max(1, entryCount - 2);
+  }
+
+  let entries = buildEntries(candidate.action, baseLot, candidate, entryCount);
+  while (entries.length > 1 && calculateProjectedLossPercent(entries, accountBalance) > tradeControl.maxLossPerBatchPercent) {
+    entryCount -= 1;
+    entries = buildEntries(candidate.action, baseLot, candidate, entryCount);
+  }
+
+  if (!entries.length || calculateProjectedLossPercent(entries, accountBalance) > tradeControl.maxLossPerBatchPercent) {
+    return buildNoSignal(now, mode, session, 'Projected risk exceeds max loss per batch', {
+      strategyName: candidate.strategyName,
+      currentOpenTrades: runtimeState.currentOpenTrades,
+      maxSimultaneousTrades: HARD_OPEN_TRADE_LIMIT,
+      maxTrades: modeConfig.maxTrades,
+      debug: { ...debugBase, ...evaluation.debug, ...candidate.debug },
+    });
+  }
+
+  const batchId = buildBatchId(accountState.licenseId);
+  return {
+    action: candidate.action,
+    entry: candidate.entry,
+    stopLoss: candidate.stopLoss,
+    takeProfit: candidate.takeProfit,
+    lotSize: entries[0]?.lot ?? null,
+    lotSizeUsed: baseLot,
+    lotMode: lotConfig.lotMode,
+    userLot: lotConfig.userLot,
+    entries,
+    batchId,
+    reentryAllowed: true,
+    burstActive: entries.length > 1,
+    burstTradesOpened: entries.length,
+    maxBurstTrades: getModeBurstCap(mode, accountState, config),
+    maxTrades: entries.length,
+    burstDelayMsMin: tradeControl.burstDelayMsMin,
+    burstDelayMsMax: tradeControl.burstDelayMsMax,
+    closeOnMomentumLoss: candidate.trend,
+    maxSimultaneousTrades: HARD_OPEN_TRADE_LIMIT,
+    currentOpenTrades: runtimeState.currentOpenTrades,
+    confidence: candidate.confidence,
+    reason: candidate.reason,
+    mode,
+    timestamp: now,
+    session: signalSession(session),
+    sessionType: toSessionStatus(session),
+    strategyName: candidate.strategyName,
+    sweepDetected: candidate.sweepDetected,
+    bosConfirmed: candidate.bosConfirmed,
+    trendAligned: candidate.trendAligned,
+    debug: { ...debugBase, ...evaluation.debug, ...candidate.debug },
+  };
+}
+
+export async function isWithinTradingSession(sessionMode: GoldxSessionMode): Promise<boolean> {
+  const brokerSession = getSessionType();
+  return resolveAllowedSession(normalizeSessionMode(sessionMode), brokerSession) !== 'inactive';
+}
+
+export async function getCurrentSessionStatus(sessionMode: GoldxSessionMode): Promise<GoldxSessionStatus> {
+  const brokerSession = getSessionType();
+  const activeSession = resolveAllowedSession(normalizeSessionMode(sessionMode), brokerSession);
+  return toSessionStatus(activeSession);
+}
+
+export async function generateSignal(
+  accountState: GoldxAccountState,
+  candles: Candle[],
+  currentBid: number,
+  currentAsk: number,
+  accountBalance: number = 10000,
+  runtimeTradeState?: GoldxRuntimeTradeState,
+): Promise<GoldxSignal> {
+  const now = new Date().toISOString();
+  const mode = accountState.mode;
+  const sessionMode = normalizeSessionMode(accountState.sessionMode ?? 'hybrid');
+
+  if (!accountState.tradesToday || accountState.tradesToday < 0) {
+    accountState.tradesToday = 0;
+  }
+
+  const [strategyConfig, tradeControl, resolvedModeConfig] = await Promise.all([
+    getStrategyConfig(),
+    getTradeControlConfig(),
+    getModeConfig(mode),
+  ]);
+
+  const modeConfig = { ...resolvedModeConfig };
+  modeConfig.maxTrades = Number(modeConfig.maxTrades);
+  if (!modeConfig.maxTrades || modeConfig.maxTrades <= 0) {
+    modeConfig.maxTrades = HARD_OPEN_TRADE_LIMIT;
+  }
+
+  const brokerSession = getSessionType();
+  const activeSession = resolveAllowedSession(sessionMode, brokerSession);
+  const runtimeState = normalizeRuntimeState(accountState, runtimeTradeState);
+
+  if (activeSession === 'inactive') {
+    return buildNoSignal(now, mode, activeSession, 'Outside configured trading session', {
+      strategyName: 'session-router',
+      maxTrades: modeConfig.maxTrades,
+      currentOpenTrades: runtimeState.currentOpenTrades,
+      debug: {
+        mode: sessionMode,
+        session: 'off',
+        trend: false,
+        rangeDetected: false,
+        spread: 0,
+        atr: 0,
+        reason: 'Outside configured trading session',
+        tradesToday: accountState.tradesToday,
+        maxTrades: modeConfig.maxTrades,
+        currentOpenTrades: runtimeState.currentOpenTrades,
+      },
+    });
+  }
+
+  const gate = passesTradeControl(accountState, tradeControl, runtimeState);
+  if (!gate.pass) {
+    return buildNoSignal(now, mode, activeSession, gate.reason, {
+      strategyName: 'trade-guard',
+      maxTrades: modeConfig.maxTrades,
+      currentOpenTrades: runtimeState.currentOpenTrades,
+      debug: {
+        mode: sessionMode,
+        session: signalSession(activeSession),
+        trend: false,
+        rangeDetected: false,
+        spread: 0,
+        atr: 0,
+        reason: gate.reason,
+        tradesToday: accountState.tradesToday,
+        maxTrades: modeConfig.maxTrades,
+        currentOpenTrades: runtimeState.currentOpenTrades,
+      },
+    });
+  }
+
+  if (!canReenter(mode, strategyConfig, runtimeState)) {
+    return buildNoSignal(now, mode, activeSession, 'Soft cooldown active', {
+      strategyName: 'cooldown-guard',
+      reentryAllowed: false,
+      maxTrades: modeConfig.maxTrades,
+      currentOpenTrades: runtimeState.currentOpenTrades,
+      maxSimultaneousTrades: HARD_OPEN_TRADE_LIMIT,
+      debug: {
+        mode: sessionMode,
+        session: signalSession(activeSession),
+        trend: false,
+        rangeDetected: false,
+        spread: 0,
+        atr: 0,
+        reason: 'Soft cooldown active',
+        tradesToday: accountState.tradesToday,
+        maxTrades: modeConfig.maxTrades,
+        currentOpenTrades: runtimeState.currentOpenTrades,
+      },
+    });
+  }
+
+  if (!candles.length) {
+    return buildNoSignal(now, mode, activeSession, 'No market candles supplied', {
+      strategyName: 'snapshot-builder',
+      maxTrades: modeConfig.maxTrades,
+      currentOpenTrades: runtimeState.currentOpenTrades,
+      debug: {
+        mode: sessionMode,
+        session: signalSession(activeSession),
+        trend: false,
+        rangeDetected: false,
+        spread: 0,
+        atr: 0,
+        reason: 'No market candles supplied',
+        tradesToday: accountState.tradesToday,
+        maxTrades: modeConfig.maxTrades,
+        currentOpenTrades: runtimeState.currentOpenTrades,
+      },
+    });
+  }
+
+  const snapshot = buildSnapshot(candles, currentBid, currentAsk);
+  const regime = analyzeMarketRegime(snapshot);
+  const context: StrategyContext = {
+    now,
+    mode,
+    sessionMode,
+    session: activeSession,
+    accountState,
+    runtimeState,
+    snapshot,
+    regime,
+    config: strategyConfig,
+    tradeControl,
+  };
+
+  const evaluation = dispatchStrategy(sessionMode, context);
+  const signal = buildSignalFromEvaluation(evaluation, context, modeConfig, accountBalance);
+
+  logDebug(strategyConfig, {
+    action: signal.action,
+    reason: signal.reason,
+    strategyName: signal.strategyName,
+    sessionMode,
+    session: signal.session,
+    confidence: signal.confidence,
+    spread: snapshot.spread,
+    atr: snapshot.atr,
+    openTrades: runtimeState.currentOpenTrades,
+  });
+
+  return signal;
 }
 
 async function persistTradeHistory(
@@ -452,7 +638,7 @@ async function persistTradeHistory(
     batchIndexStart = 1,
     burstActive = false,
     burstTradesOpened = entries.length,
-    maxBurstTrades = 10,
+    maxBurstTrades = HARD_OPEN_TRADE_LIMIT,
     auditEvent,
     auditMeta,
   } = options;
@@ -499,411 +685,10 @@ async function persistTradeHistory(
   }
 
   await markOnboardingStateByLicenseId(licenseId, { setupCompleted: true });
-
   await insertAuditLog(auditEvent, {
     licenseId,
     meta: auditMeta,
   });
-}
-
-function clampRiskPercent(mode: GoldxMode, configuredRisk: number): number {
-  if (mode === 'fast') return clamp(configuredRisk, 0.8, 1.2);
-  if (mode === 'prop') return clamp(configuredRisk, 0.3, 0.6);
-  return clamp(configuredRisk, 0.5, 0.9);
-}
-
-function calculateLotSize(
-  mode: GoldxMode,
-  configuredRiskPercent: number,
-  accountBalance: number,
-  entry: number,
-  stopLoss: number,
-): number {
-  const riskPercent = clampRiskPercent(mode, configuredRiskPercent);
-  const riskAmount = accountBalance * (riskPercent / 100);
-  const pipDistance = Math.abs(entry - stopLoss);
-  if (pipDistance <= 0) return 0.01;
-  return Math.max(0.01, Math.round((riskAmount / (pipDistance * 100)) * 100) / 100);
-}
-
-function capLotByBalance(lotSize: number, accountBalance: number): number {
-  if (accountBalance <= 0) return lotSize;
-  const maxAffordableLot = floorLot(accountBalance / 1000);
-  return Math.min(lotSize, maxAffordableLot);
-}
-
-function resolveExecutionLot(
-  mode: GoldxMode,
-  configuredRiskPercent: number,
-  accountState: GoldxAccountState,
-  accountBalance: number,
-  entry: number,
-  stopLoss: number,
-): { lotSize: number; lotMode: GoldxAccountState['lotMode']; userLot: number | null } {
-  const userLot = typeof accountState.userLotSize === 'number' && Number.isFinite(accountState.userLotSize)
-    ? clamp(accountState.userLotSize, 0.01, 5.0)
-    : null;
-
-  let lotSize = accountState.lotMode === 'manual' && userLot != null
-    ? userLot
-    : calculateLotSize(mode, configuredRiskPercent, accountBalance, entry, stopLoss);
-
-  lotSize = Math.min(lotSize, MAX_LOT_BY_MODE[mode]);
-  lotSize = capLotByBalance(lotSize, accountBalance);
-
-  return {
-    lotSize: lotSize > 0 ? floorLot(lotSize) : 0,
-    lotMode: accountState.lotMode,
-    userLot,
-  };
-}
-
-function buildBatchId(licenseId: string): string {
-  return `burst_${licenseId.slice(0, 8)}_${Date.now().toString(36)}`;
-}
-
-function buildBurstEntries(
-  direction: TradeDirection,
-  baseLot: number,
-  entry: number,
-  stopLoss: number,
-  takeProfit: number,
-  burstTrades: number,
-): GoldxScalpEntry[] {
-  const selectedWeights = BURST_ENTRY_SPLITS.slice(0, burstTrades);
-  const totalWeight = selectedWeights.reduce((sum, value) => sum + value, 0);
-  return selectedWeights.map((weight, index) => ({
-    lot: roundLot(baseLot * (weight / totalWeight)),
-    entry: roundPrice(entry + (direction === 'buy' ? index * 0.01 : index * -0.01)),
-    tp: roundPrice(takeProfit),
-    sl: roundPrice(stopLoss),
-  }));
-}
-
-function calculateProjectedLossPercent(entries: GoldxScalpEntry[], accountBalance: number): number {
-  if (!entries.length || accountBalance <= 0) return 0;
-  const projectedLoss = entries.reduce((sum, entry) => sum + (entry.lot * Math.abs(entry.entry - entry.sl) * 100), 0);
-  return (projectedLoss / accountBalance) * 100;
-}
-
-function passesTradeControl(
-  accountState: GoldxAccountState,
-  tradeControl: EngineTradeControlConfig,
-  runtimeState: Required<GoldxRuntimeTradeState>,
-): { pass: boolean; reason: string } {
-  console.log('Trade limit check bypassed for debugging');
-
-  if (runtimeState.currentOpenTrades >= 10) {
-    return { pass: false, reason: 'Max open trades reached (10)' };
-  }
-  if (runtimeState.burstActive) {
-    return { pass: false, reason: 'Burst already active' };
-  }
-  if (runtimeState.tradesOpenedLastMinute >= tradeControl.maxTradesPerMinute) {
-    return { pass: false, reason: `Per-minute trade cap reached (${tradeControl.maxTradesPerMinute})` };
-  }
-  if (runtimeState.burstsLastHour >= tradeControl.maxBurstsPerHour) {
-    return { pass: false, reason: `Max bursts per hour reached (${tradeControl.maxBurstsPerHour})` };
-  }
-  if (runtimeState.burstLossesInRow >= tradeControl.burstLossStreakLimit) {
-    return { pass: false, reason: `Burst paused after ${tradeControl.burstLossStreakLimit} losses in a row` };
-  }
-  if (runtimeState.profitToday >= Math.min(accountState.dailyTargetPercent || 3, 3)) {
-    return { pass: false, reason: `Daily target reached (${runtimeState.profitToday.toFixed(2)}%)` };
-  }
-  if (accountState.drawdownToday >= tradeControl.dailyDrawdownStopPercent) {
-    return { pass: false, reason: `Daily drawdown limit reached (${accountState.drawdownToday.toFixed(2)}%)` };
-  }
-  if (accountState.pausedUntil && new Date(accountState.pausedUntil).getTime() > Date.now()) {
-    return { pass: false, reason: `Loss pause active until ${accountState.pausedUntil}` };
-  }
-  return { pass: true, reason: 'Burst trade control passed' };
-}
-
-function logDebug(config: EngineStrategyConfig, snapshot: MarketSnapshot, action: string, reason: string): void {
-  if (!config.debugLogging) return;
-  console.log('GoldX Debug', {
-    spread: snapshot.spread,
-    atr: snapshot.atr,
-    ema20: snapshot.ema20,
-    ema50: snapshot.ema50,
-    action,
-    reason,
-  });
-}
-
-function buildBurstSignal(
-  now: string,
-  mode: GoldxMode,
-  modeConfig: GoldxModeConfig,
-  accountBalance: number,
-  session: BrokerSession,
-  snapshot: MarketSnapshot,
-  strategyConfig: EngineStrategyConfig,
-  tradeControl: EngineTradeControlConfig,
-  accountState: GoldxAccountState,
-  runtimeState: Required<GoldxRuntimeTradeState>,
-): GoldxSignal {
-  const direction = resolveBurstDirection(snapshot, strategyConfig);
-  if (!direction) {
-    const diagnostics = getBurstTriggerDiagnostics(snapshot, strategyConfig);
-    return buildNoSignal(now, mode, session, 'Burst trigger not confirmed', {
-      strategyName: 'burst-momentum',
-      reason: `Burst trigger not confirmed | buyCurrent=${diagnostics.buyCurrent} buyPrevious=${diagnostics.buyPrevious} sellCurrent=${diagnostics.sellCurrent} sellPrevious=${diagnostics.sellPrevious} ema20=${snapshot.ema20.toFixed(2)} ema50=${snapshot.ema50.toFixed(2)} currentClose=${snapshot.current.close.toFixed(2)} previousClose=${snapshot.previous?.close?.toFixed(2) ?? 'null'} atr=${snapshot.atr.toFixed(2)} triggerMultiplier=${diagnostics.triggerMultiplier.toFixed(2)}`,
-      reentryAllowed: canReenter(mode, tradeControl, runtimeState),
-      currentOpenTrades: runtimeState.currentOpenTrades,
-      maxSimultaneousTrades: 10,
-      debug: {
-        tradesToday: accountState.tradesToday,
-        maxTrades: modeConfig.maxTrades,
-        currentOpenTrades: runtimeState.currentOpenTrades,
-        ema20: snapshot.ema20,
-        ema50: snapshot.ema50,
-        atr: snapshot.atr,
-        currentClose: snapshot.current.close,
-        previousClose: snapshot.previous?.close ?? null,
-        currentBody: Math.abs(snapshot.current.close - snapshot.current.open),
-        previousBody: snapshot.previous ? Math.abs(snapshot.previous.close - snapshot.previous.open) : null,
-        buyCurrent: diagnostics.buyCurrent,
-        buyPrevious: diagnostics.buyPrevious,
-        sellCurrent: diagnostics.sellCurrent,
-        sellPrevious: diagnostics.sellPrevious,
-        triggerMultiplier: diagnostics.triggerMultiplier,
-      },
-    });
-  }
-
-  const spreadThreshold = (session === 'day' ? strategyConfig.dayMaxSpreadPoints : strategyConfig.nightMaxSpreadPoints) * 0.55;
-  const lowSpread = snapshot.spread <= spreadThreshold;
-  const stableVolatility = snapshot.averageRange > 0 && snapshot.atr <= snapshot.averageRange * strategyConfig.stableAtrMultiplier;
-  if (!lowSpread || !stableVolatility) {
-    return buildNoSignal(now, mode, session, !lowSpread ? 'Spread too high for burst mode' : 'Volatility unstable for burst mode', {
-      strategyName: 'burst-momentum',
-      reentryAllowed: canReenter(mode, tradeControl, runtimeState),
-      currentOpenTrades: runtimeState.currentOpenTrades,
-      maxSimultaneousTrades: 10,
-    });
-  }
-
-  const entry = direction === 'buy' ? snapshot.ask : snapshot.bid;
-  const tpDistance = clamp(snapshot.atr * strategyConfig.microTpAtrMultiplier, 2, 5);
-  const slDistance = Math.max(snapshot.atr * strategyConfig.burstSlAtrMultiplier, tpDistance * 2);
-  const stopLoss = direction === 'buy' ? entry - slDistance : entry + slDistance;
-  const takeProfit = direction === 'buy' ? entry + tpDistance : entry - tpDistance;
-  const lotConfig = resolveExecutionLot(mode, modeConfig.riskPercent, accountState, accountBalance, entry, stopLoss);
-  const baseLot = lotConfig.lotSize;
-  if (baseLot < 0.01) {
-    return buildNoSignal(now, mode, session, 'Account balance too low for the minimum safe lot size', {
-      strategyName: 'burst-risk-cap',
-      lotMode: lotConfig.lotMode,
-      userLot: lotConfig.userLot,
-      lotSizeUsed: null,
-      reentryAllowed: canReenter(mode, tradeControl, runtimeState),
-      currentOpenTrades: runtimeState.currentOpenTrades,
-      maxSimultaneousTrades: 10,
-    });
-  }
-  const trendAligned = direction === 'buy'
-    ? snapshot.current.close > snapshot.ema20 && snapshot.ema20 >= snapshot.ema50
-    : snapshot.current.close < snapshot.ema20 && snapshot.ema20 <= snapshot.ema50;
-  const confidence = clamp(
-    68
-      + (trendAligned ? 10 : 0)
-      + (lowSpread ? 8 : 0)
-      + (stableVolatility ? 8 : 0)
-      + (isMomentumCandle(snapshot.current, snapshot.atr, direction, strategyConfig.momentumBodyAtrMultiplier) ? 10 : 0),
-    72,
-    96,
-  );
-
-  const availableSlots = Math.max(0, 10 - runtimeState.currentOpenTrades);
-  let burstTrades = Math.min(
-    getModeBurstCap(mode, accountState),
-    Math.max(3, Math.round((confidence - 60) / 5)),
-    availableSlots,
-  );
-
-  if (burstTrades < 3) {
-    return buildNoSignal(now, mode, session, 'Not enough free slots for a valid burst', {
-      strategyName: 'burst-momentum',
-      reentryAllowed: canReenter(mode, tradeControl, runtimeState),
-      currentOpenTrades: runtimeState.currentOpenTrades,
-      maxSimultaneousTrades: 10,
-    });
-  }
-
-  let entries = buildBurstEntries(direction, baseLot, entry, stopLoss, takeProfit, burstTrades);
-  while (entries.length >= 3 && calculateProjectedLossPercent(entries, accountBalance) > tradeControl.maxLossPerBatchPercent) {
-    burstTrades -= 1;
-    entries = buildBurstEntries(direction, baseLot, entry, stopLoss, takeProfit, burstTrades);
-  }
-
-  if (entries.length < 3) {
-    return buildNoSignal(now, mode, session, 'Burst risk exceeds max loss per burst', {
-      strategyName: 'burst-momentum',
-      reentryAllowed: canReenter(mode, tradeControl, runtimeState),
-      currentOpenTrades: runtimeState.currentOpenTrades,
-      maxSimultaneousTrades: 10,
-    });
-  }
-
-  const batchId = buildBatchId(accountState.licenseId);
-  return {
-    action: toBurstAction(direction),
-    entry: roundPrice(entry),
-    stopLoss: roundPrice(stopLoss),
-    takeProfit: roundPrice(takeProfit),
-    lotSize: entries[0]?.lot ?? null,
-    lotSizeUsed: baseLot,
-    lotMode: lotConfig.lotMode,
-    userLot: lotConfig.userLot,
-    entries,
-    batchId,
-    reentryAllowed: true,
-    burstActive: true,
-    burstTradesOpened: entries.length,
-    maxBurstTrades: 10,
-    maxTrades: entries.length,
-    burstDelayMsMin: tradeControl.burstDelayMsMin,
-    burstDelayMsMax: tradeControl.burstDelayMsMax,
-    closeOnMomentumLoss: true,
-    maxSimultaneousTrades: 10,
-    currentOpenTrades: runtimeState.currentOpenTrades,
-    confidence,
-    reason: direction === 'buy'
-      ? 'Burst buy: price above EMA20 with strong bullish momentum, low spread, stable volatility'
-      : 'Burst sell: price below EMA20 with strong bearish momentum, low spread, stable volatility',
-    mode,
-    timestamp: now,
-    session,
-    sessionType: session === 'off' ? 'closed' : session,
-    strategyName: 'burst-momentum',
-    trendAligned,
-    bosConfirmed: true,
-    sweepDetected: false,
-  };
-}
-
-export async function generateSignal(
-  accountState: GoldxAccountState,
-  candles: Candle[],
-  currentBid: number,
-  currentAsk: number,
-  accountBalance: number = 10000,
-  runtimeTradeState?: GoldxRuntimeTradeState,
-): Promise<GoldxSignal> {
-  const now = new Date().toISOString();
-  const mode = accountState.mode;
-  const sessionMode = accountState.sessionMode ?? 'hybrid';
-
-  if (!accountState.tradesToday || accountState.tradesToday < 0) {
-    accountState.tradesToday = 0;
-  }
-
-  const [strategyConfig, tradeControl, resolvedModeConfig] = await Promise.all([
-    getStrategyConfig(),
-    getTradeControlConfig(),
-    getModeConfig(mode),
-  ]);
-  const modeConfig = { ...resolvedModeConfig };
-  modeConfig.maxTrades = Number(modeConfig.maxTrades);
-
-  if (!modeConfig.maxTrades || modeConfig.maxTrades <= 0) {
-    console.warn('maxTrades invalid — forcing default = 10');
-    modeConfig.maxTrades = 10;
-  }
-
-  const session = resolveAllowedSession(sessionMode, getSessionType(strategyConfig));
-  const runtimeState = normalizeRuntimeState(accountState, runtimeTradeState);
-
-  console.log('=== DEBUG START ===');
-  console.log('Mode:', mode);
-  console.log('Account State:', accountState);
-  console.log('Mode Config RAW:', modeConfig);
-  console.log('Trades Today:', accountState.tradesToday);
-  console.log('Max Trades:', modeConfig.maxTrades);
-  console.log('=== DEBUG END ===');
-
-  if (session === 'off') {
-    return buildNoSignal(now, mode, session, 'Outside configured trading session', {
-      strategyName: 'burst-router',
-      maxTrades: modeConfig.maxTrades,
-      debug: {
-        tradesToday: accountState.tradesToday,
-        maxTrades: modeConfig.maxTrades,
-        currentOpenTrades: runtimeState.currentOpenTrades,
-      },
-    });
-  }
-
-  const gate = passesTradeControl(accountState, tradeControl, runtimeState);
-  if (!gate.pass) {
-    return buildNoSignal(now, mode, session, gate.reason, {
-      strategyName: 'burst-guard',
-      maxTrades: modeConfig.maxTrades,
-      currentOpenTrades: runtimeState.currentOpenTrades,
-      debug: {
-        tradesToday: accountState.tradesToday,
-        maxTrades: modeConfig.maxTrades,
-        currentOpenTrades: runtimeState.currentOpenTrades,
-      },
-    });
-  }
-
-  if (!canReenter(mode, tradeControl, runtimeState)) {
-    return buildNoSignal(now, mode, session, 'Burst cooldown active', {
-      strategyName: 'burst-cooldown',
-      reentryAllowed: false,
-      maxTrades: modeConfig.maxTrades,
-      currentOpenTrades: runtimeState.currentOpenTrades,
-      maxSimultaneousTrades: 10,
-      debug: {
-        tradesToday: accountState.tradesToday,
-        maxTrades: modeConfig.maxTrades,
-        currentOpenTrades: runtimeState.currentOpenTrades,
-      },
-    });
-  }
-
-  if (!candles.length) {
-    return buildNoSignal(now, mode, session, 'No market candles supplied', {
-      strategyName: 'burst-snapshot',
-      maxTrades: modeConfig.maxTrades,
-      debug: {
-        tradesToday: accountState.tradesToday,
-        maxTrades: modeConfig.maxTrades,
-        currentOpenTrades: runtimeState.currentOpenTrades,
-      },
-    });
-  }
-
-  const snapshot = buildSnapshot(candles, currentBid, currentAsk);
-  const signal = buildBurstSignal(
-    now,
-    mode,
-    modeConfig,
-    accountBalance,
-    session,
-    snapshot,
-    strategyConfig,
-    tradeControl,
-    accountState,
-    runtimeState,
-  );
-
-  logDebug(strategyConfig, snapshot, signal.action, signal.reason);
-  signal.debug = {
-    tradesToday: accountState.tradesToday,
-    maxTrades: modeConfig.maxTrades,
-    currentOpenTrades: runtimeState.currentOpenTrades,
-  };
-  console.log('BURST MODE', {
-    tradesOpened: signal.maxTrades ?? 0,
-    profit: runtimeState.profitToday,
-    losses: runtimeState.burstLossesInRow,
-    active: signal.burstActive ?? false,
-  });
-  return signal;
 }
 
 export async function recordTrade(
@@ -930,7 +715,7 @@ export async function recordTrade(
     batchId: signal.batchId ?? null,
     burstActive: signal.burstActive ?? false,
     burstTradesOpened: signal.burstTradesOpened ?? entries.length,
-    maxBurstTrades: signal.maxBurstTrades ?? 10,
+    maxBurstTrades: signal.maxBurstTrades ?? HARD_OPEN_TRADE_LIMIT,
     auditEvent: 'goldx_signal_trade_recorded',
     auditMeta: {
       action: signal.action,
@@ -979,7 +764,7 @@ export async function reportTradeExecution(
     batchIndexStart: execution.batchIndex ?? 1,
     burstActive: execution.burstActive ?? false,
     burstTradesOpened: execution.burstTradesOpened ?? 1,
-    maxBurstTrades: execution.maxBurstTrades ?? 10,
+    maxBurstTrades: execution.maxBurstTrades ?? HARD_OPEN_TRADE_LIMIT,
     auditEvent: 'goldx_execution_reported',
     auditMeta: {
       action: execution.action,

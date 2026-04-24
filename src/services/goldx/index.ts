@@ -5,4 +5,4 @@
 export * from './types';
 export * from './crypto';
 export * from './licenseService';
-export { generateSignal, recordTrade } from './strategyEngine';
+export { generateSignal, recordTrade, reportTradeExecution } from './strategyEngine';

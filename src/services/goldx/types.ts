@@ -3,12 +3,12 @@
 // ============================================================
 
 export type GoldxMode = 'fast' | 'prop' | 'hybrid';
-export type GoldxSessionMode = 'night' | 'day' | 'hybrid' | 'all';
+export type GoldxSessionMode = 'night' | 'day' | 'hybrid' | 'all' | 'all_sessions';
 export type GoldxLotMode = 'auto' | 'manual';
 export type GoldxLicenseStatus = 'active' | 'expired' | 'revoked';
 export type GoldxSubscriptionStatus = 'active' | 'cancelled' | 'expired' | 'past_due';
 export type GoldxTradeDirection = 'buy' | 'sell';
-export type GoldxSignalAction = 'burst_buy' | 'burst_sell' | 'none';
+export type GoldxSignalAction = 'buy' | 'sell' | 'burst_buy' | 'burst_sell' | 'none';
 export type GoldxTradeOutcome = 'tp' | 'sl' | 'be' | 'manual';
 export type GoldxFilterStrictness = 'loose' | 'normal' | 'strict';
 export type GoldxSessionStatus = 'day' | 'night' | 'asian' | 'london' | 'newYork' | 'closed';
@@ -200,9 +200,15 @@ export interface GoldxSignal {
   bosConfirmed?: boolean;
   trendAligned?: boolean;
   debug?: {
-    tradesToday: number;
-    maxTrades: number;
-    currentOpenTrades: number;
+    mode?: GoldxSessionMode | GoldxMode;
+    session?: 'night' | 'day' | 'off' | 'closed' | 'inactive';
+    trend?: boolean;
+    rangeDetected?: boolean;
+    spread?: number;
+    reason?: string;
+    tradesToday?: number;
+    maxTrades?: number;
+    currentOpenTrades?: number;
     ema20?: number;
     ema50?: number;
     atr?: number;
@@ -215,6 +221,8 @@ export interface GoldxSignal {
     sellCurrent?: boolean;
     sellPrevious?: boolean;
     triggerMultiplier?: number;
+    confidence?: number;
+    [key: string]: unknown;
   };
 }
 

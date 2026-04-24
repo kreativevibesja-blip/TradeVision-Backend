@@ -431,7 +431,7 @@ export const setMyGoldxSessionMode = async (req: AuthRequest, res: Response) => 
   try {
     if (!req.user) return res.status(401).json({ error: 'Auth required' });
     const { sessionMode } = req.body as { sessionMode: GoldxSessionMode };
-    if (!['day', 'night', 'hybrid', 'all'].includes(sessionMode)) {
+    if (!['day', 'night', 'hybrid', 'all', 'all_sessions'].includes(sessionMode)) {
       return res.status(400).json({ error: 'Invalid session mode' });
     }
     await setUserSessionMode(req.user.id, sessionMode);

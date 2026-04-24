@@ -1254,9 +1254,10 @@ export async function setUserSessionMode(userId: string, sessionMode: GoldxSessi
   const license = await getUserLicense(userId);
   if (!license) throw new Error('No active license');
   if (!license.mt5Account) throw new Error('No MT5 account bound');
+  const storedSessionMode = sessionMode === 'all_sessions' ? 'all' : sessionMode;
   await updateAccountState(
     (await getOrCreateAccountState(license.id, license.mt5Account)).id,
-    { sessionMode },
+    { sessionMode: storedSessionMode },
   );
 }
 
