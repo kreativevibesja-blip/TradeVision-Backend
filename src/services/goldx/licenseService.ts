@@ -584,6 +584,8 @@ async function getModeConfig(mode: GoldxMode): Promise<GoldxModeConfig> {
     .eq('key', 'modes')
     .maybeSingle();
 
+  console.log('DB modes config:', data?.value);
+
   const fallback = defaults[mode];
   let parsed: Record<string, unknown> = {};
 

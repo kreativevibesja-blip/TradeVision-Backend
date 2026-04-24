@@ -199,6 +199,11 @@ export interface GoldxSignal {
   sweepDetected?: boolean;
   bosConfirmed?: boolean;
   trendAligned?: boolean;
+  debug?: {
+    tradesToday: number;
+    maxTrades: number;
+    currentOpenTrades: number;
+  };
 }
 
 export type GoldxSetupRequestStatus = 'pending' | 'in_progress' | 'completed';

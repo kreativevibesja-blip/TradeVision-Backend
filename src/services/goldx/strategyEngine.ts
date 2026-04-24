@@ -279,8 +279,12 @@ function normalizeRuntimeState(
   accountState: GoldxAccountState,
   runtimeState?: GoldxRuntimeTradeState,
 ): Required<GoldxRuntimeTradeState> {
+  const fallbackOpenTrades = typeof runtimeState?.currentOpenTrades === 'number'
+    ? runtimeState.currentOpenTrades
+    : 0;
+
   return {
-    currentOpenTrades: runtimeState?.currentOpenTrades ?? accountState.currentOpenTrades ?? 0,
+    currentOpenTrades: fallbackOpenTrades,
     tradesOpenedLastMinute: runtimeState?.tradesOpenedLastMinute ?? 0,
     profitToday: runtimeState?.profitToday ?? accountState.profitToday,
     lastBatchClosedAt: runtimeState?.lastBatchClosedAt ?? accountState.lastBatchClosedAt ?? null,
@@ -311,7 +315,7 @@ function buildNoSignal(
     burstActive: false,
     burstTradesOpened: 0,
     maxBurstTrades: 10,
-    maxTrades: 0,
+    maxTrades: 10,
     confidence: 0,
     reason,
     mode,
@@ -436,6 +440,8 @@ function passesTradeControl(
   tradeControl: EngineTradeControlConfig,
   runtimeState: Required<GoldxRuntimeTradeState>,
 ): { pass: boolean; reason: string } {
+  console.log('Trade limit check bypassed for debugging');
+
   if (runtimeState.currentOpenTrades >= 10) {
     return { pass: false, reason: 'Max open trades reached (10)' };
   }
@@ -620,40 +626,85 @@ export async function generateSignal(
   const mode = accountState.mode;
   const sessionMode = accountState.sessionMode ?? 'hybrid';
 
+  if (!accountState.tradesToday || accountState.tradesToday < 0) {
+    accountState.tradesToday = 0;
+  }
+
   const [strategyConfig, tradeControl, resolvedModeConfig] = await Promise.all([
     getStrategyConfig(),
     getTradeControlConfig(),
     getModeConfig(mode),
   ]);
-  const modeConfig = !resolvedModeConfig.maxTrades || resolvedModeConfig.maxTrades <= 0
-    ? { ...resolvedModeConfig, maxTrades: 5 }
-    : resolvedModeConfig;
+  const modeConfig = { ...resolvedModeConfig };
+  modeConfig.maxTrades = Number(modeConfig.maxTrades);
+
+  if (!modeConfig.maxTrades || modeConfig.maxTrades <= 0) {
+    console.warn('maxTrades invalid — forcing default = 10');
+    modeConfig.maxTrades = 10;
+  }
 
   const session = resolveAllowedSession(sessionMode, getSessionType(strategyConfig));
   const runtimeState = normalizeRuntimeState(accountState, runtimeTradeState);
-  if (session === 'off') {
-    return buildNoSignal(now, mode, session, 'Outside configured trading session', { strategyName: 'burst-router' });
-  }
 
-  console.log('Trades today:', accountState.tradesToday);
-  console.log('Max trades:', modeConfig.maxTrades);
+  console.log('=== DEBUG START ===');
+  console.log('Mode:', mode);
+  console.log('Account State:', accountState);
+  console.log('Mode Config RAW:', modeConfig);
+  console.log('Trades Today:', accountState.tradesToday);
+  console.log('Max Trades:', modeConfig.maxTrades);
+  console.log('=== DEBUG END ===');
+
+  if (session === 'off') {
+    return buildNoSignal(now, mode, session, 'Outside configured trading session', {
+      strategyName: 'burst-router',
+      maxTrades: modeConfig.maxTrades,
+      debug: {
+        tradesToday: accountState.tradesToday,
+        maxTrades: modeConfig.maxTrades,
+        currentOpenTrades: runtimeState.currentOpenTrades,
+      },
+    });
+  }
 
   const gate = passesTradeControl(accountState, tradeControl, runtimeState);
   if (!gate.pass) {
-    return buildNoSignal(now, mode, session, gate.reason, { strategyName: 'burst-guard' });
+    return buildNoSignal(now, mode, session, gate.reason, {
+      strategyName: 'burst-guard',
+      maxTrades: modeConfig.maxTrades,
+      currentOpenTrades: runtimeState.currentOpenTrades,
+      debug: {
+        tradesToday: accountState.tradesToday,
+        maxTrades: modeConfig.maxTrades,
+        currentOpenTrades: runtimeState.currentOpenTrades,
+      },
+    });
   }
 
   if (!canReenter(mode, tradeControl, runtimeState)) {
     return buildNoSignal(now, mode, session, 'Burst cooldown active', {
       strategyName: 'burst-cooldown',
       reentryAllowed: false,
+      maxTrades: modeConfig.maxTrades,
       currentOpenTrades: runtimeState.currentOpenTrades,
       maxSimultaneousTrades: 10,
+      debug: {
+        tradesToday: accountState.tradesToday,
+        maxTrades: modeConfig.maxTrades,
+        currentOpenTrades: runtimeState.currentOpenTrades,
+      },
     });
   }
 
   if (!candles.length) {
-    return buildNoSignal(now, mode, session, 'No market candles supplied', { strategyName: 'burst-snapshot' });
+    return buildNoSignal(now, mode, session, 'No market candles supplied', {
+      strategyName: 'burst-snapshot',
+      maxTrades: modeConfig.maxTrades,
+      debug: {
+        tradesToday: accountState.tradesToday,
+        maxTrades: modeConfig.maxTrades,
+        currentOpenTrades: runtimeState.currentOpenTrades,
+      },
+    });
   }
 
   const snapshot = buildSnapshot(candles, currentBid, currentAsk);
@@ -671,6 +722,11 @@ export async function generateSignal(
   );
 
   logDebug(strategyConfig, snapshot, signal.action, signal.reason);
+  signal.debug = {
+    tradesToday: accountState.tradesToday,
+    maxTrades: modeConfig.maxTrades,
+    currentOpenTrades: runtimeState.currentOpenTrades,
+  };
   console.log('BURST MODE', {
     tradesOpened: signal.maxTrades ?? 0,
     profit: runtimeState.profitToday,
