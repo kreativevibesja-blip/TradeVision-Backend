@@ -10,12 +10,23 @@ function buildCandidate(direction: 'buy' | 'sell', ctx: StrategyContext): Strate
     ? detectBullishSequence(snapshot.candles, 4)
     : detectBearishSequence(snapshot.candles, 4);
   const pullbackRatio = computePullbackRatio(snapshot.candles, direction, 10);
+  const relaxedPullbackMin = Math.max(0.12, config.dayPullbackMinPct * 0.5);
+  const relaxedPullbackMax = Math.min(0.72, config.dayPullbackMaxPct + 0.18);
   const pullbackValid = pullbackRatio != null
-    && pullbackRatio >= config.dayPullbackMinPct
-    && pullbackRatio <= config.dayPullbackMaxPct;
+    && pullbackRatio >= relaxedPullbackMin
+    && pullbackRatio <= relaxedPullbackMax;
   const spreadOk = snapshot.spread <= config.dayMaxSpreadPoints;
+  const continuationValid = trendAligned
+    && spreadOk
+    && regime.trendStrength >= 0.35
+    && sequence >= 1
+    && (direction === 'buy'
+      ? snapshot.current.close >= snapshot.ema20 && snapshot.current.close >= snapshot.previous?.close!
+      : snapshot.current.close <= snapshot.ema20 && snapshot.current.close <= snapshot.previous?.close!);
 
-  if (!trendAligned || sequence < 2 || !pullbackValid || !spreadOk) {
+  const setupValid = (sequence >= 2 && pullbackValid) || continuationValid;
+
+  if (!trendAligned || !spreadOk || !setupValid) {
     return null;
   }
 
@@ -26,7 +37,7 @@ function buildCandidate(direction: 'buy' | 'sell', ctx: StrategyContext): Strate
     atr: snapshot.atr,
     averageRange: snapshot.averageRange,
     confirmations: sequence,
-    extra: 10,
+    extra: pullbackValid ? 12 : 8,
   });
 
   if (confidence < config.confidenceThreshold) {
@@ -47,8 +58,12 @@ function buildCandidate(direction: 'buy' | 'sell', ctx: StrategyContext): Strate
     takeProfit: roundPrice(takeProfit),
     confidence,
     reason: direction === 'buy'
-      ? 'Day scalp buy: bullish sequence with measured pullback above EMA20'
-      : 'Day scalp sell: bearish sequence with measured pullback below EMA20',
+      ? pullbackValid
+        ? 'Day scalp buy: bullish sequence with measured pullback above EMA20'
+        : 'Day scalp buy: bullish continuation aligned with EMA trend'
+      : pullbackValid
+        ? 'Day scalp sell: bearish sequence with measured pullback below EMA20'
+        : 'Day scalp sell: bearish continuation aligned with EMA trend',
     strategyName: 'day-momentum-pullback',
     trend: true,
     rangeDetected: false,
@@ -61,6 +76,10 @@ function buildCandidate(direction: 'buy' | 'sell', ctx: StrategyContext): Strate
     debug: {
       sequence,
       pullbackRatio,
+      pullbackValid,
+      continuationValid,
+      relaxedPullbackMin,
+      relaxedPullbackMax,
       spread: snapshot.spread,
       trendStrength: regime.trendStrength,
     },
@@ -76,7 +95,17 @@ export function generateDaySignal(ctx: StrategyContext): StrategyEvaluation {
 
   return {
     candidate,
-    reason: candidate?.reason ?? 'Day strategy rejected: missing momentum sequence, pullback, or spread confirmation',
+    reason: candidate?.reason ?? (() => {
+      const buySequence = detectBullishSequence(ctx.snapshot.candles, 4);
+      const sellSequence = detectBearishSequence(ctx.snapshot.candles, 4);
+      const buyPullback = computePullbackRatio(ctx.snapshot.candles, 'buy', 10);
+      const sellPullback = computePullbackRatio(ctx.snapshot.candles, 'sell', 10);
+      const relaxedPullbackMin = Math.max(0.12, ctx.config.dayPullbackMinPct * 0.5);
+      const relaxedPullbackMax = Math.min(0.72, ctx.config.dayPullbackMaxPct + 0.18);
+      const spreadOk = ctx.snapshot.spread <= ctx.config.dayMaxSpreadPoints;
+
+      return `Day strategy rejected: trend buy=${ctx.regime.bullishTrend} sell=${ctx.regime.bearishTrend} sequence buy=${buySequence} sell=${sellSequence} pullback buy=${buyPullback?.toFixed(2) ?? 'null'} sell=${sellPullback?.toFixed(2) ?? 'null'} pullbackBand=${relaxedPullbackMin.toFixed(2)}-${relaxedPullbackMax.toFixed(2)} spread=${ctx.snapshot.spread.toFixed(2)} spreadOk=${spreadOk}`;
+    })(),
     debug: {
       spread: ctx.snapshot.spread,
       ema20: ctx.snapshot.ema20,
