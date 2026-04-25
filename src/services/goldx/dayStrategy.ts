@@ -3,6 +3,8 @@ import type { StrategyCandidate, StrategyContext, StrategyEvaluation } from './s
 
 function buildCandidate(direction: 'buy' | 'sell', ctx: StrategyContext): StrategyCandidate | null {
   const { snapshot, config, regime } = ctx;
+  const current = snapshot.current;
+  const previous = snapshot.previous;
   const trendAligned = direction === 'buy'
     ? snapshot.current.close > snapshot.ema20 && regime.bullishTrend
     : snapshot.current.close < snapshot.ema20 && regime.bearishTrend;
@@ -16,6 +18,18 @@ function buildCandidate(direction: 'buy' | 'sell', ctx: StrategyContext): Strate
     && pullbackRatio >= relaxedPullbackMin
     && pullbackRatio <= relaxedPullbackMax;
   const spreadOk = snapshot.spread <= config.dayMaxSpreadPoints;
+  const pullbackResumeValid = Boolean(previous)
+    && trendAligned
+    && spreadOk
+    && pullbackValid
+    && regime.trendStrength >= 0.3
+    && (direction === 'buy'
+      ? current.close > current.open
+        && current.close >= snapshot.ema20
+        && current.close >= previous!.high - snapshot.atr * 0.05
+      : current.close < current.open
+        && current.close <= snapshot.ema20
+        && current.close <= previous!.low + snapshot.atr * 0.05);
   const continuationValid = trendAligned
     && spreadOk
     && regime.trendStrength >= 0.35
@@ -24,7 +38,7 @@ function buildCandidate(direction: 'buy' | 'sell', ctx: StrategyContext): Strate
       ? snapshot.current.close >= snapshot.ema20 && snapshot.current.close >= snapshot.previous?.close!
       : snapshot.current.close <= snapshot.ema20 && snapshot.current.close <= snapshot.previous?.close!);
 
-  const setupValid = (sequence >= 2 && pullbackValid) || continuationValid;
+  const setupValid = (sequence >= 2 && pullbackValid) || continuationValid || pullbackResumeValid;
 
   if (!trendAligned || !spreadOk || !setupValid) {
     return null;
@@ -37,7 +51,7 @@ function buildCandidate(direction: 'buy' | 'sell', ctx: StrategyContext): Strate
     atr: snapshot.atr,
     averageRange: snapshot.averageRange,
     confirmations: sequence,
-    extra: pullbackValid ? 12 : 8,
+    extra: pullbackResumeValid ? 14 : pullbackValid ? 12 : 8,
   });
 
   if (confidence < config.confidenceThreshold) {
@@ -60,10 +74,14 @@ function buildCandidate(direction: 'buy' | 'sell', ctx: StrategyContext): Strate
     reason: direction === 'buy'
       ? pullbackValid
         ? 'Day scalp buy: bullish sequence with measured pullback above EMA20'
-        : 'Day scalp buy: bullish continuation aligned with EMA trend'
+        : pullbackResumeValid
+          ? 'Day scalp buy: bullish pullback resumption aligned with EMA trend'
+          : 'Day scalp buy: bullish continuation aligned with EMA trend'
       : pullbackValid
         ? 'Day scalp sell: bearish sequence with measured pullback below EMA20'
-        : 'Day scalp sell: bearish continuation aligned with EMA trend',
+        : pullbackResumeValid
+          ? 'Day scalp sell: bearish pullback resumption aligned with EMA trend'
+          : 'Day scalp sell: bearish continuation aligned with EMA trend',
     strategyName: 'day-momentum-pullback',
     trend: true,
     rangeDetected: false,
@@ -77,6 +95,7 @@ function buildCandidate(direction: 'buy' | 'sell', ctx: StrategyContext): Strate
       sequence,
       pullbackRatio,
       pullbackValid,
+      pullbackResumeValid,
       continuationValid,
       relaxedPullbackMin,
       relaxedPullbackMax,
