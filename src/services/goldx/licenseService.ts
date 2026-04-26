@@ -41,6 +41,10 @@ const SKIP_HMAC = process.env.SKIP_HMAC === 'true';
 const FORCE_MODE_CONFIG_OVERRIDE = process.env.GOLDX_FORCE_MODE_CONFIG === 'true';
 const USED_NONCES = new Map<string, number>();
 
+function buildReplayKey(req: GoldxVerifyRequest): string {
+  return `${req.mt5Account}:${req.deviceId}:${req.nonce}`;
+}
+
 function logVerifyDebug(...args: unknown[]) {
   if (DEBUG_MODE) {
     console.log(...args);
@@ -687,13 +691,14 @@ export async function verifyLicense(
   logVerifyDebug('✅ PASSED: TIMESTAMP');
 
   // 2. Anti-replay: check nonce
-  if (USED_NONCES.has(req.nonce)) {
-    logVerifyDebug('❌ FAILED: NONCE REUSED', req.nonce);
+  const replayKey = buildReplayKey(req);
+  if (USED_NONCES.has(replayKey)) {
+    logVerifyDebug('❌ FAILED: NONCE REUSED', replayKey);
     await insertAuditLog('verify_rejected_replay', { ip: ip ?? undefined, meta: { reason: 'nonce' } });
     return { valid: false, error: 'Duplicate request' };
   }
   logVerifyDebug('✅ PASSED: NONCE');
-  USED_NONCES.set(req.nonce, Date.now());
+  USED_NONCES.set(replayKey, Date.now());
 
   // 3. Verify HMAC signature
   const payloadCandidates = buildHmacPayloadCandidates(req);
