@@ -1,4 +1,4 @@
-import { getSystemSetting, hasTopTierAccess, type SubscriptionTier } from '../../lib/supabase';
+import { getSystemSetting, type SubscriptionTier } from '../../lib/supabase';
 
 const GOLDX_PULSE_SETTING_PREFIX = 'goldxPulse:subscription:';
 
@@ -56,16 +56,6 @@ export async function getGoldxPulseAccess(
       source: 'pulse-subscription',
       planName: value?.planName ?? 'GoldX Pulse',
       expiresAt: value?.expiresAt ?? null,
-      reason: null,
-    };
-  }
-
-  if (hasTopTierAccess(subscription)) {
-    return {
-      active: true,
-      source: 'platform-plan',
-      planName: 'TOP_TIER access bundle',
-      expiresAt: null,
       reason: null,
     };
   }

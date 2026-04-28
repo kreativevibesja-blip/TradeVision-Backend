@@ -22,7 +22,7 @@ const createManualPaymentReference = () => `BANK-${Date.now()}-${Math.random().t
 
 const resolvePlanPaymentAmount = async (userId: string, plan: Extract<SubscriptionTier, 'PRO' | 'TOP_TIER'> | 'GOLDX_PULSE', couponCode?: string) => {
   const pricing = plan === 'GOLDX_PULSE' ? null : await getPricingPlanByTierWithFallback(plan);
-  let amount = pricing ? pricing.price : plan === 'TOP_TIER' ? 39.95 : plan === 'GOLDX_PULSE' ? 49.95 : 19.95;
+  let amount = pricing ? pricing.price : plan === 'TOP_TIER' ? 39.95 : plan === 'GOLDX_PULSE' ? 79.95 : 19.95;
   const planName = pricing ? pricing.name : plan === 'TOP_TIER' ? 'Top Tier 👑' : plan === 'GOLDX_PULSE' ? 'GoldX Pulse' : 'Pro';
   let appliedCouponId: string | null = null;
 
