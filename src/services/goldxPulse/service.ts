@@ -80,6 +80,7 @@ export interface GoldxPulseSnapshot {
   } | null;
   settings: GoldxPulseSettings;
   ticks: GoldxPulseTick[];
+  totalTickCount: number;
   analytics: GoldxPulseAnalytics;
   trades: GoldxPulseTrade[];
   cooldownRemainingMs: number;
@@ -103,6 +104,7 @@ type GoldxPulseSession = {
   connectionState: ConnectionState;
   error: string | null;
   ticks: GoldxPulseTick[];
+  totalTickCount: number;
   trades: GoldxPulseTrade[];
   settings: GoldxPulseSettings;
   lastTradeAt: number;
@@ -162,6 +164,7 @@ function getSession(userId: string) {
       connectionState: 'disconnected',
       error: null,
       ticks: [],
+      totalTickCount: 0,
       trades: [],
       settings: {
         symbol: 'R_75',
@@ -286,6 +289,7 @@ function snapshotSession(session: GoldxPulseSession): GoldxPulseSnapshot {
     account: session.account,
     settings: session.settings,
     ticks: session.ticks,
+    totalTickCount: session.totalTickCount,
     analytics: buildAnalytics(session.ticks),
     trades: session.trades,
     cooldownRemainingMs: Math.max(0, session.settings.cooldownMs - (Date.now() - session.lastTradeAt)),
@@ -335,6 +339,7 @@ async function subscribeTicks(session: GoldxPulseSession, symbol: string) {
 
   session.settings.symbol = symbol;
   session.ticks = [];
+  session.totalTickCount = 0;
   const response = await sendRequest(session, { ticks: symbol, subscribe: 1 });
   session.tickSubscriptionId = response?.subscription?.id ?? null;
   emit(session);
@@ -420,6 +425,7 @@ function attachSocketHandlers(session: GoldxPulseSession, ws: WebSocket) {
         };
         session.ticks.push(tick);
         session.ticks = session.ticks.slice(-MAX_TICKS);
+        session.totalTickCount += 1;
         emit(session);
         return;
       }
@@ -511,6 +517,7 @@ export function disconnectGoldxPulse(userId: string) {
   session.tickSubscriptionId = null;
   session.error = null;
   session.ticks = [];
+  session.totalTickCount = 0;
   emit(session);
 }
 
