@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { config } from '../config';
+import { getGoldxPulseAccess } from '../services/goldxPulse/access';
 import { 
   supabase,
   getUserByEmail,
@@ -164,4 +165,22 @@ export const requireTopTier = (req: AuthRequest, res: Response, next: NextFuncti
     return res.status(403).json({ error: 'Top Tier plan required' });
   }
   next();
+};
+
+export const requireGoldxPulseAccess = async (req: AuthRequest, res: Response, next: NextFunction) => {
+  if (!req.user) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+
+  try {
+    const access = await getGoldxPulseAccess(req.user.id, req.user.subscription, req.user.role);
+    if (!access.active) {
+      return res.status(403).json({ error: access.reason || 'GoldX Pulse subscription required' });
+    }
+
+    next();
+  } catch (error) {
+    console.error('[auth] goldx pulse access check failed:', error);
+    return res.status(500).json({ error: 'GoldX Pulse access check failed' });
+  }
 };

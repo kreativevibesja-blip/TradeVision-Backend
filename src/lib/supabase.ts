@@ -100,6 +100,7 @@ const AUTO_PERFORMANCE_TABLE = 'AutoPerformance';
 const TRACKED_TRADE_TABLE = 'TrackedTrade';
 
 export type SubscriptionTier = 'FREE' | 'PRO' | 'TOP_TIER' | 'VIP_AUTO_TRADER';
+export type BillingPlan = SubscriptionTier | 'GOLDX_PULSE';
 export type UserRole = 'USER' | 'ADMIN';
 export type PaymentStatus = 'PENDING' | 'COMPLETED' | 'FAILED' | 'REFUNDED';
 export type PaymentMethod = 'PAYPAL' | 'CARD' | 'BANK_TRANSFER' | 'COUPON';
@@ -209,14 +210,14 @@ export interface PaymentRecord {
   status: PaymentStatus;
   paymentMethod: PaymentMethod;
   bankTransferBank: BankTransferBank | null;
-  plan: SubscriptionTier;
+  plan: BillingPlan;
   verifiedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
 
 interface ListPaymentsFilters {
-  plan?: SubscriptionTier;
+  plan?: BillingPlan;
   status?: PaymentStatus;
   paymentMethod?: PaymentMethod;
   paymentMethods?: PaymentMethod[];

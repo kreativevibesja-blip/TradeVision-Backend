@@ -3,6 +3,7 @@ import { AuthRequest } from '../middleware/auth';
 import { createOrder, captureOrder, generateClientToken } from '../services/paypalService';
 import {
   type BankTransferBank,
+  type BillingPlan,
   type PaymentMethod,
   type SubscriptionTier,
   createPaymentRecord,
@@ -10,7 +11,7 @@ import {
   listPaymentsForUserId,
   updatePaymentByOrderId,
 } from '../lib/supabase';
-import { getBillingSummaryForUser, setBillingStateFromCancellation, setBillingStateFromPayment } from '../services/billing';
+import { getBillingSummaryForUser, renewGoldxPulseState, setBillingStateFromCancellation, setBillingStateFromPayment, setGoldxPulseStateFromCancellation, setGoldxPulseStateFromPayment } from '../services/billing';
 import { validateCouponInternal, applyDiscount, incrementCouponUsage } from './couponController';
 import { processReferralPayment, getReferralDiscountForUser } from '../services/referralService';
 
@@ -19,10 +20,10 @@ const isBankTransferBank = (value: unknown): value is BankTransferBank => value 
 
 const createManualPaymentReference = () => `BANK-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
 
-const resolvePlanPaymentAmount = async (userId: string, plan: Extract<SubscriptionTier, 'PRO' | 'TOP_TIER'>, couponCode?: string) => {
-  const pricing = await getPricingPlanByTierWithFallback(plan);
-  let amount = pricing ? pricing.price : plan === 'TOP_TIER' ? 39.95 : 19.95;
-  const planName = pricing ? pricing.name : plan === 'TOP_TIER' ? 'Top Tier 👑' : 'Pro';
+const resolvePlanPaymentAmount = async (userId: string, plan: Extract<SubscriptionTier, 'PRO' | 'TOP_TIER'> | 'GOLDX_PULSE', couponCode?: string) => {
+  const pricing = plan === 'GOLDX_PULSE' ? null : await getPricingPlanByTierWithFallback(plan);
+  let amount = pricing ? pricing.price : plan === 'TOP_TIER' ? 39.95 : plan === 'GOLDX_PULSE' ? 49.95 : 19.95;
+  const planName = pricing ? pricing.name : plan === 'TOP_TIER' ? 'Top Tier 👑' : plan === 'GOLDX_PULSE' ? 'GoldX Pulse' : 'Pro';
   let appliedCouponId: string | null = null;
 
   const referralDiscount = await getReferralDiscountForUser(userId);
@@ -49,13 +50,13 @@ const resolvePlanPaymentAmount = async (userId: string, plan: Extract<Subscripti
 export const createPayment = async (req: AuthRequest, res: Response) => {
   try {
     const { plan, couponCode, method } = req.body;
-    if (!plan || !['PRO', 'TOP_TIER'].includes(plan)) {
+    if (!plan || !['PRO', 'TOP_TIER', 'GOLDX_PULSE'].includes(plan)) {
       return res.status(400).json({ error: 'Invalid plan' });
     }
 
     const paymentMethod: Extract<PaymentMethod, 'PAYPAL' | 'CARD'> = isCheckoutMethod(method) ? method : 'PAYPAL';
 
-    const selectedPlan = plan as Extract<SubscriptionTier, 'PRO' | 'TOP_TIER'>;
+    const selectedPlan = plan as Extract<SubscriptionTier, 'PRO' | 'TOP_TIER'> | 'GOLDX_PULSE';
     const { amount, appliedCouponId, planName } = await resolvePlanPaymentAmount(req.user!.id, selectedPlan, couponCode);
 
     if (amount <= 0) {
@@ -74,7 +75,11 @@ export const createPayment = async (req: AuthRequest, res: Response) => {
         await incrementCouponUsage(appliedCouponId, req.user!.id);
       }
 
-      await setBillingStateFromPayment(req.user!.id, new Date().toISOString(), selectedPlan);
+      if (selectedPlan === 'GOLDX_PULSE') {
+        await setGoldxPulseStateFromPayment(req.user!.id, new Date().toISOString());
+      } else {
+        await setBillingStateFromPayment(req.user!.id, new Date().toISOString(), selectedPlan);
+      }
       return res.json({ orderId: null, approveUrl: null, freeActivation: true });
     }
 
@@ -107,7 +112,7 @@ export const createBankTransferRequest = async (req: AuthRequest, res: Response)
   try {
     const { plan, couponCode, bank } = req.body;
 
-    if (plan !== 'PRO' && plan !== 'TOP_TIER') {
+    if (plan !== 'PRO' && plan !== 'TOP_TIER' && plan !== 'GOLDX_PULSE') {
       return res.status(400).json({ error: 'Invalid plan' });
     }
 
@@ -115,7 +120,7 @@ export const createBankTransferRequest = async (req: AuthRequest, res: Response)
       return res.status(400).json({ error: 'Invalid bank selection' });
     }
 
-    const selectedPlan = plan as Extract<SubscriptionTier, 'PRO' | 'TOP_TIER'>;
+    const selectedPlan = plan as Extract<SubscriptionTier, 'PRO' | 'TOP_TIER'> | 'GOLDX_PULSE';
     const { amount } = await resolvePlanPaymentAmount(req.user!.id, selectedPlan, couponCode);
     const referenceId = createManualPaymentReference();
     const payment = await createPaymentRecord({
@@ -125,7 +130,7 @@ export const createBankTransferRequest = async (req: AuthRequest, res: Response)
       status: 'PENDING',
       paymentMethod: 'BANK_TRANSFER',
       bankTransferBank: bank,
-      plan: selectedPlan,
+      plan: selectedPlan as BillingPlan,
     });
 
     return res.json({
@@ -180,7 +185,11 @@ export const handlePaymentSuccess = async (req: AuthRequest, res: Response) => {
         pendingCouponMap.delete(orderId);
       }
 
-      await setBillingStateFromPayment(req.user!.id, payment.verifiedAt || new Date().toISOString(), payment.plan as Extract<SubscriptionTier, 'PRO' | 'TOP_TIER'>);
+      if (payment.plan === 'GOLDX_PULSE') {
+        await setGoldxPulseStateFromPayment(req.user!.id, payment.verifiedAt || new Date().toISOString());
+      } else {
+        await setBillingStateFromPayment(req.user!.id, payment.verifiedAt || new Date().toISOString(), payment.plan as Extract<SubscriptionTier, 'PRO' | 'TOP_TIER'>);
+      }
 
       // Process referral commission on successful payment
       await processReferralPayment(req.user!.id, payment.amount ?? 0).catch((err) =>
@@ -226,5 +235,27 @@ export const cancelSubscription = async (req: AuthRequest, res: Response) => {
   } catch (error) {
     console.error('Cancel subscription error:', error);
     return res.status(500).json({ error: 'Failed to cancel subscription' });
+  }
+};
+
+export const cancelGoldxPulseSubscription = async (req: AuthRequest, res: Response) => {
+  try {
+    await setGoldxPulseStateFromCancellation(req.user!.id);
+    const summary = await getBillingSummaryForUser(req.user!.id, req.user!.subscription as SubscriptionTier);
+    return res.json({ success: true, billing: summary });
+  } catch (error) {
+    console.error('Cancel GoldX Pulse subscription error:', error);
+    return res.status(500).json({ error: 'Failed to cancel GoldX Pulse subscription' });
+  }
+};
+
+export const renewGoldxPulseSubscription = async (req: AuthRequest, res: Response) => {
+  try {
+    await renewGoldxPulseState(req.user!.id);
+    const summary = await getBillingSummaryForUser(req.user!.id, req.user!.subscription as SubscriptionTier);
+    return res.json({ success: true, billing: summary });
+  } catch (error) {
+    console.error('Renew GoldX Pulse subscription error:', error);
+    return res.status(400).json({ error: error instanceof Error ? error.message : 'Failed to renew GoldX Pulse subscription' });
   }
 };

@@ -38,7 +38,7 @@ import {
 import { serializeAnalysis } from './analysisController';
 import { setBillingStateFromAdmin } from '../services/billing';
 import { getBillingSummaryForUser } from '../services/billing';
-import { setBillingStateFromPayment } from '../services/billing';
+import { setBillingStateFromPayment, setGoldxPulseStateFromPayment } from '../services/billing';
 import { processReferralPayment } from '../services/referralService';
 import { sendPaymentReminderEmail } from '../services/paymentReminderEmail';
 import { sendRenewalReminderEmail } from '../services/renewalReminderEmail';
@@ -343,7 +343,7 @@ export const getPayments = async (req: Request, res: Response) => {
     const scope = req.query.scope === 'COMPLETED_CHECKOUTS' || req.query.scope === 'BANK_TRANSFERS' || req.query.scope === 'ALL_PAYMENTS'
       ? req.query.scope
       : undefined;
-    const plan = req.query.plan === 'FREE' || req.query.plan === 'PRO' || req.query.plan === 'TOP_TIER' || req.query.plan === 'VIP_AUTO_TRADER' ? req.query.plan : undefined;
+    const plan = req.query.plan === 'FREE' || req.query.plan === 'PRO' || req.query.plan === 'TOP_TIER' || req.query.plan === 'VIP_AUTO_TRADER' || req.query.plan === 'GOLDX_PULSE' ? req.query.plan : undefined;
     const requestedStatus = req.query.status === 'PENDING' || req.query.status === 'COMPLETED' || req.query.status === 'FAILED' || req.query.status === 'REFUNDED'
       ? req.query.status
       : undefined;
@@ -407,7 +407,11 @@ export const updatePaymentStatus = async (req: Request, res: Response) => {
     });
 
     if (existingPayment.status !== 'COMPLETED' && status === 'COMPLETED') {
-      await setBillingStateFromPayment(payment.userId, now, payment.plan === 'TOP_TIER' ? 'TOP_TIER' : 'PRO');
+      if (payment.plan === 'GOLDX_PULSE') {
+        await setGoldxPulseStateFromPayment(payment.userId, now);
+      } else {
+        await setBillingStateFromPayment(payment.userId, now, payment.plan === 'TOP_TIER' ? 'TOP_TIER' : 'PRO');
+      }
       await processReferralPayment(payment.userId, payment.amount ?? 0).catch((error) => {
         console.error('Failed to process referral payment from admin approval:', error);
       });
