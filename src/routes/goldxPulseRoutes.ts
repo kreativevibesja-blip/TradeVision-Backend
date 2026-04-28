@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { authenticate, requireGoldxPulseAccess } from '../middleware/auth';
 import {
+  clearGoldxPulseTradesHandler,
   connectGoldxPulseHandler,
   disconnectGoldxPulseHandler,
   getGoldxPulseAccessHandler,
@@ -19,5 +20,6 @@ router.post('/connect', authenticate, requireGoldxPulseAccess, connectGoldxPulse
 router.post('/disconnect', authenticate, requireGoldxPulseAccess, disconnectGoldxPulseHandler);
 router.post('/settings', authenticate, requireGoldxPulseAccess, updateGoldxPulseSettingsHandler);
 router.post('/trade', authenticate, requireGoldxPulseAccess, placeGoldxPulseTradeHandler);
+router.post('/clear-results', authenticate, requireGoldxPulseAccess, clearGoldxPulseTradesHandler);
 
 export default router;

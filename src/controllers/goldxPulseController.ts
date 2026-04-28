@@ -2,6 +2,7 @@ import type { Response } from 'express';
 import type { AuthRequest } from '../middleware/auth';
 import { getGoldxPulseAccess } from '../services/goldxPulse/access';
 import {
+  clearGoldxPulseTrades,
   connectGoldxPulse,
   disconnectGoldxPulse,
   getGoldxPulseSnapshot,
@@ -70,6 +71,16 @@ export async function placeGoldxPulseTradeHandler(req: AuthRequest, res: Respons
     return res.json({ trade, snapshot: getGoldxPulseSnapshot(user.id) });
   } catch (error) {
     return res.status(400).json({ error: error instanceof Error ? error.message : 'Unable to place GoldX Pulse trade.' });
+  }
+}
+
+export async function clearGoldxPulseTradesHandler(req: AuthRequest, res: Response) {
+  try {
+    const user = getUserOrThrow(req);
+    const snapshot = clearGoldxPulseTrades(user.id);
+    return res.json({ success: true, snapshot });
+  } catch (error) {
+    return res.status(400).json({ error: error instanceof Error ? error.message : 'Unable to clear GoldX Pulse results.' });
   }
 }
 

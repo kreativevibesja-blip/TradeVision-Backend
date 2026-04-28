@@ -539,6 +539,13 @@ export async function updateGoldxPulseSettings(userId: string, nextSettings: Par
   return snapshotSession(session);
 }
 
+export function clearGoldxPulseTrades(userId: string) {
+  const session = getSession(userId);
+  session.trades = [];
+  emit(session);
+  return snapshotSession(session);
+}
+
 export function subscribeGoldxPulse(userId: string, listener: SessionListener) {
   const session = getSession(userId);
   session.listeners.add(listener);
