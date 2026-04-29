@@ -1,5 +1,6 @@
 import type { Response } from 'express';
 import type { AuthRequest } from '../middleware/auth';
+import { getSystemSetting, upsertSystemSetting } from '../lib/supabase';
 import { getGoldxPulseAccess } from '../services/goldxPulse/access';
 import {
   clearGoldxPulseTrades,
@@ -11,6 +12,12 @@ import {
   subscribeGoldxPulse,
   updateGoldxPulseSettings,
 } from '../services/goldxPulse/service';
+
+const GOLDX_PULSE_AGREEMENT_PREFIX = 'goldxPulse:agreement:';
+
+function getGoldxPulseAgreementKey(userId: string) {
+  return `${GOLDX_PULSE_AGREEMENT_PREFIX}${userId}`;
+}
 
 function getUserOrThrow(req: AuthRequest) {
   if (!req.user) {
@@ -81,6 +88,34 @@ export async function clearGoldxPulseTradesHandler(req: AuthRequest, res: Respon
     return res.json({ success: true, snapshot });
   } catch (error) {
     return res.status(400).json({ error: error instanceof Error ? error.message : 'Unable to clear GoldX Pulse results.' });
+  }
+}
+
+export async function getGoldxPulseAgreementStatusHandler(req: AuthRequest, res: Response) {
+  try {
+    const user = getUserOrThrow(req);
+    const setting = await getSystemSetting(getGoldxPulseAgreementKey(user.id));
+    const accepted = Boolean(setting?.value?.accepted);
+    const acceptedAt = accepted && typeof setting?.value?.acceptedAt === 'string' ? setting.value.acceptedAt : null;
+    return res.json({ accepted, acceptedAt });
+  } catch (error) {
+    return res.status(500).json({ error: error instanceof Error ? error.message : 'Unable to load GoldX Pulse agreement status.' });
+  }
+}
+
+export async function acceptGoldxPulseAgreementHandler(req: AuthRequest, res: Response) {
+  try {
+    const user = getUserOrThrow(req);
+    const acceptedAt = new Date().toISOString();
+    await upsertSystemSetting(getGoldxPulseAgreementKey(user.id), {
+      accepted: true,
+      acceptedAt,
+      version: '2026-04-28',
+    });
+
+    return res.json({ success: true, accepted: true, acceptedAt });
+  } catch (error) {
+    return res.status(500).json({ error: error instanceof Error ? error.message : 'Unable to save GoldX Pulse agreement.' });
   }
 }
 
