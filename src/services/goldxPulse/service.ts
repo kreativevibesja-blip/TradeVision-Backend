@@ -7,6 +7,9 @@ type StrategyMode = 'digit-pulse' | 'range-pressure';
 type TradeAction = 'OVER' | 'UNDER' | 'MATCH' | 'DIFFER';
 type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'error';
 type TradeStatus = 'proposal' | 'open' | 'won' | 'lost' | 'error';
+type BiasDirection = 'over' | 'under' | 'neutral';
+type BiasStrength = 'strong' | 'weak' | 'neutral';
+type DigitBiasState = 'underrepresented' | 'overrepresented' | 'neutral';
 
 type PendingResolver = {
   resolve: (payload: any) => void;
@@ -27,8 +30,44 @@ export interface GoldxPulseTick {
   digit: number;
 }
 
+export interface GoldxPulseDigitProbability {
+  digit: number;
+  count: number;
+  probability: number;
+  deviation: number;
+  bias: DigitBiasState;
+}
+
+export interface GoldxPulseOverUnderProbability {
+  selectedDigit: number;
+  overProbability: number;
+  underProbability: number;
+  difference: number;
+  confidence: number;
+  bias: BiasDirection;
+  strength: BiasStrength;
+}
+
+export interface GoldxPulseMatchDifferProbability {
+  selectedDigit: number;
+  matchProbability: number;
+  differProbability: number;
+  matchDeviation: number;
+  differDeviation: number;
+}
+
+export interface GoldxPulseWarmupStatus {
+  minTicksRequired: number;
+  currentTicks: number;
+  remainingTicks: number;
+  progressPct: number;
+  ready: boolean;
+  message: string;
+}
+
 export interface GoldxPulseAnalytics {
   frequencyMap: number[];
+  digitProbabilities: GoldxPulseDigitProbability[];
   mostFrequentDigit: number | null;
   leastFrequentDigit: number | null;
   currentStreakDigit: number | null;
@@ -37,7 +76,10 @@ export interface GoldxPulseAnalytics {
   longestStreakLength: number;
   aboveFivePct: number;
   belowFivePct: number;
-  bias: 'over' | 'under' | 'neutral';
+  bias: BiasDirection;
+  overUnder: GoldxPulseOverUnderProbability;
+  matchDiffer: GoldxPulseMatchDifferProbability;
+  warmup: GoldxPulseWarmupStatus;
 }
 
 export interface GoldxPulseTrade {
@@ -104,6 +146,7 @@ type GoldxPulseSession = {
   connectionState: ConnectionState;
   error: string | null;
   ticks: GoldxPulseTick[];
+  rollingDigitCounts: number[];
   totalTickCount: number;
   trades: GoldxPulseTrade[];
   settings: GoldxPulseSettings;
@@ -114,6 +157,8 @@ type GoldxPulseSession = {
 
 const MAX_TICKS = 300;
 const MAX_TRADES = 20;
+const MIN_TICKS_REQUIRED = 70;
+const BASELINE_DIGIT_PROBABILITY = 0.1;
 
 export const GOLDX_PULSE_SYMBOLS: GoldxPulseSymbolOption[] = [
   { symbol: 'R_10', label: 'Volatility 10', category: 'volatility', digits: 2 },
@@ -164,6 +209,7 @@ function getSession(userId: string) {
       connectionState: 'disconnected',
       error: null,
       ticks: [],
+      rollingDigitCounts: Array.from({ length: 10 }, () => 0),
       totalTickCount: 0,
       trades: [],
       settings: {
@@ -211,16 +257,15 @@ function deriveLastDigit(quote: number, digits: number) {
   return Number.parseInt(digitCharacter || '0', 10);
 }
 
-function buildAnalytics(ticks: GoldxPulseTick[]): GoldxPulseAnalytics {
-  const frequencyMap = Array.from({ length: 10 }, () => 0);
+function toPercent(value: number) {
+  return Number((value * 100).toFixed(1));
+}
+
+function buildStreakMetrics(ticks: GoldxPulseTick[]) {
   let currentStreakDigit: number | null = null;
   let currentStreakLength = 0;
   let longestStreakDigit: number | null = null;
   let longestStreakLength = 0;
-
-  for (const tick of ticks) {
-    frequencyMap[tick.digit] += 1;
-  }
 
   for (let index = ticks.length - 1; index >= 0; index -= 1) {
     const digit = ticks[index]?.digit;
@@ -256,28 +301,104 @@ function buildAnalytics(ticks: GoldxPulseTick[]): GoldxPulseAnalytics {
     longestStreakDigit = trackingDigit;
   }
 
-  const mostFrequentCount = Math.max(...frequencyMap);
-  const leastFrequentCount = Math.min(...frequencyMap);
-  const mostFrequentDigit = mostFrequentCount > 0 ? frequencyMap.findIndex((count) => count === mostFrequentCount) : null;
-  const leastFrequentDigit = ticks.length > 0 ? frequencyMap.findIndex((count) => count === leastFrequentCount) : null;
-  const aboveFive = ticks.filter((tick) => tick.digit > 5).length;
-  const belowFive = ticks.filter((tick) => tick.digit < 5).length;
-  const denominator = Math.max(ticks.length, 1);
-  const aboveFivePct = Number(((aboveFive / denominator) * 100).toFixed(1));
-  const belowFivePct = Number(((belowFive / denominator) * 100).toFixed(1));
-  const bias: GoldxPulseAnalytics['bias'] = aboveFivePct > belowFivePct + 5 ? 'over' : belowFivePct > aboveFivePct + 5 ? 'under' : 'neutral';
-
   return {
-    frequencyMap,
-    mostFrequentDigit,
-    leastFrequentDigit,
     currentStreakDigit,
     currentStreakLength,
     longestStreakDigit,
     longestStreakLength,
-    aboveFivePct,
-    belowFivePct,
+  };
+}
+
+function buildOverUnderProbability(probabilities: number[], selectedDigit: number): GoldxPulseOverUnderProbability {
+  const underProbability = probabilities.slice(0, selectedDigit).reduce((total, value) => total + value, 0);
+  const overProbability = probabilities.slice(selectedDigit + 1).reduce((total, value) => total + value, 0);
+  const difference = Math.abs(overProbability - underProbability);
+  const strength: BiasStrength = difference > 0.1 ? 'strong' : difference > 0.05 ? 'weak' : 'neutral';
+  const bias: BiasDirection = strength === 'neutral' ? 'neutral' : overProbability > underProbability ? 'over' : 'under';
+
+  return {
+    selectedDigit,
+    overProbability: toPercent(overProbability),
+    underProbability: toPercent(underProbability),
+    difference: toPercent(difference),
+    confidence: Math.max(0, Math.min(100, toPercent(difference))),
     bias,
+    strength,
+  };
+}
+
+function buildMatchDifferProbability(probabilities: number[], selectedDigit: number): GoldxPulseMatchDifferProbability {
+  const matchProbability = probabilities[selectedDigit] ?? 0;
+  const differProbability = 1 - matchProbability;
+
+  return {
+    selectedDigit,
+    matchProbability: toPercent(matchProbability),
+    differProbability: toPercent(differProbability),
+    matchDeviation: toPercent(matchProbability - BASELINE_DIGIT_PROBABILITY),
+    differDeviation: toPercent(differProbability - (1 - BASELINE_DIGIT_PROBABILITY)),
+  };
+}
+
+function buildWarmupStatus(totalTickCount: number): GoldxPulseWarmupStatus {
+  const currentTicks = totalTickCount;
+  const remainingTicks = Math.max(0, MIN_TICKS_REQUIRED - currentTicks);
+  const ready = currentTicks >= MIN_TICKS_REQUIRED;
+
+  return {
+    minTicksRequired: MIN_TICKS_REQUIRED,
+    currentTicks,
+    remainingTicks,
+    progressPct: Math.min(100, Number(((currentTicks / MIN_TICKS_REQUIRED) * 100).toFixed(1))),
+    ready,
+    message: ready ? 'Data ready' : `Collecting data... (${currentTicks} / ${MIN_TICKS_REQUIRED} ticks)`,
+  };
+}
+
+function buildAnalytics(session: GoldxPulseSession): GoldxPulseAnalytics {
+  const frequencyMap = [...session.rollingDigitCounts];
+  const sampleSize = Math.max(session.ticks.length, 1);
+  const digitProbabilities = frequencyMap.map((count, digit) => {
+    const probability = count / sampleSize;
+    const deviation = probability - BASELINE_DIGIT_PROBABILITY;
+    const bias: DigitBiasState = deviation <= -0.02 ? 'underrepresented' : deviation >= 0.02 ? 'overrepresented' : 'neutral';
+
+    return {
+      digit,
+      count,
+      probability: toPercent(probability),
+      deviation: toPercent(deviation),
+      bias,
+    };
+  });
+
+  const rawProbabilities = frequencyMap.map((count) => count / sampleSize);
+  const mostFrequentCount = Math.max(...frequencyMap);
+  const leastFrequentCount = Math.min(...frequencyMap);
+  const mostFrequentDigit = mostFrequentCount > 0 ? frequencyMap.findIndex((count) => count === mostFrequentCount) : null;
+  const leastFrequentDigit = session.ticks.length > 0 ? frequencyMap.findIndex((count) => count === leastFrequentCount) : null;
+  const aboveFive = frequencyMap.slice(6).reduce((total, count) => total + count, 0);
+  const belowFive = frequencyMap.slice(0, 5).reduce((total, count) => total + count, 0);
+  const streakMetrics = buildStreakMetrics(session.ticks);
+  const overUnder = buildOverUnderProbability(rawProbabilities, session.settings.selectedDigit);
+  const matchDiffer = buildMatchDifferProbability(rawProbabilities, session.settings.selectedDigit);
+  const warmup = buildWarmupStatus(session.totalTickCount);
+
+  return {
+    frequencyMap,
+    digitProbabilities,
+    mostFrequentDigit,
+    leastFrequentDigit,
+    currentStreakDigit: streakMetrics.currentStreakDigit,
+    currentStreakLength: streakMetrics.currentStreakLength,
+    longestStreakDigit: streakMetrics.longestStreakDigit,
+    longestStreakLength: streakMetrics.longestStreakLength,
+    aboveFivePct: toPercent(aboveFive / sampleSize),
+    belowFivePct: toPercent(belowFive / sampleSize),
+    bias: overUnder.bias,
+    overUnder,
+    matchDiffer,
+    warmup,
   };
 }
 
@@ -290,7 +411,7 @@ function snapshotSession(session: GoldxPulseSession): GoldxPulseSnapshot {
     settings: session.settings,
     ticks: session.ticks,
     totalTickCount: session.totalTickCount,
-    analytics: buildAnalytics(session.ticks),
+    analytics: buildAnalytics(session),
     trades: session.trades,
     cooldownRemainingMs: Math.max(0, session.settings.cooldownMs - (Date.now() - session.lastTradeAt)),
     dailyLoss: session.dailyLoss,
@@ -339,6 +460,7 @@ async function subscribeTicks(session: GoldxPulseSession, symbol: string) {
 
   session.settings.symbol = symbol;
   session.ticks = [];
+  session.rollingDigitCounts = Array.from({ length: 10 }, () => 0);
   session.totalTickCount = 0;
   const response = await sendRequest(session, { ticks: symbol, subscribe: 1 });
   session.tickSubscriptionId = response?.subscription?.id ?? null;
@@ -423,8 +545,14 @@ function attachSocketHandlers(session: GoldxPulseSession, ws: WebSocket) {
           epoch: Number(payload.tick.epoch),
           digit: deriveLastDigit(quote, meta.digits),
         };
+        if (session.ticks.length >= MAX_TICKS) {
+          const removedTick = session.ticks.shift();
+          if (removedTick) {
+            session.rollingDigitCounts[removedTick.digit] = Math.max(0, session.rollingDigitCounts[removedTick.digit] - 1);
+          }
+        }
         session.ticks.push(tick);
-        session.ticks = session.ticks.slice(-MAX_TICKS);
+        session.rollingDigitCounts[tick.digit] += 1;
         session.totalTickCount += 1;
         emit(session);
         return;
@@ -517,6 +645,7 @@ export function disconnectGoldxPulse(userId: string) {
   session.tickSubscriptionId = null;
   session.error = null;
   session.ticks = [];
+  session.rollingDigitCounts = Array.from({ length: 10 }, () => 0);
   session.totalTickCount = 0;
   emit(session);
 }
@@ -570,6 +699,10 @@ function ensureTradeAllowed(session: GoldxPulseSession) {
   if (cooldownRemaining > 0) {
     throw new Error(`Trade cooldown active for ${Math.ceil(cooldownRemaining / 1000)}s.`);
   }
+
+  if (session.totalTickCount < MIN_TICKS_REQUIRED) {
+    throw new Error(`Collecting data... (${session.totalTickCount} / ${MIN_TICKS_REQUIRED} ticks)`);
+  }
 }
 
 export async function placeGoldxPulseTrade(
@@ -593,9 +726,7 @@ export async function placeGoldxPulseTrade(
   const stake = Number(payload.stake ?? session.settings.stake);
   const duration = Number(payload.duration ?? session.settings.duration);
   const selectedDigit = payload.digit != null ? Math.max(0, Math.min(9, Number(payload.digit))) : session.settings.selectedDigit;
-  const barrier = payload.action === 'MATCH' || payload.action === 'DIFFER'
-    ? String(selectedDigit)
-    : String(5);
+  const barrier = String(selectedDigit);
 
   const contractTypeMap: Record<TradeAction, string> = {
     OVER: 'DIGITOVER',
