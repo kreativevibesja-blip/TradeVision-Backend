@@ -4444,31 +4444,32 @@ function buildContinuationSetup(symbol: string, candles: Candle[]): Continuation
 // Pure logic — continuation only.
 
 export function analyzeMarket(symbol: string, candles: Candle[]): TradeSetup | null {
-  const setup = buildContinuationSetup(symbol, candles);
-  if (!setup) {
+  const topCandidate = analyzePotentialTrades(symbol, candles)[0] ?? null;
+
+  if (!topCandidate) {
     return null;
   }
 
   return {
     symbol,
-    direction: setup.direction,
-    entry: setup.entry,
-    stopLoss: setup.stopLoss,
-    slReason: 'Swing-based ATR fallback SL',
-    takeProfit: setup.takeProfit,
-    takeProfit2: setup.takeProfit2,
-    emaMomentum: true,
-    emaStack: setup.emaStack,
-    emaEntryValid: true,
-    score: setup.score,
-    confidenceScore: setup.confidenceScore,
-    marketRegime: setup.marketRegime,
-    strategy: 'session_flip',
-    session: setup.session,
-    setup: setup.setup,
-    validUntil: setup.validUntil,
-    confirmations: setup.confirmations,
-    confirmationLabels: setup.confirmationLabels,
+    direction: topCandidate.direction,
+    entry: topCandidate.entry,
+    stopLoss: topCandidate.stopLoss,
+    slReason: topCandidate.slReason,
+    takeProfit: topCandidate.takeProfit,
+    takeProfit2: topCandidate.takeProfit2,
+    emaMomentum: topCandidate.emaMomentum,
+    emaStack: topCandidate.emaStack,
+    emaEntryValid: topCandidate.emaEntryValid,
+    score: Math.max(1, Math.round(topCandidate.activationProbability / 10)),
+    confidenceScore: topCandidate.confidenceScore,
+    marketRegime: topCandidate.marketRegime,
+    strategy: topCandidate.strategy,
+    session: topCandidate.session,
+    setup: topCandidate.setup,
+    validUntil: topCandidate.validUntil,
+    confirmations: topCandidate.confirmations,
+    confirmationLabels: topCandidate.fulfilledConditions.slice(0, 6),
   };
 }
 
@@ -4518,34 +4519,155 @@ export function analyzePotentialTrades(
   candles: Candle[],
   context?: AnalyzePotentialTradeContext,
 ): PotentialTradeSetup[] {
-  const setup = buildContinuationSetup(symbol, candles);
-  if (!setup) {
+  if (candles.length < MIN_SCANNER_ANALYSIS_CANDLES) {
     return [];
   }
 
-  return [{
-    symbol,
-    direction: setup.direction,
-    currentPrice: context?.currentPrice ?? candles[candles.length - 1].close,
-    entry: setup.entry,
-    stopLoss: setup.stopLoss,
-    slReason: 'Swing-based ATR fallback SL',
-    takeProfit: setup.takeProfit,
-    takeProfit2: setup.takeProfit2,
-    emaMomentum: true,
-    emaStack: setup.emaStack,
-    emaEntryValid: true,
-    activationProbability: setup.confidenceScore,
-    confidenceScore: setup.confidenceScore,
-    marketRegime: setup.marketRegime,
-    confirmations: setup.confirmations,
-    strategy: 'session_flip',
-    session: setup.session,
-    setup: setup.setup,
-    validUntil: setup.validUntil,
-    narrative: setup.narrative,
-    fulfilledConditions: setup.fulfilledConditions,
-    requiredTriggers: setup.requiredTriggers,
-    contextLabels: setup.contextLabels,
-  }];
+  const currentPrice = context?.currentPrice ?? candles[candles.length - 1].close;
+  const trend = context?.trend ?? detectTrend(candles);
+  const broaderTrend = context?.broaderTrend ?? detectContextTrend(candles);
+  const emaTrend = context?.emaTrend ?? analyzeEmaTrend(candles);
+  const zones = context?.zones ?? buildZones(candles.slice(-Math.min(500, candles.length)), currentPrice);
+  const gaps = context?.gaps ?? buildFairValueGaps(candles.slice(-Math.min(500, candles.length)), currentPrice);
+  const currentZone = context?.currentZone ?? findActiveReversalZone(currentPrice, zones, candles);
+  const bullishReversal = context?.bullishReversal ?? resolveBullishReversalPattern(currentPrice, currentZone, candles).matched;
+  const bearishReversal = context?.bearishReversal ?? resolveBearishReversalPattern(currentPrice, currentZone, candles).matched;
+
+  const bullishArea = toPriceArea(
+    findDirectionalZone('buy', zones, currentPrice, candles, symbol)
+    ?? findDirectionalFvg('buy', gaps, candles, symbol),
+  );
+  const bearishArea = toPriceArea(
+    findDirectionalZone('sell', zones, currentPrice, candles, symbol)
+    ?? findDirectionalFvg('sell', gaps, candles, symbol),
+  );
+
+  const bullishPoiReclaim = context?.bullishPoiReclaim ?? hasPoiReclaim('buy', bullishArea, candles);
+  const bearishPoiReclaim = context?.bearishPoiReclaim ?? hasPoiReclaim('sell', bearishArea, candles);
+  const macroTrend = detectMacroTrend(candles, emaTrend);
+
+  const candidates = [
+    buildPotentialCandidate({
+      symbol,
+      candles,
+      trend,
+      broaderTrend,
+      macroTrend,
+      emaTrend,
+      currentPrice,
+      zones,
+      gaps,
+      currentZone,
+      direction: 'buy',
+      mode: 'trend',
+      bullishReversal,
+      bearishReversal,
+      bullishPoiReclaim,
+      bearishPoiReclaim,
+    }),
+    buildPotentialCandidate({
+      symbol,
+      candles,
+      trend,
+      broaderTrend,
+      macroTrend,
+      emaTrend,
+      currentPrice,
+      zones,
+      gaps,
+      currentZone,
+      direction: 'sell',
+      mode: 'trend',
+      bullishReversal,
+      bearishReversal,
+      bullishPoiReclaim,
+      bearishPoiReclaim,
+    }),
+    buildPotentialCandidate({
+      symbol,
+      candles,
+      trend,
+      broaderTrend,
+      macroTrend,
+      emaTrend,
+      currentPrice,
+      zones,
+      gaps,
+      currentZone,
+      direction: 'buy',
+      mode: 'counter',
+      bullishReversal,
+      bearishReversal,
+      bullishPoiReclaim,
+      bearishPoiReclaim,
+    }),
+    buildPotentialCandidate({
+      symbol,
+      candles,
+      trend,
+      broaderTrend,
+      macroTrend,
+      emaTrend,
+      currentPrice,
+      zones,
+      gaps,
+      currentZone,
+      direction: 'sell',
+      mode: 'counter',
+      bullishReversal,
+      bearishReversal,
+      bullishPoiReclaim,
+      bearishPoiReclaim,
+    }),
+    buildSupportResistanceRangePotential(symbol, candles, broaderTrend, emaTrend),
+  ].filter((candidate): candidate is PotentialTradeSetup => candidate !== null);
+
+  const continuationSetup = buildContinuationSetup(symbol, candles);
+  if (continuationSetup) {
+    candidates.push({
+      symbol,
+      direction: continuationSetup.direction,
+      currentPrice,
+      entry: continuationSetup.entry,
+      stopLoss: continuationSetup.stopLoss,
+      slReason: 'Swing-based ATR fallback SL',
+      takeProfit: continuationSetup.takeProfit,
+      takeProfit2: continuationSetup.takeProfit2,
+      emaMomentum: true,
+      emaStack: continuationSetup.emaStack,
+      emaEntryValid: true,
+      activationProbability: continuationSetup.confidenceScore,
+      confidenceScore: continuationSetup.confidenceScore,
+      marketRegime: continuationSetup.marketRegime,
+      confirmations: continuationSetup.confirmations,
+      strategy: 'session_flip',
+      session: continuationSetup.session,
+      setup: continuationSetup.setup,
+      validUntil: continuationSetup.validUntil,
+      narrative: continuationSetup.narrative,
+      fulfilledConditions: continuationSetup.fulfilledConditions,
+      requiredTriggers: continuationSetup.requiredTriggers,
+      contextLabels: continuationSetup.contextLabels,
+    });
+  }
+
+  return candidates.sort((left, right) => {
+    if (left.activationProbability !== right.activationProbability) {
+      return right.activationProbability - left.activationProbability;
+    }
+
+    if (left.confidenceScore !== right.confidenceScore) {
+      return right.confidenceScore - left.confidenceScore;
+    }
+
+    if (left.strategy === 'session_flip' && right.strategy !== 'session_flip') {
+      return 1;
+    }
+
+    if (right.strategy === 'session_flip' && left.strategy !== 'session_flip') {
+      return -1;
+    }
+
+    return 0;
+  });
 }
