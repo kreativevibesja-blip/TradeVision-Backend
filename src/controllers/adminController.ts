@@ -49,7 +49,7 @@ const DEFAULT_SUPPORT_WHATSAPP_NUMBER = '18762797956';
 const DEFAULT_SUPPORT_WHATSAPP_MESSAGE = 'Hi TradeVision AI, I need support.';
 
 const VALID_ANNOUNCEMENT_TYPES: AnnouncementType[] = ['update', 'maintenance', 'discount', 'new_feature', 'security', 'event'];
-const VALID_ANNOUNCEMENT_TARGET_PLANS = ['PRO', 'TOP_TIER', 'GOLDX'] as const;
+const VALID_ANNOUNCEMENT_TARGET_PLANS = ['PRO', 'TOP_TIER', 'GOLDX', 'GOLDX_PULSE'] as const;
 type AnnouncementTargetPlan = typeof VALID_ANNOUNCEMENT_TARGET_PLANS[number];
 
 const isAnnouncementTargetPlan = (value: unknown): value is AnnouncementTargetPlan =>

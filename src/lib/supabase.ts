@@ -286,7 +286,7 @@ export interface AnnouncementContentPayload {
   expiresAt: string | null;
   type?: AnnouncementType;
   couponCode?: string | null;
-  targetPlan?: 'PRO' | 'TOP_TIER' | 'GOLDX' | null;
+  targetPlan?: 'PRO' | 'TOP_TIER' | 'GOLDX' | 'GOLDX_PULSE' | null;
 }
 
 export type CouponType = 'percentage' | 'fixed';
