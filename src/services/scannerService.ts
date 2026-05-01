@@ -1,6 +1,7 @@
 import { fetchLiveQuoteForSymbol } from './marketData';
-import { supabase, getAutoTradeSettings, type StrategyMode } from '../lib/supabase';
+import { supabase, getAutoTradeSettings, getSystemSetting, type StrategyMode } from '../lib/supabase';
 import { getCachedCandles } from '../lib/db/saveCandles';
+import { calculateEmaSeries } from '../lib/indicators/ema';
 import { getRuntimeCandles } from '../lib/deriv/activeCandles';
 import { ensureDerivSubscription, getDerivHistoryCandles } from '../lib/deriv/ws';
 import { DERIV_SCANNER_SYMBOL_IDS, SESSION_SCANNER_SYMBOL_IDS, VOLATILITY_SCANNER_SYMBOL_IDS } from '../lib/deriv/symbols';
@@ -122,6 +123,26 @@ interface LivePriceWindow {
   highPrice: number;
 }
 
+type ScannerStrategyToggleKey =
+  | 'trendPullback'
+  | 'countertrendReversal'
+  | 'fvgContinuation'
+  | 'emaReclaim'
+  | 'equalLevelSweep'
+  | 'poiReclaim'
+  | 'rangeRejection'
+  | 'zoneTap'
+  | 'sessionFlip';
+
+interface ScannerExecutionSettings {
+  useEmaExecutionFilter: boolean;
+  fastEmaPeriod: number;
+  midEmaPeriod: number;
+  slowEmaPeriod: number;
+  pullbackTolerancePct: number;
+  enabledStrategies: Record<ScannerStrategyToggleKey, boolean>;
+}
+
 type OpenScanResult = Pick<ScanResult, 'id' | 'userId' | 'symbol' | 'status' | 'confidenceScore' | 'createdAt'>;
 type RecentScannerActivity = Pick<ScanResult, 'symbol' | 'direction' | 'sessionType' | 'status' | 'createdAt' | 'closedAt' | 'closeReason'>;
 
@@ -174,9 +195,153 @@ const AI_REVIEW_NEAR_LIVE_THRESHOLD = 86;
 const AI_REVIEW_CACHE_TTL_MS = 10 * 60_000;
 const PREFER_HISTORY_BEFORE_CACHE_SYMBOLS = new Set(['XAUUSD']);
 const HISTORY_RATE_LIMIT_BACKOFF_MS = 60_000;
+const DEFAULT_SCANNER_EXECUTION_SETTINGS: ScannerExecutionSettings = {
+  useEmaExecutionFilter: true,
+  fastEmaPeriod: 10,
+  midEmaPeriod: 14,
+  slowEmaPeriod: 50,
+  pullbackTolerancePct: 0.12,
+  enabledStrategies: {
+    trendPullback: true,
+    countertrendReversal: true,
+    fvgContinuation: true,
+    emaReclaim: true,
+    equalLevelSweep: true,
+    poiReclaim: true,
+    rangeRejection: true,
+    zoneTap: true,
+    sessionFlip: true,
+  },
+};
 
 function normalizeScannerSymbol(symbol: string): string {
   return symbol.trim().toUpperCase();
+}
+
+function parseBooleanSetting(value: unknown, fallback: boolean): boolean {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true') return true;
+    if (normalized === 'false') return false;
+  }
+  return fallback;
+}
+
+function parseNumberSetting(value: unknown, fallback: number, minimum = 1): number {
+  const numeric = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN;
+  return Number.isFinite(numeric) && numeric >= minimum ? numeric : fallback;
+}
+
+function parseStrategyTogglePayload(value: unknown): Record<ScannerStrategyToggleKey, boolean> {
+  const defaults = DEFAULT_SCANNER_EXECUTION_SETTINGS.enabledStrategies;
+  const base: Record<ScannerStrategyToggleKey, boolean> = { ...defaults };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return base;
+  }
+
+  const source = value as Partial<Record<ScannerStrategyToggleKey, unknown>>;
+  (Object.keys(base) as ScannerStrategyToggleKey[]).forEach((key) => {
+    base[key] = parseBooleanSetting(source[key], defaults[key]);
+  });
+  return base;
+}
+
+function classifyScannerStrategy(strategy: string | null | undefined): ScannerStrategyToggleKey {
+  const normalized = (strategy ?? '').trim().toLowerCase();
+
+  if (normalized === 'session_flip') return 'sessionFlip';
+  if (normalized.includes('range')) return 'rangeRejection';
+  if (normalized.includes('ema200 reclaim')) return 'emaReclaim';
+  if (normalized.includes('fvg')) return 'fvgContinuation';
+  if (normalized.includes('eql sweep') || normalized.includes('eqh sweep')) return 'equalLevelSweep';
+  if (normalized.includes('poi reclaim')) return 'poiReclaim';
+  if (normalized.includes('countertrend') || normalized.includes('higher-timeframe reversal') || normalized.includes('reversal from demand') || normalized.includes('reversal from supply')) {
+    return 'countertrendReversal';
+  }
+  if (normalized.includes('pullback zone tap')) return 'zoneTap';
+  return 'trendPullback';
+}
+
+async function loadScannerExecutionSettings(): Promise<ScannerExecutionSettings> {
+  const [useEmaFilterSetting, fastEmaSetting, midEmaSetting, slowEmaSetting, toleranceSetting, strategyTogglesSetting] = await Promise.all([
+    getSystemSetting('scanner_execution_use_ema_filter'),
+    getSystemSetting('scanner_execution_fast_ema_period'),
+    getSystemSetting('scanner_execution_mid_ema_period'),
+    getSystemSetting('scanner_execution_slow_ema_period'),
+    getSystemSetting('scanner_execution_pullback_tolerance_pct'),
+    getSystemSetting('scanner_enabled_strategies'),
+  ]);
+
+  return {
+    useEmaExecutionFilter: parseBooleanSetting(useEmaFilterSetting?.value, DEFAULT_SCANNER_EXECUTION_SETTINGS.useEmaExecutionFilter),
+    fastEmaPeriod: parseNumberSetting(fastEmaSetting?.value, DEFAULT_SCANNER_EXECUTION_SETTINGS.fastEmaPeriod),
+    midEmaPeriod: parseNumberSetting(midEmaSetting?.value, DEFAULT_SCANNER_EXECUTION_SETTINGS.midEmaPeriod),
+    slowEmaPeriod: parseNumberSetting(slowEmaSetting?.value, DEFAULT_SCANNER_EXECUTION_SETTINGS.slowEmaPeriod),
+    pullbackTolerancePct: parseNumberSetting(toleranceSetting?.value, DEFAULT_SCANNER_EXECUTION_SETTINGS.pullbackTolerancePct, 0),
+    enabledStrategies: parseStrategyTogglePayload(strategyTogglesSetting?.value),
+  };
+}
+
+function isScannerStrategyEnabled(strategy: string | null | undefined, settings: ScannerExecutionSettings): boolean {
+  return settings.enabledStrategies[classifyScannerStrategy(strategy)];
+}
+
+function passesScannerExecutionEmaFilter(
+  candidate: Pick<ScanCycleResult, 'direction'>,
+  candles: Candle[],
+  settings: ScannerExecutionSettings,
+): boolean {
+  if (!settings.useEmaExecutionFilter) {
+    return true;
+  }
+
+  const fastSeries = calculateEmaSeries(candles, settings.fastEmaPeriod);
+  const midSeries = calculateEmaSeries(candles, settings.midEmaPeriod);
+  const slowSeries = calculateEmaSeries(candles, settings.slowEmaPeriod);
+  if (fastSeries.length < 3 || midSeries.length < 3 || slowSeries.length < 3 || candles.length < 3) {
+    return false;
+  }
+
+  const lastClosedBar = candles[candles.length - 2];
+  const fast = fastSeries[fastSeries.length - 2]?.value;
+  const mid = midSeries[midSeries.length - 2]?.value;
+  const slow = slowSeries[slowSeries.length - 2]?.value;
+  if (fast == null || mid == null || slow == null) {
+    return false;
+  }
+
+  const tolerance = Math.max(0, settings.pullbackTolerancePct) / 100;
+  const bandTolerance = Math.abs(mid) * tolerance;
+
+  if (candidate.direction === 'buy') {
+    const stacked = fast > mid && mid > slow;
+    const reclaimedFast = lastClosedBar.close > fast;
+    const pulledBack = lastClosedBar.low <= mid + bandTolerance;
+    return stacked && reclaimedFast && pulledBack;
+  }
+
+  const stacked = fast < mid && mid < slow;
+  const reclaimedFast = lastClosedBar.close < fast;
+  const pulledBack = lastClosedBar.high >= mid - bandTolerance;
+  return stacked && reclaimedFast && pulledBack;
+}
+
+function applyScannerExecutionFilters(
+  result: ScanCycleResult | null,
+  candles: Candle[],
+  settings: ScannerExecutionSettings,
+): ScanCycleResult | null {
+  if (!result) {
+    return null;
+  }
+  if (!isScannerStrategyEnabled(result.strategy, settings)) {
+    return null;
+  }
+  if (!passesScannerExecutionEmaFilter(result, candles, settings)) {
+    return null;
+  }
+  return result;
 }
 
 function usesDerivOnlyPriceFeed(symbol: string): boolean {
@@ -2022,7 +2187,7 @@ async function buildPotentialForSymbol(symbol: string): Promise<PotentialTradeSe
   }
 }
 
-async function scanSymbol(symbol: string, strategyMode: StrategyMode = 'standard'): Promise<ScanCycleResult | null> {
+async function scanSymbol(symbol: string, strategyMode: StrategyMode = 'standard', executionSettings: ScannerExecutionSettings = DEFAULT_SCANNER_EXECUTION_SETTINGS): Promise<ScanCycleResult | null> {
   try {
     const candles = await loadScannerCandles(symbol, 'M15', 600);
     if (candles.length < 200) {
@@ -2051,7 +2216,7 @@ async function scanSymbol(symbol: string, strategyMode: StrategyMode = 'standard
         if (refinedPotential && refinedPotential.activationProbability >= HIGH_CONFIDENCE_POTENTIAL_THRESHOLD) {
           const aiReviewedPotential = await reviewPotentialTradeWithAi(symbol, candles, refinedPotential);
           if (aiReviewedPotential.activationProbability >= HIGH_CONFIDENCE_POTENTIAL_THRESHOLD) {
-            return promotePotentialToScanCycleResult(aiReviewedPotential);
+            return applyScannerExecutionFilters(promotePotentialToScanCycleResult(aiReviewedPotential), candles, executionSettings);
           }
         }
       }
@@ -2060,7 +2225,7 @@ async function scanSymbol(symbol: string, strategyMode: StrategyMode = 'standard
     const setup = analyzeMarket(symbol, candles);
     if (!setup) return null;
 
-    return {
+    return applyScannerExecutionFilters({
       symbol: setup.symbol,
       direction: setup.direction,
       entry: setup.entry,
@@ -2076,7 +2241,7 @@ async function scanSymbol(symbol: string, strategyMode: StrategyMode = 'standard
       strategy: setup.strategy,
       confirmations: setup.confirmations,
       score: setup.score,
-    };
+    }, candles, executionSettings);
   } catch (err) {
     console.error(`[Scanner] Failed to scan ${symbol}:`, err);
     return null;
@@ -2086,6 +2251,7 @@ async function scanSymbol(symbol: string, strategyMode: StrategyMode = 'standard
 export async function runSessionScanner(userId: string): Promise<{ results: ScanResult[]; alerts: ScannerAlert[] }> {
   const autoTradeSettings = await getAutoTradeSettings(userId);
   const strategyMode = autoTradeSettings?.strategyMode ?? 'standard';
+  const executionSettings = await loadScannerExecutionSettings();
 
   // Get user's enabled sessions
   const userSessions = await getActiveSessionsForUser(userId);
@@ -2113,7 +2279,7 @@ export async function runSessionScanner(userId: string): Promise<{ results: Scan
 
     const symbolsToScan = [...SCANNER_SYMBOLS_BY_SESSION[sessionType]];
 
-    const rawResults = await Promise.all(symbolsToScan.map((symbol) => scanSymbol(symbol, strategyMode)));
+    const rawResults = await Promise.all(symbolsToScan.map((symbol) => scanSymbol(symbol, strategyMode, executionSettings)));
     const validResults = rawResults
       .filter((r): r is ScanCycleResult => r !== null)
       .sort((a, b) => b.score - a.score || b.confidenceScore - a.confidenceScore)
