@@ -65,6 +65,7 @@ const parseAnnouncementContent = (content: string): AnnouncementContentPayload =
         expiresAt: typeof parsed.expiresAt === 'string' && parsed.expiresAt.trim().length > 0 ? parsed.expiresAt : null,
         type: VALID_ANNOUNCEMENT_TYPES.includes(parsed.type as AnnouncementType) ? (parsed.type as AnnouncementType) : undefined,
         couponCode: typeof parsed.couponCode === 'string' && parsed.couponCode.trim().length > 0 ? parsed.couponCode : null,
+        imageUrl: typeof parsed.imageUrl === 'string' && parsed.imageUrl.trim().length > 0 ? parsed.imageUrl.trim() : null,
         targetPlan: isAnnouncementTargetPlan(parsed.targetPlan) ? parsed.targetPlan : null,
       };
     }
@@ -74,6 +75,7 @@ const parseAnnouncementContent = (content: string): AnnouncementContentPayload =
   return {
     body: content,
     expiresAt: null,
+    imageUrl: null,
   };
 };
 
@@ -84,6 +86,7 @@ const serializeAnnouncementContent = (payload: AnnouncementContentPayload) =>
     expiresAt: payload.expiresAt,
     type: payload.type || null,
     couponCode: payload.couponCode || null,
+    imageUrl: payload.imageUrl || null,
     targetPlan: payload.targetPlan || null,
   });
 
@@ -113,6 +116,7 @@ const mapAnnouncementRecord = (announcement: AnnouncementRecord) => {
     isExpired,
     type: parsedContent.type || 'update',
     couponCode: parsedContent.couponCode || null,
+    imageUrl: parsedContent.imageUrl || null,
     targetPlan: parsedContent.targetPlan || null,
   };
 };
@@ -642,7 +646,7 @@ export const getActiveAnnouncements = async (_req: Request, res: Response) => {
 
 export const createAnnouncement = async (req: Request, res: Response) => {
   try {
-    const { title, content, durationValue, durationUnit, type, couponCode, targetPlan } = req.body;
+    const { title, content, durationValue, durationUnit, type, couponCode, imageUrl, targetPlan } = req.body;
     const announcementType = VALID_ANNOUNCEMENT_TYPES.includes(type) ? type : 'update';
     const announcement = await createAnnouncementRecord({
       title,
@@ -651,6 +655,7 @@ export const createAnnouncement = async (req: Request, res: Response) => {
         expiresAt: getExpiryFromRequest(durationValue, durationUnit),
         type: announcementType,
         couponCode: announcementType === 'discount' && typeof couponCode === 'string' ? couponCode.trim().toUpperCase() : null,
+        imageUrl: typeof imageUrl === 'string' && imageUrl.trim().length > 0 ? imageUrl.trim() : null,
         targetPlan: isAnnouncementTargetPlan(targetPlan) ? targetPlan : null,
       }),
     });
@@ -663,15 +668,16 @@ export const createAnnouncement = async (req: Request, res: Response) => {
 export const updateAnnouncement = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { title, content, isActive, durationValue, durationUnit, clearExpiry, type, couponCode, targetPlan } = req.body;
+    const { title, content, isActive, durationValue, durationUnit, clearExpiry, type, couponCode, imageUrl, targetPlan } = req.body;
     const announcementType = VALID_ANNOUNCEMENT_TYPES.includes(type) ? type : undefined;
     const nextContent =
-      typeof content === 'string' || durationValue !== undefined || clearExpiry || announcementType
+      typeof content === 'string' || durationValue !== undefined || clearExpiry || announcementType || imageUrl !== undefined
         ? serializeAnnouncementContent({
             body: typeof content === 'string' ? content : '',
             expiresAt: clearExpiry ? null : getExpiryFromRequest(durationValue, durationUnit),
             type: announcementType,
             couponCode: announcementType === 'discount' && typeof couponCode === 'string' ? couponCode.trim().toUpperCase() : null,
+            imageUrl: typeof imageUrl === 'string' && imageUrl.trim().length > 0 ? imageUrl.trim() : null,
             targetPlan: isAnnouncementTargetPlan(targetPlan) ? targetPlan : null,
           })
         : undefined;
