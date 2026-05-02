@@ -2,11 +2,11 @@ import type { DerivedCandle } from '../deriv/candles';
 import { supabase } from '../supabase';
 
 const CANDLES_TABLE = 'candles';
-const SUPPORTED_CANDLE_TIMEFRAMES = new Set(['M1', 'M5', 'M15', 'H1']);
+const PERSISTED_CANDLE_TIMEFRAMES = new Set(['M15']);
 
 export async function saveClosedCandle(symbol: string, timeframe: string, candle: DerivedCandle) {
-  if (!SUPPORTED_CANDLE_TIMEFRAMES.has(timeframe)) {
-    throw new Error(`Unsupported candle timeframe for persistence: ${timeframe}`);
+  if (!PERSISTED_CANDLE_TIMEFRAMES.has(timeframe)) {
+    return;
   }
 
   const { error } = await supabase.from(CANDLES_TABLE).upsert(
