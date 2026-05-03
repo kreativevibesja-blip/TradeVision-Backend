@@ -16,6 +16,13 @@ export interface AuthRequest extends Request {
     role: string;
     subscription: string;
   };
+  featureAccess?: {
+    feature: string;
+    allowed: boolean;
+    requiredPlan: string;
+    currentPlan: string;
+    upgradeRequired: string | null;
+  };
 }
 
 type SupabaseIdentity = {

@@ -8,9 +8,11 @@ import { inferAssetClass } from '../utils/volatilityDetector';
 import {
   countAnalysesForUserSince,
   createAnalysis,
+  createAnalysisInteraction,
   getAnalysisByIdForUser,
   getMonthlyAnalysisLimit,
   getUserById,
+  listAnalysisInteractionsForUser,
   listAnalysesForUser,
   releaseUserDailyUsageReservation,
   reserveUserDailyUsage,
@@ -18,6 +20,7 @@ import {
   countActiveQueueJobs,
   countRecentQueueJobs,
   logUploadError,
+  type AnalysisFeatureName,
   type UploadErrorType,
 } from '../lib/supabase';
 import { runAnalysisPipeline } from '../services/analysis/runAnalysisPipeline';
@@ -25,6 +28,8 @@ import { getCachedCandles } from '../lib/db/saveCandles';
 import { getDerivLiveChartSnapshot, isSupportedDerivGranularity } from '../services/derivMarketData';
 import { fetchMarketDataForLiveChart, isSupportedLiveChartTimeframe, resolveLiveChartSymbol } from '../services/marketData';
 import { runLiveChartAnalysisPipeline } from '../services/analysis/runLiveChartAnalysisPipeline';
+import { buildConfidenceThermometer, buildReactionChallengeResult, buildTradeReplay } from '../services/analysisInteractive';
+import { checkFeatureAccess } from '../middleware/checkFeatureAccess';
 
 const parseCurrentPrice = (value: unknown) => {
   if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
@@ -603,5 +608,143 @@ export const getAnalysisById = async (req: AuthRequest, res: Response) => {
   } catch (error) {
     console.error('Get analysis error:', error);
     return res.status(500).json({ error: 'Failed to retrieve analysis' });
+  }
+};
+
+export const getAnalysisConfidence = async (req: AuthRequest, res: Response) => {
+  try {
+    const analysis = await getAnalysisByIdForUser(req.params.analysisId, req.user!.id);
+
+    if (!analysis) {
+      return res.status(404).json({ error: 'Analysis not found' });
+    }
+
+    const serialized = serializeAnalysis(analysis);
+    const confidence = buildConfidenceThermometer(serialized);
+
+    await createAnalysisInteraction({
+      user_id: req.user!.id,
+      analysis_id: analysis.id,
+      feature: 'confidenceThermometer',
+      data: {
+        event: 'viewed',
+        score: confidence.score,
+        bucket: confidence.bucket,
+      },
+    }).catch(() => {});
+
+    return res.json({
+      confidence,
+      featureAccess: req.featureAccess ?? checkFeatureAccess(req.user!.subscription, 'confidenceThermometer'),
+    });
+  } catch (error) {
+    console.error('Get analysis confidence error:', error);
+    return res.status(500).json({ error: 'Failed to build confidence thermometer' });
+  }
+};
+
+export const getTradeReplay = async (req: AuthRequest, res: Response) => {
+  try {
+    const analysis = await getAnalysisByIdForUser(req.params.analysisId, req.user!.id);
+
+    if (!analysis) {
+      return res.status(404).json({ error: 'Analysis not found' });
+    }
+
+    const serialized = serializeAnalysis(analysis);
+    const replay = buildTradeReplay(serialized);
+
+    await createAnalysisInteraction({
+      user_id: req.user!.id,
+      analysis_id: analysis.id,
+      feature: 'tradeReplay',
+      data: {
+        event: 'opened',
+        scenarios: replay.scenarios.length,
+      },
+    }).catch(() => {});
+
+    return res.json({
+      replay,
+      featureAccess: req.featureAccess ?? checkFeatureAccess(req.user!.subscription, 'tradeReplay'),
+    });
+  } catch (error) {
+    console.error('Get trade replay error:', error);
+    return res.status(500).json({ error: 'Failed to build trade replay' });
+  }
+};
+
+export const getAnalysisInteractions = async (req: AuthRequest, res: Response) => {
+  try {
+    const analysis = await getAnalysisByIdForUser(req.params.analysisId, req.user!.id);
+
+    if (!analysis) {
+      return res.status(404).json({ error: 'Analysis not found' });
+    }
+
+    const interactions = await listAnalysisInteractionsForUser(analysis.id, req.user!.id);
+    const latestByFeature = interactions.reduce<Record<string, unknown>>((accumulator, interaction) => {
+      if (!(interaction.feature in accumulator)) {
+        accumulator[interaction.feature] = interaction;
+      }
+      return accumulator;
+    }, {});
+
+    return res.json({ interactions, latestByFeature });
+  } catch (error) {
+    console.error('Get analysis interactions error:', error);
+    return res.status(500).json({ error: 'Failed to retrieve analysis interactions' });
+  }
+};
+
+export const createInteractiveAnalysisEvent = async (req: AuthRequest, res: Response) => {
+  try {
+    const analysis = await getAnalysisByIdForUser(req.params.analysisId, req.user!.id);
+
+    if (!analysis) {
+      return res.status(404).json({ error: 'Analysis not found' });
+    }
+
+    const feature = typeof req.body?.feature === 'string' ? req.body.feature as AnalysisFeatureName : null;
+    if (!feature || !['reactionChallenge', 'confidenceThermometer', 'tradeReplay'].includes(feature)) {
+      return res.status(400).json({ error: 'Unsupported interactive feature' });
+    }
+
+    const featureAccess = checkFeatureAccess(req.user!.subscription, feature);
+    if (!featureAccess.allowed) {
+      return res.status(403).json({
+        error: `This feature requires the ${featureAccess.requiredPlan === 'TOP_TIER' ? 'Pro+' : featureAccess.requiredPlan} plan`,
+        featureAccess,
+      });
+    }
+
+    const payload = req.body?.data && typeof req.body.data === 'object' ? { ...req.body.data } : {};
+    let computedResult: Record<string, unknown> | null = null;
+
+    if (feature === 'reactionChallenge') {
+      const userEntry = parseCurrentPrice((payload as Record<string, unknown>).userEntry);
+      if (userEntry === null) {
+        return res.status(400).json({ error: 'Reaction challenge submissions require a numeric userEntry' });
+      }
+
+      computedResult = buildReactionChallengeResult(serializeAnalysis(analysis), userEntry);
+      (payload as Record<string, unknown>).userEntry = userEntry;
+      (payload as Record<string, unknown>).submittedAt = new Date().toISOString();
+    }
+
+    const interaction = await createAnalysisInteraction({
+      user_id: req.user!.id,
+      analysis_id: analysis.id,
+      feature,
+      data: {
+        ...(payload as Record<string, unknown>),
+        ...(computedResult ? { result: computedResult } : {}),
+      },
+    });
+
+    return res.status(201).json({ interaction, result: computedResult, featureAccess });
+  } catch (error) {
+    console.error('Create interactive analysis event error:', error);
+    return res.status(500).json({ error: 'Failed to record interactive analysis event' });
   }
 };

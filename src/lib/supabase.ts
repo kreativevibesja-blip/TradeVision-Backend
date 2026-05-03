@@ -76,6 +76,7 @@ const USER_TABLE = 'User';
 const ANALYSIS_TABLE = 'Analysis';
 const PAYMENT_TABLE = 'Payment';
 const PRICING_PLAN_TABLE = 'PricingPlan';
+const ANALYSIS_INTERACTIONS_TABLE = 'analysis_interactions';
 const SYSTEM_SETTINGS_TABLE = 'SystemSettings';
 const ANNOUNCEMENT_TABLE = 'Announcement';
 const TICKET_TABLE = 'Ticket';
@@ -101,6 +102,7 @@ const TRACKED_TRADE_TABLE = 'TrackedTrade';
 
 export type SubscriptionTier = 'FREE' | 'PRO' | 'TOP_TIER' | 'VIP_AUTO_TRADER';
 export type BillingPlan = SubscriptionTier | 'GOLDX_PULSE';
+export type AnalysisFeatureName = 'reactionChallenge' | 'confidenceThermometer' | 'tradeReplay';
 export type UserRole = 'USER' | 'ADMIN';
 export type PaymentStatus = 'PENDING' | 'COMPLETED' | 'FAILED' | 'REFUNDED';
 export type PaymentMethod = 'PAYPAL' | 'CARD' | 'BANK_TRANSFER' | 'COUPON';
@@ -199,6 +201,15 @@ export interface AnalysisRecord {
   errorMessage: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface AnalysisInteractionRecord {
+  id: string;
+  user_id: string;
+  analysis_id: string;
+  feature: AnalysisFeatureName;
+  data: Record<string, unknown> | null;
+  created_at: string;
 }
 
 export interface PaymentRecord {
@@ -825,6 +836,29 @@ export const getAnalysisByIdForUser = (id: string, userId: string) =>
 
 export const getAnalysisById = (id: string) =>
   maybeSingle<AnalysisRecord>('getAnalysisById', supabase.from(ANALYSIS_TABLE).select('*').eq('id', id).maybeSingle());
+
+export const createAnalysisInteraction = (
+  values: Pick<AnalysisInteractionRecord, 'user_id' | 'analysis_id' | 'feature'> & Partial<Pick<AnalysisInteractionRecord, 'data'>>
+) => insertSingle<AnalysisInteractionRecord>('createAnalysisInteraction', ANALYSIS_INTERACTIONS_TABLE, values);
+
+export const listAnalysisInteractionsForUser = async (
+  analysisId: string,
+  userId: string,
+  feature?: AnalysisFeatureName
+) => {
+  let query = supabase
+    .from(ANALYSIS_INTERACTIONS_TABLE)
+    .select('*')
+    .eq('analysis_id', analysisId)
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false });
+
+  if (feature) {
+    query = query.eq('feature', feature);
+  }
+
+  return many<AnalysisInteractionRecord>('listAnalysisInteractionsForUser', query);
+};
 
 export const listAnalysesForUser = async (userId: string, page: number, limit: number) => {
   const skip = (page - 1) * limit;
