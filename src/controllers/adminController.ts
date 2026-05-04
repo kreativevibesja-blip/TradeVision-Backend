@@ -42,7 +42,8 @@ import { setBillingStateFromPayment, setGoldxPulseStateFromPayment } from '../se
 import { processReferralPayment } from '../services/referralService';
 import { sendPaymentReminderEmail } from '../services/paymentReminderEmail';
 import { sendRenewalReminderEmail } from '../services/renewalReminderEmail';
-import { getUserSubscription as getGoldxSubscription, getUserLicense as getGoldxLicense } from '../services/goldx/licenseService';
+import { getUserSubscription as getGoldxSubscription, getUserLicense as getGoldxLicense, peekPendingDashboardGrant } from '../services/goldx/licenseService';
+import { getGoldxPulseAccess } from '../services/goldxPulse/access';
 
 const ANNOUNCEMENT_CONTENT_VERSION = 1;
 const DEFAULT_SUPPORT_WHATSAPP_NUMBER = '18762797956';
@@ -221,11 +222,13 @@ export const getUserDetails = async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    const [billingSummary, ticketData, goldxSubscription, goldxLicense] = await Promise.all([
+    const [billingSummary, ticketData, goldxSubscription, goldxLicense, pendingGrant, goldxPulse] = await Promise.all([
       getBillingSummaryForUser(user.id, user.subscription),
       listTicketsForUser(user.id, 1, 20),
       getGoldxSubscription(user.id),
       getGoldxLicense(user.id),
+      peekPendingDashboardGrant(user.id),
+      getGoldxPulseAccess(user.id, user.subscription, user.role),
     ]);
 
     const openTickets = ticketData.tickets
@@ -251,6 +254,13 @@ export const getUserDetails = async (req: Request, res: Response) => {
           licenseStatus: goldxLicense?.status ?? null,
           expiresAt: goldxLicense?.expiresAt ?? null,
           mt5Account: goldxLicense?.mt5Account ?? null,
+          pendingLicenseKey: pendingGrant?.licenseKey ?? null,
+          pendingKeyIssuedAt: pendingGrant?.issuedAt ?? null,
+          pendingKeyExpiresAt: pendingGrant?.expiresAt ?? null,
+          pulseActive: goldxPulse.active,
+          pulseSource: goldxPulse.source,
+          pulsePlanName: goldxPulse.planName,
+          pulseExpiresAt: goldxPulse.expiresAt,
         },
         openTickets,
         openTicketCount: openTickets.length,

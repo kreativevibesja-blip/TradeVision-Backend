@@ -42,6 +42,10 @@ import {
   adminGetGoldxSetupRequests,
   adminUpdateGoldxSetupRequest,
   adminGrantGoldxAccessToUser,
+  adminGetGoldxUsers,
+  adminGetGoldxUserDetails,
+  adminReissueGoldxLicenseForUser,
+  adminSendGoldxFilesEmail,
 } from '../controllers/goldxController';
 
 const router = Router();
@@ -97,6 +101,10 @@ router.post('/admin/settings', authenticate, requireAdmin, adminUpdateGoldxSetti
 router.get('/admin/trade-history', authenticate, requireAdmin, adminGetGoldxTradeHistory);
 router.get('/admin/setup-requests', authenticate, requireAdmin, adminGetGoldxSetupRequests);
 router.post('/admin/setup-requests/:requestId', authenticate, requireAdmin, adminUpdateGoldxSetupRequest);
+router.get('/admin/users', authenticate, requireAdmin, adminGetGoldxUsers);
+router.get('/admin/users/:userId', authenticate, requireAdmin, adminGetGoldxUserDetails);
 router.post('/admin/users/:userId/grant', authenticate, requireAdmin, adminGrantGoldxAccessToUser);
+router.post('/admin/users/:userId/reissue-license', authenticate, requireAdmin, adminReissueGoldxLicenseForUser);
+router.post('/admin/users/:userId/send-files-email', authenticate, requireAdmin, adminSendGoldxFilesEmail);
 
 export default router;

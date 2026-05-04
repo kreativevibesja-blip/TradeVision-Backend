@@ -37,6 +37,7 @@ import {
   adminUpdateSetupRequest,
   getEaDownloadUrl,
   insertAuditLog,
+  peekPendingDashboardGrant,
   getRealtimeConfigForAccount,
   consumePendingDashboardGrant,
   debugBindLicense,
@@ -47,6 +48,33 @@ import { computeHmac, getHmacSecret, hashLicenseKey } from '../services/goldx/cr
 import { generateSignal, getCurrentSessionStatus, reportTradeExecution } from '../services/goldx/strategyEngine';
 import { createOrder, captureOrder } from '../services/paypalService';
 import type { GoldxVerifyRequest, GoldxMode, GoldxSessionMode, GoldxRuntimeTradeState, GoldxLotMode } from '../services/goldx/types';
+import { getGoldxPulseAccess } from '../services/goldxPulse/access';
+import { getBillingSummaryForUser } from '../services/billing';
+import { sendGoldxEaDeliveryEmail } from '../services/goldxDeliveryEmail';
+import { getUsersByIds, getUserById, listSystemSettingsByPrefix } from '../lib/supabase';
+
+const GOLDX_PULSE_SETTING_PREFIX = 'goldxPulse:subscription:';
+
+const isPulseSettingActive = (value: unknown) => {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const setting = value as { status?: string; expiresAt?: string | null };
+  if (setting.status !== 'active' && setting.status !== 'trial') {
+    return false;
+  }
+
+  if (!setting.expiresAt) {
+    return true;
+  }
+
+  return new Date(setting.expiresAt).getTime() > Date.now();
+};
+
+const getPulseUserIdFromSettingKey = (key: string) => key.startsWith(GOLDX_PULSE_SETTING_PREFIX)
+  ? key.slice(GOLDX_PULSE_SETTING_PREFIX.length)
+  : null;
 
 // ── Public ──────────────────────────────────────────────────
 
@@ -750,6 +778,202 @@ export const adminGrantGoldxAccessToUser = async (req: AuthRequest, res: Respons
     });
   } catch (err: any) {
     console.error('[GoldX Admin] grantUserAccess error:', err);
+    res.status(500).json({ error: err?.message ?? 'Internal error' });
+  }
+};
+
+export const adminGetGoldxUsers = async (_req: AuthRequest, res: Response) => {
+  try {
+    const [licenses, subscriptions, pulseSettings] = await Promise.all([
+      adminGetAllLicenses(),
+      adminGetAllSubscriptions(),
+      listSystemSettingsByPrefix(GOLDX_PULSE_SETTING_PREFIX),
+    ]);
+
+    const eaUserIds = new Set<string>();
+    const pulseUserIds = new Set<string>();
+
+    for (const subscription of subscriptions) {
+      if (subscription.status === 'active' || subscription.status === 'cancelled') {
+        eaUserIds.add(subscription.userId);
+      }
+    }
+
+    for (const license of licenses) {
+      if (license.status === 'active') {
+        eaUserIds.add(license.userId);
+      }
+    }
+
+    for (const setting of pulseSettings) {
+      const userId = getPulseUserIdFromSettingKey(setting.key);
+      if (userId && isPulseSettingActive(setting.value)) {
+        pulseUserIds.add(userId);
+      }
+    }
+
+    const userIds = Array.from(new Set([...eaUserIds, ...pulseUserIds]));
+    const users = userIds.length ? await getUsersByIds(userIds) : [];
+    const licenseByUserId = new Map(licenses.map((license) => [license.userId, license]));
+    const subscriptionByUserId = new Map(subscriptions.map((subscription) => [subscription.userId, subscription]));
+    const pulseByUserId = new Map(
+      pulseSettings
+        .map((setting) => {
+          const userId = getPulseUserIdFromSettingKey(setting.key);
+          return userId ? [userId, setting.value as Record<string, unknown>] as const : null;
+        })
+        .filter((entry): entry is readonly [string, Record<string, unknown>] => Boolean(entry))
+    );
+
+    const rows = users.map((user) => {
+      const license = licenseByUserId.get(user.id) ?? null;
+      const subscription = subscriptionByUserId.get(user.id) ?? null;
+      const pulse = pulseByUserId.get(user.id) ?? null;
+      const hasEa = Boolean(subscription || license);
+      const hasPulse = Boolean(pulse && isPulseSettingActive(pulse));
+
+      return {
+        userId: user.id,
+        email: user.email,
+        name: user.name,
+        platformSubscription: user.subscription,
+        createdAt: user.createdAt,
+        hasEa,
+        hasPulse,
+        labels: [hasEa ? 'EA' : null, hasPulse ? 'PULSE' : null].filter(Boolean),
+        ea: {
+          subscriptionStatus: subscription?.status ?? null,
+          currentPeriodEnd: subscription?.currentPeriodEnd ?? null,
+          licenseId: license?.id ?? null,
+          licenseStatus: license?.status ?? null,
+          expiresAt: license?.expiresAt ?? null,
+          mt5Account: license?.mt5Account ?? null,
+        },
+        pulse: {
+          status: typeof pulse?.status === 'string' ? pulse.status : null,
+          expiresAt: typeof pulse?.expiresAt === 'string' ? pulse.expiresAt : null,
+          planName: typeof pulse?.planName === 'string' ? pulse.planName : null,
+        },
+      };
+    }).sort((left, right) => {
+      if (left.hasEa !== right.hasEa) return left.hasEa ? -1 : 1;
+      if (left.hasPulse !== right.hasPulse) return left.hasPulse ? -1 : 1;
+      return new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime();
+    });
+
+    res.json({ users: rows });
+  } catch (err: any) {
+    console.error('[GoldX Admin] getGoldxUsers error:', err);
+    res.status(500).json({ error: err?.message ?? 'Internal error' });
+  }
+};
+
+export const adminGetGoldxUserDetails = async (req: AuthRequest, res: Response) => {
+  try {
+    const { userId } = req.params;
+    const user = await getUserById(userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const [billing, goldxSubscription, goldxLicense, pendingGrant, pulseAccess] = await Promise.all([
+      getBillingSummaryForUser(user.id, user.subscription),
+      getUserSubscription(user.id),
+      getUserLicense(user.id),
+      peekPendingDashboardGrant(user.id),
+      getGoldxPulseAccess(user.id, user.subscription, user.role),
+    ]);
+
+    res.json({
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        platformSubscription: user.subscription,
+        banned: user.banned,
+        createdAt: user.createdAt,
+        billing,
+        goldxEa: {
+          hasAccess: Boolean(goldxSubscription || goldxLicense),
+          subscriptionId: goldxSubscription?.id ?? null,
+          subscriptionStatus: goldxSubscription?.status ?? null,
+          currentPeriodStart: goldxSubscription?.currentPeriodStart ?? null,
+          currentPeriodEnd: goldxSubscription?.currentPeriodEnd ?? null,
+          licenseId: goldxLicense?.id ?? null,
+          licenseStatus: goldxLicense?.status ?? null,
+          expiresAt: goldxLicense?.expiresAt ?? null,
+          mt5Account: goldxLicense?.mt5Account ?? null,
+          deviceId: goldxLicense?.deviceId ?? null,
+          lastCheckedAt: goldxLicense?.lastCheckedAt ?? null,
+          pendingLicenseKey: pendingGrant?.licenseKey ?? null,
+          pendingKeyIssuedAt: pendingGrant?.issuedAt ?? null,
+          pendingKeyExpiresAt: pendingGrant?.expiresAt ?? null,
+        },
+        goldxPulse: pulseAccess,
+      },
+    });
+  } catch (err: any) {
+    console.error('[GoldX Admin] getGoldxUserDetails error:', err);
+    res.status(500).json({ error: err?.message ?? 'Internal error' });
+  }
+};
+
+export const adminReissueGoldxLicenseForUser = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Auth required' });
+    const { userId } = req.params;
+    if (!userId) return res.status(400).json({ error: 'userId required' });
+
+    const existingLicense = await getUserLicense(userId);
+    if (existingLicense?.id) {
+      await adminRevokeLicense(existingLicense.id, req.user.id);
+    }
+
+    const result = await adminGrantGoldxAccess(userId, req.user.id);
+    res.json({
+      success: true,
+      licenseKey: result.rawLicenseKey,
+      message: result.rawLicenseKey
+        ? 'A new GoldX license key was issued for this user.'
+        : 'The user already had active GoldX access and no new key was generated.',
+    });
+  } catch (err: any) {
+    console.error('[GoldX Admin] reissueGoldxLicenseForUser error:', err);
+    res.status(500).json({ error: err?.message ?? 'Internal error' });
+  }
+};
+
+export const adminSendGoldxFilesEmail = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Auth required' });
+    const { userId } = req.params;
+    const user = await getUserById(userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const pendingGrant = await peekPendingDashboardGrant(user.id);
+    const result = await sendGoldxEaDeliveryEmail({
+      to: user.email,
+      name: user.name,
+      licenseKey: pendingGrant?.licenseKey ?? null,
+      issuedAt: pendingGrant?.issuedAt ?? null,
+      expiresAt: pendingGrant?.expiresAt ?? null,
+    });
+
+    await insertAuditLog('admin_goldx_delivery_email_sent', {
+      userId: req.user.id,
+      meta: {
+        targetUserId: user.id,
+        recipient: user.email,
+        attachments: result.attachments,
+      },
+    });
+
+    res.json({ success: true, attachments: result.attachments });
+  } catch (err: any) {
+    console.error('[GoldX Admin] sendGoldxFilesEmail error:', err);
     res.status(500).json({ error: err?.message ?? 'Internal error' });
   }
 };

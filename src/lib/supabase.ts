@@ -1201,6 +1201,12 @@ export const getCompletedRevenue = async () => {
 export const listSystemSettings = () =>
   many<SystemSettingRecord>('listSystemSettings', supabase.from(SYSTEM_SETTINGS_TABLE).select('*').order('key', { ascending: true }));
 
+export const listSystemSettingsByPrefix = (prefix: string) =>
+  many<SystemSettingRecord>(
+    'listSystemSettingsByPrefix',
+    supabase.from(SYSTEM_SETTINGS_TABLE).select('*').like('key', `${prefix}%`).order('key', { ascending: true })
+  );
+
 export const getSystemSetting = (key: string) =>
   maybeSingle<SystemSettingRecord>('getSystemSetting', supabase.from(SYSTEM_SETTINGS_TABLE).select('*').eq('key', key).maybeSingle());
 
