@@ -365,6 +365,33 @@ export async function consumePendingDashboardGrant(
   };
 }
 
+export async function peekPendingDashboardGrant(
+  userId: string,
+): Promise<{ licenseKey: string; issuedAt: string; expiresAt: string } | null> {
+  const settingKey = `dashboard_grant:${userId}`;
+  const { data } = await supabase
+    .from('goldx_settings')
+    .select('value')
+    .eq('key', settingKey)
+    .maybeSingle();
+
+  const rawValue = data?.value;
+  if (!rawValue || typeof rawValue !== 'object') {
+    return null;
+  }
+
+  const value = rawValue as Record<string, unknown>;
+  if (typeof value.licenseKey !== 'string' || typeof value.issuedAt !== 'string' || typeof value.expiresAt !== 'string') {
+    return null;
+  }
+
+  return {
+    licenseKey: aesDecrypt(value.licenseKey),
+    issuedAt: value.issuedAt,
+    expiresAt: value.expiresAt,
+  };
+}
+
 function maskValue(value: string, visibleStart = 2, visibleEnd = 2): string {
   if (!value) return '';
   if (value.length <= visibleStart + visibleEnd) return '*'.repeat(value.length);
