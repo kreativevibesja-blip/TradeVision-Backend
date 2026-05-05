@@ -298,6 +298,7 @@ export interface AnnouncementContentPayload {
   type?: AnnouncementType;
   couponCode?: string | null;
   imageUrl?: string | null;
+  countdownEnabled?: boolean;
   targetPlan?: 'PRO' | 'TOP_TIER' | 'GOLDX' | 'GOLDX_PULSE' | null;
 }
 

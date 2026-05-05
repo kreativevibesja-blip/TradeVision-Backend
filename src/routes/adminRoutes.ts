@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { authenticate, requireAdmin } from '../middleware/auth';
+import { handleSingleImageUpload } from '../middleware/upload';
 import {
   createPricingPlan,
   getDashboardStats,
@@ -23,6 +24,7 @@ import {
   getAnnouncements,
   getActiveAnnouncements,
   createAnnouncement,
+  uploadAnnouncementImage,
   updateAnnouncement,
   deleteAnnouncement,
   getPaidSubscribers,
@@ -79,6 +81,7 @@ router.delete('/pricing-plans/:id', deletePricingPlan);
 router.get('/settings', getSystemSettings);
 router.post('/settings', updateSystemSetting);
 router.get('/announcements', getAnnouncements);
+router.post('/announcements/upload-image', handleSingleImageUpload('image'), uploadAnnouncementImage);
 router.post('/announcements', createAnnouncement);
 router.patch('/announcements/:id', updateAnnouncement);
 router.delete('/announcements/:id', deleteAnnouncement);
