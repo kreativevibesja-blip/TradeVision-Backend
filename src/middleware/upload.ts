@@ -92,3 +92,33 @@ export const handleChartUpload = (req: Request, res: Response, next: NextFunctio
     res.status(mapped.status).json({ error: mapped.message, errorType: mapped.errorType });
   });
 };
+
+export const handleSingleImageUpload = (fieldName: string) => (req: Request, res: Response, next: NextFunction) => {
+  upload.single(fieldName)(req, res, async (error) => {
+    if (!error) {
+      next();
+      return;
+    }
+
+    const mapped = mapUploadError(error);
+    const userId = typeof (req as Request & { user?: { id?: string } }).user?.id === 'string'
+      ? (req as Request & { user?: { id?: string } }).user!.id!
+      : null;
+
+    await logUploadError({
+      userId,
+      errorType: mapped.errorType,
+      fileType: typeof req.headers['content-type'] === 'string' ? req.headers['content-type'] : null,
+      fileSize: null,
+      source: 'single-image-upload-api',
+      stage: 'multer',
+      message: error instanceof Error ? error.message : mapped.message,
+      metadata: {
+        route: req.originalUrl,
+        fieldName,
+      },
+    });
+
+    res.status(mapped.status).json({ error: mapped.message, errorType: mapped.errorType });
+  });
+};
