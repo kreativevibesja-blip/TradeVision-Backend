@@ -48,6 +48,8 @@ import { getGoldxPulseAccess } from '../services/goldxPulse/access';
 const ANNOUNCEMENT_CONTENT_VERSION = 1;
 const DEFAULT_SUPPORT_WHATSAPP_NUMBER = '18762797956';
 const DEFAULT_SUPPORT_WHATSAPP_MESSAGE = 'Hi TradeVision AI, I need support.';
+const DEFAULT_ANNOUNCEMENT_POPUPS_ENABLED = true;
+const DEFAULT_ANNOUNCEMENT_POPUP_REPEAT_HOURS = 24;
 
 const VALID_ANNOUNCEMENT_TYPES: AnnouncementType[] = ['update', 'maintenance', 'discount', 'new_feature', 'security', 'event'];
 const VALID_ANNOUNCEMENT_TARGET_PLANS = ['PRO', 'TOP_TIER', 'GOLDX', 'GOLDX_PULSE'] as const;
@@ -157,6 +159,24 @@ const getExpiryFromRequest = (durationValue: unknown, durationUnit: unknown) => 
   }
 
   return expiresAt.toISOString();
+};
+
+const getAnnouncementPopupSettings = async () => {
+  const [enabledSetting, repeatHoursSetting] = await Promise.all([
+    getSystemSetting('announcement_popups_enabled'),
+    getSystemSetting('announcement_popup_repeat_hours'),
+  ]);
+
+  const rawRepeatHours = Number(repeatHoursSetting?.value);
+
+  return {
+    enabled: typeof enabledSetting?.value === 'boolean'
+      ? enabledSetting.value
+      : DEFAULT_ANNOUNCEMENT_POPUPS_ENABLED,
+    repeatHours: Number.isFinite(rawRepeatHours) && rawRepeatHours >= 0
+      ? rawRepeatHours
+      : DEFAULT_ANNOUNCEMENT_POPUP_REPEAT_HOURS,
+  };
 };
 
 export const getDashboardStats = async (_req: Request, res: Response) => {
@@ -648,7 +668,8 @@ export const getAnnouncements = async (_req: Request, res: Response) => {
 export const getActiveAnnouncements = async (_req: Request, res: Response) => {
   try {
     const announcements = await cleanupExpiredAnnouncements(await listActiveAnnouncements());
-    return res.json({ announcements: announcements.map(mapAnnouncementRecord) });
+    const popupSettings = await getAnnouncementPopupSettings();
+    return res.json({ announcements: announcements.map(mapAnnouncementRecord), popupSettings });
   } catch (error) {
     return res.status(500).json({ error: 'Failed to get active announcements' });
   }
