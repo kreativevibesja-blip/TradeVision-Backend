@@ -1201,6 +1201,16 @@ export async function adminUpdateSettings(
     .upsert({ key, value, updated_at: new Date().toISOString() });
 }
 
+export async function adminGetSetting<T = Record<string, unknown>>(key: string): Promise<T | null> {
+  const { data } = await supabase
+    .from('goldx_settings')
+    .select('value')
+    .eq('key', key)
+    .maybeSingle();
+
+  return ((data as Record<string, unknown> | null)?.value ?? null) as T | null;
+}
+
 export async function adminGetSettings(): Promise<Record<string, unknown>> {
   const { data } = await supabase
     .from('goldx_settings')

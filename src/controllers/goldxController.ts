@@ -967,11 +967,11 @@ export const adminSendGoldxFilesEmail = async (req: AuthRequest, res: Response) 
       meta: {
         targetUserId: user.id,
         recipient: user.email,
-        attachments: result.attachments,
+        downloadUrl: result.downloadUrl,
       },
     });
 
-    res.json({ success: true, attachments: result.attachments });
+    res.json({ success: true, downloadUrl: result.downloadUrl });
   } catch (err: any) {
     console.error('[GoldX Admin] sendGoldxFilesEmail error:', err);
     res.status(500).json({ error: err?.message ?? 'Internal error' });

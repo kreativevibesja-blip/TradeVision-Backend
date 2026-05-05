@@ -1,7 +1,6 @@
-import path from 'path';
-import { promises as fs } from 'fs';
 import { Resend } from 'resend';
 import { config } from '../config';
+import { adminGetSetting } from './goldx/licenseService';
 
 interface GoldxDeliveryEmailInput {
   to: string;
@@ -11,37 +10,17 @@ interface GoldxDeliveryEmailInput {
   expiresAt?: string | null;
 }
 
+interface GoldxDeliveryLinkSetting {
+  url?: string;
+}
+
+const GOLDX_DELIVERY_LINK_SETTING_KEY = 'delivery_download_link';
+
 const normalizeMailbox = (value: string) =>
   value
     .trim()
     .replace(/^['"\u201c\u201d\u2018\u2019]+|['"\u201c\u201d\u2018\u2019]+$/g, '')
     .replace(/\s+/g, ' ');
-
-const resolveAssetCandidates = (envValue: string | undefined, fallbackFileName: string) => {
-  const candidates = [] as string[];
-
-  if (envValue?.trim()) {
-    candidates.push(path.resolve(envValue.trim()));
-  }
-
-  candidates.push(path.resolve(process.cwd(), 'assets', 'goldx', fallbackFileName));
-  candidates.push(path.resolve(process.cwd(), 'backend', 'assets', 'goldx', fallbackFileName));
-
-  return Array.from(new Set(candidates));
-};
-
-const readFirstExistingFile = async (candidates: string[]) => {
-  for (const candidate of candidates) {
-    try {
-      const content = await fs.readFile(candidate);
-      return { content, filePath: candidate, fileName: path.basename(candidate) };
-    } catch {
-      // Try next candidate.
-    }
-  }
-
-  throw new Error(`Required GoldX delivery asset not found. Checked: ${candidates.join(', ')}`);
-};
 
 export async function sendGoldxEaDeliveryEmail({ to, name, licenseKey, issuedAt, expiresAt }: GoldxDeliveryEmailInput) {
   if (!config.email.resendApiKey) {
@@ -52,10 +31,17 @@ export async function sendGoldxEaDeliveryEmail({ to, name, licenseKey, issuedAt,
   const from = normalizeMailbox(config.email.from);
   const replyTo = normalizeMailbox(config.email.replyTo);
 
-  const [eaPackage, legalAgreement] = await Promise.all([
-    readFirstExistingFile(resolveAssetCandidates(process.env.GOLDX_EA_PACKAGE_PATH, 'GoldX-EA.zip')),
-    readFirstExistingFile(resolveAssetCandidates(process.env.GOLDX_LEGAL_AGREEMENT_PDF_PATH, 'GoldX-Legal-Agreement.pdf')),
-  ]);
+  const deliverySetting = await adminGetSetting<GoldxDeliveryLinkSetting>(GOLDX_DELIVERY_LINK_SETTING_KEY);
+  const downloadUrl = deliverySetting?.url?.trim() ?? '';
+  if (!downloadUrl) {
+    throw new Error('GoldX delivery download link is not configured in GoldX admin settings.');
+  }
+
+  try {
+    new URL(downloadUrl);
+  } catch {
+    throw new Error('GoldX delivery download link is invalid.');
+  }
 
   const traderName = name?.trim() || 'Trader';
   const licenseMarkup = licenseKey
@@ -84,24 +70,29 @@ export async function sendGoldxEaDeliveryEmail({ to, name, licenseKey, issuedAt,
             <p style="margin:0 0 10px; font-size:12px; letter-spacing:0.24em; text-transform:uppercase; color:#fbbf24;">GoldX EA Delivery</p>
             <h1 style="margin:0; font-size:34px; line-height:1.1; font-weight:800; color:#ffffff;">Your GoldX files are ready.</h1>
             <p style="margin:16px 0 0; font-size:15px; line-height:1.8; color:rgba(255,255,255,0.78);">
-              Hi ${traderName}, thanks for subscribing to GoldX. We attached your EA package and legal agreement so you can move straight into setup.
+              Hi ${traderName}, thanks for subscribing to GoldX. Your private download link is ready below so you can access your EA files and agreement immediately.
             </p>
             ${licenseMarkup}
+            <div style="margin-top:24px;">
+              <a href="${downloadUrl}" style="display:inline-block; padding:16px 26px; border-radius:16px; background:linear-gradient(135deg, #f59e0b 0%, #f97316 100%); color:#111827; font-size:15px; font-weight:800; text-decoration:none; letter-spacing:0.02em;">
+                Download GoldX Files
+              </a>
+            </div>
             <div style="display:grid; gap:14px; grid-template-columns:1fr 1fr; margin-top:24px;">
               <div style="padding:18px; border-radius:18px; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08);">
-                <p style="margin:0 0 6px; font-size:12px; letter-spacing:0.12em; text-transform:uppercase; color:#93c5fd;">Attached</p>
-                <p style="margin:0; font-size:14px; line-height:1.7; color:#e2e8f0;">GoldX EA zip package<br/>Legal agreement PDF</p>
+                <p style="margin:0 0 6px; font-size:12px; letter-spacing:0.12em; text-transform:uppercase; color:#93c5fd;">Download Access</p>
+                <p style="margin:0; font-size:14px; line-height:1.7; color:#e2e8f0;">Use the button above to access your GoldX EA package and agreement files.</p>
               </div>
               <div style="padding:18px; border-radius:18px; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08);">
                 <p style="margin:0 0 6px; font-size:12px; letter-spacing:0.12em; text-transform:uppercase; color:#67e8f9;">Next Steps</p>
-                <p style="margin:0; font-size:14px; line-height:1.7; color:#e2e8f0;">Install the EA in MT5, review the agreement, then bind your account during setup.</p>
+                <p style="margin:0; font-size:14px; line-height:1.7; color:#e2e8f0;">Download the files, review the agreement, then install the EA in MT5 and complete setup.</p>
               </div>
             </div>
           </div>
           <div style="padding:30px 36px; background:#ffffff; color:#0f172a;">
             <h2 style="margin:0 0 12px; font-size:18px; font-weight:700;">Recommended setup flow</h2>
             <ol style="margin:0; padding-left:20px; font-size:14px; line-height:1.9; color:#334155;">
-              <li>Download and extract the GoldX EA package attached to this email.</li>
+              <li>Use the download button above to access your GoldX files.</li>
               <li>Open the legal agreement PDF and review the product-use terms.</li>
               <li>Install the EA inside MetaTrader 5 and complete your license binding.</li>
               <li>Reply to this email if you need your key reissued or need help with MT5 setup.</li>
@@ -121,18 +112,8 @@ export async function sendGoldxEaDeliveryEmail({ to, name, licenseKey, issuedAt,
     from,
     replyTo,
     to,
-    subject: 'Welcome to GoldX EA - your files are attached',
+    subject: 'Welcome to GoldX EA - your download link is ready',
     html,
-    attachments: [
-      {
-        filename: eaPackage.fileName,
-        content: eaPackage.content,
-      },
-      {
-        filename: legalAgreement.fileName,
-        content: legalAgreement.content,
-      },
-    ],
   });
 
   if (result.error) {
@@ -141,6 +122,6 @@ export async function sendGoldxEaDeliveryEmail({ to, name, licenseKey, issuedAt,
 
   return {
     success: true,
-    attachments: [eaPackage.filePath, legalAgreement.filePath],
+    downloadUrl,
   };
 }
