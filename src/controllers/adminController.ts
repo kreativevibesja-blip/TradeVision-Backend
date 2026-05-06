@@ -1,3 +1,6 @@
+import { randomUUID } from 'crypto';
+import fs from 'fs/promises';
+import path from 'path';
 import { Request, Response } from 'express';
 import {
   countAnalyses,
@@ -34,6 +37,7 @@ import {
   type AnnouncementType,
   type PaymentMethod,
   updatePaymentById,
+  supabase,
 } from '../lib/supabase';
 import { serializeAnalysis } from './analysisController';
 import { setBillingStateFromAdmin } from '../services/billing';
@@ -44,6 +48,7 @@ import { sendPaymentReminderEmail } from '../services/paymentReminderEmail';
 import { sendRenewalReminderEmail } from '../services/renewalReminderEmail';
 import { getUserSubscription as getGoldxSubscription, getUserLicense as getGoldxLicense, peekPendingDashboardGrant } from '../services/goldx/licenseService';
 import { getGoldxPulseAccess } from '../services/goldxPulse/access';
+import { config } from '../config';
 
 const ANNOUNCEMENT_CONTENT_VERSION = 1;
 const DEFAULT_SUPPORT_WHATSAPP_NUMBER = '18762797956';
@@ -135,9 +140,34 @@ export const uploadAnnouncementImage = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Image file is required.' });
     }
 
-    return res.json({ imageUrl: `/uploads/${imageFile.filename}` });
+    const bucket = config.supabase.storageBucket;
+    if (!bucket) {
+      return res.status(500).json({ error: 'Supabase storage bucket is not configured.' });
+    }
+
+    const extension = path.extname(imageFile.originalname || imageFile.filename || '').toLowerCase() || '.png';
+    const objectPath = `announcements/${new Date().toISOString().slice(0, 10)}/${randomUUID()}${extension}`;
+    const fileBuffer = await fs.readFile(imageFile.path);
+
+    const { error: uploadError } = await supabase.storage.from(bucket).upload(objectPath, fileBuffer, {
+      contentType: imageFile.mimetype || 'application/octet-stream',
+      upsert: false,
+    });
+
+    if (uploadError) {
+      console.error('[Admin] announcement image upload failed:', uploadError);
+      return res.status(500).json({ error: 'Failed to upload announcement image' });
+    }
+
+    const { data } = supabase.storage.from(bucket).getPublicUrl(objectPath);
+    return res.json({ imageUrl: data.publicUrl });
   } catch (error) {
     return res.status(500).json({ error: 'Failed to upload announcement image' });
+  } finally {
+    const imageFile = (req as Request & { file?: Express.Multer.File }).file;
+    if (imageFile?.path) {
+      await fs.unlink(imageFile.path).catch(() => undefined);
+    }
   }
 };
 
