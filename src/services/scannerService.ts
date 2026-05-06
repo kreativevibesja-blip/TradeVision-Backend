@@ -197,20 +197,20 @@ const PREFER_HISTORY_BEFORE_CACHE_SYMBOLS = new Set(['XAUUSD']);
 const HISTORY_RATE_LIMIT_BACKOFF_MS = 60_000;
 const DEFAULT_SCANNER_EXECUTION_SETTINGS: ScannerExecutionSettings = {
   useEmaExecutionFilter: true,
-  fastEmaPeriod: 10,
+  fastEmaPeriod: 9,
   midEmaPeriod: 14,
   slowEmaPeriod: 50,
   pullbackTolerancePct: 0.12,
   enabledStrategies: {
-    trendPullback: true,
-    countertrendReversal: true,
-    fvgContinuation: true,
+    trendPullback: false,
+    countertrendReversal: false,
+    fvgContinuation: false,
     emaReclaim: true,
-    equalLevelSweep: true,
-    poiReclaim: true,
-    rangeRejection: true,
-    zoneTap: true,
-    sessionFlip: true,
+    equalLevelSweep: false,
+    poiReclaim: false,
+    rangeRejection: false,
+    zoneTap: false,
+    sessionFlip: false,
   },
 };
 
