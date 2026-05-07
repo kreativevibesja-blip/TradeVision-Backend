@@ -104,6 +104,7 @@ export type SubscriptionTier = 'FREE' | 'PRO' | 'TOP_TIER' | 'VIP_AUTO_TRADER';
 export type BillingPlan = SubscriptionTier | 'GOLDX_PULSE';
 export type AnalysisFeatureName = 'reactionChallenge' | 'confidenceThermometer' | 'tradeReplay';
 export type UserRole = 'USER' | 'ADMIN';
+export type PlatformTheme = 'legacy' | 'goldx-premium';
 export type PaymentStatus = 'PENDING' | 'COMPLETED' | 'FAILED' | 'REFUNDED';
 export type PaymentMethod = 'PAYPAL' | 'CARD' | 'BANK_TRANSFER' | 'COUPON';
 export type BankTransferBank = 'SCOTIABANK' | 'NCB';
@@ -165,6 +166,7 @@ export interface UserRecord {
   name: string | null;
   role: UserRole;
   subscription: SubscriptionTier;
+  theme_preference?: PlatformTheme | null;
   dailyUsage: number;
   lastUsageReset: string;
   banned: boolean;

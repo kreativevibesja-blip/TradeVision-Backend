@@ -20,6 +20,7 @@ export const getProfile = async (req: AuthRequest, res: Response) => {
         name: user.name,
         role: user.role,
         subscription: billing.currentPlan,
+        themePreference: user.theme_preference ?? 'legacy',
         dailyUsage: user.dailyUsage,
         createdAt: user.createdAt,
       },

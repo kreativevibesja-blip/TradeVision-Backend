@@ -7,6 +7,7 @@ import authRoutes from './routes/authRoutes';
 import analysisRoutes from './routes/analysisRoutes';
 import paymentRoutes from './routes/paymentRoutes';
 import adminRoutes from './routes/adminRoutes';
+import themeRoutes from './routes/themeRoutes';
 import ticketRoutes from './routes/ticketRoutes';
 import couponRoutes from './routes/couponRoutes';
 import referralRoutes from './routes/referralRoutes';
@@ -71,6 +72,7 @@ app.use(generalLimiter);
 app.use('/uploads', express.static(path.join(process.cwd(), config.upload.dir)));
 
 app.use('/api/auth', authRoutes);
+app.use('/api/theme', themeRoutes);
 app.use('/api', analysisRoutes);
 app.use('/api', paymentRoutes);
 app.use('/api/tickets', ticketRoutes);
