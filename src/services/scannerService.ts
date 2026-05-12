@@ -143,6 +143,18 @@ interface ScannerExecutionSettings {
   enabledStrategies: Record<ScannerStrategyToggleKey, boolean>;
 }
 
+const DEFAULT_SCANNER_ENABLED_STRATEGIES: Record<ScannerStrategyToggleKey, boolean> = {
+  trendPullback: false,
+  countertrendReversal: false,
+  fvgContinuation: false,
+  emaReclaim: true,
+  equalLevelSweep: false,
+  poiReclaim: false,
+  rangeRejection: false,
+  zoneTap: false,
+  sessionFlip: false,
+};
+
 type OpenScanResult = Pick<ScanResult, 'id' | 'userId' | 'symbol' | 'status' | 'confidenceScore' | 'createdAt'>;
 type RecentScannerActivity = Pick<ScanResult, 'symbol' | 'direction' | 'sessionType' | 'status' | 'createdAt' | 'closedAt' | 'closeReason'>;
 
@@ -201,17 +213,7 @@ const DEFAULT_SCANNER_EXECUTION_SETTINGS: ScannerExecutionSettings = {
   midEmaPeriod: 14,
   slowEmaPeriod: 50,
   pullbackTolerancePct: 0.12,
-  enabledStrategies: {
-    trendPullback: false,
-    countertrendReversal: false,
-    fvgContinuation: false,
-    emaReclaim: true,
-    equalLevelSweep: false,
-    poiReclaim: false,
-    rangeRejection: false,
-    zoneTap: false,
-    sessionFlip: false,
-  },
+  enabledStrategies: DEFAULT_SCANNER_ENABLED_STRATEGIES,
 };
 
 function normalizeScannerSymbol(symbol: string): string {
@@ -234,7 +236,7 @@ function parseNumberSetting(value: unknown, fallback: number, minimum = 1): numb
 }
 
 function parseStrategyTogglePayload(value: unknown): Record<ScannerStrategyToggleKey, boolean> {
-  const defaults = DEFAULT_SCANNER_EXECUTION_SETTINGS.enabledStrategies;
+  const defaults = DEFAULT_SCANNER_ENABLED_STRATEGIES;
   const base: Record<ScannerStrategyToggleKey, boolean> = { ...defaults };
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return base;
@@ -263,6 +265,15 @@ function classifyScannerStrategy(strategy: string | null | undefined): ScannerSt
   return 'trendPullback';
 }
 
+function isGoldxEmaQualifiedCandidate(candidate: Pick<ScanCycleResult, 'direction' | 'emaMomentum' | 'emaEntryValid' | 'emaStack'>): boolean {
+  if (!candidate.emaMomentum || !candidate.emaEntryValid) {
+    return false;
+  }
+
+  return (candidate.direction === 'buy' && candidate.emaStack === 'bullish')
+    || (candidate.direction === 'sell' && candidate.emaStack === 'bearish');
+}
+
 async function loadScannerExecutionSettings(): Promise<ScannerExecutionSettings> {
   const [useEmaFilterSetting, fastEmaSetting, midEmaSetting, slowEmaSetting, toleranceSetting, strategyTogglesSetting] = await Promise.all([
     getSystemSetting('scanner_execution_use_ema_filter'),
@@ -283,15 +294,27 @@ async function loadScannerExecutionSettings(): Promise<ScannerExecutionSettings>
   };
 }
 
-function isScannerStrategyEnabled(strategy: string | null | undefined, settings: ScannerExecutionSettings): boolean {
-  return settings.enabledStrategies[classifyScannerStrategy(strategy)];
+function isScannerStrategyEnabled(
+  candidate: Pick<ScanCycleResult, 'strategy' | 'direction' | 'emaMomentum' | 'emaEntryValid' | 'emaStack'>,
+  settings: ScannerExecutionSettings,
+): boolean {
+  const classifiedStrategy = classifyScannerStrategy(candidate.strategy);
+  if (settings.enabledStrategies[classifiedStrategy]) {
+    return true;
+  }
+
+  return settings.enabledStrategies.emaReclaim && isGoldxEmaQualifiedCandidate(candidate);
 }
 
 function passesScannerExecutionEmaFilter(
-  candidate: Pick<ScanCycleResult, 'direction'>,
+  candidate: Pick<ScanCycleResult, 'direction' | 'strategy' | 'emaMomentum' | 'emaEntryValid' | 'emaStack'>,
   candles: Candle[],
   settings: ScannerExecutionSettings,
 ): boolean {
+  if (!isGoldxEmaQualifiedCandidate(candidate) && classifyScannerStrategy(candidate.strategy) !== 'emaReclaim') {
+    return true;
+  }
+
   if (!settings.useEmaExecutionFilter) {
     return true;
   }
@@ -335,7 +358,7 @@ function applyScannerExecutionFilters(
   if (!result) {
     return null;
   }
-  if (!isScannerStrategyEnabled(result.strategy, settings)) {
+  if (!isScannerStrategyEnabled(result, settings)) {
     return null;
   }
   if (!passesScannerExecutionEmaFilter(result, candles, settings)) {
