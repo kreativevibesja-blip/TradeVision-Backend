@@ -29,6 +29,7 @@ import {
   adminUpdateSettings,
   adminGetSettings,
   adminGetTradeHistory,
+  getUserTradeHistory,
   getOnboardingState,
   updateOnboardingState,
   getLatestSetupRequest,
@@ -45,7 +46,7 @@ import {
   SKIP_HMAC,
 } from '../services/goldx/licenseService';
 import { computeHmac, getHmacSecret, hashLicenseKey } from '../services/goldx/crypto';
-import { generateSignal, getCurrentSessionStatus, reportTradeExecution } from '../services/goldx/strategyEngine';
+import { generateSignal, getCurrentSessionStatus, reportTradeClosure, reportTradeExecution } from '../services/goldx/strategyEngine';
 import { createOrder, captureOrder } from '../services/paypalService';
 import type { GoldxVerifyRequest, GoldxMode, GoldxSessionMode, GoldxRuntimeTradeState, GoldxLotMode } from '../services/goldx/types';
 import { getGoldxPulseAccess } from '../services/goldxPulse/access';
@@ -308,6 +309,62 @@ export const reportTradeExecutionHandler = async (req: GoldxSessionRequest, res:
   }
 };
 
+export const reportTradeClosureHandler = async (req: GoldxSessionRequest, res: Response) => {
+  try {
+    const license = req.goldxLicense;
+    if (!license?.mt5Account) {
+      return res.status(401).json({ error: 'Session context missing' });
+    }
+
+    const {
+      outcome,
+      profit,
+      closedAt,
+      stopLoss,
+      takeProfit,
+      orderTicket,
+      dealTicket,
+      batchId,
+      batchIndex,
+      reason,
+    } = req.body as Record<string, unknown>;
+
+    if (outcome !== 'tp' && outcome !== 'sl' && outcome !== 'be' && outcome !== 'manual') {
+      return res.status(400).json({ error: 'Valid outcome is required' });
+    }
+
+    const normalizedOrderTicket = typeof orderTicket === 'string' ? orderTicket.trim() : '';
+    const normalizedDealTicket = typeof dealTicket === 'string' ? dealTicket.trim() : '';
+    const normalizedBatchId = typeof batchId === 'string' ? batchId.trim() : '';
+
+    if (!normalizedOrderTicket && !normalizedDealTicket && !normalizedBatchId) {
+      return res.status(400).json({ error: 'Provide orderTicket, dealTicket, or batchId to match an open trade' });
+    }
+
+    const result = await reportTradeClosure(license.id, license.mt5Account, {
+      outcome,
+      profit: typeof profit === 'number' ? profit : profit === null ? null : undefined,
+      closedAt: typeof closedAt === 'string' ? closedAt : null,
+      stopLoss: typeof stopLoss === 'number' ? stopLoss : stopLoss === null ? null : undefined,
+      takeProfit: typeof takeProfit === 'number' ? takeProfit : takeProfit === null ? null : undefined,
+      orderTicket: normalizedOrderTicket || null,
+      dealTicket: normalizedDealTicket || null,
+      batchId: normalizedBatchId || null,
+      batchIndex: typeof batchIndex === 'number' ? batchIndex : null,
+      reason: typeof reason === 'string' ? reason : null,
+    });
+
+    if (!result.updated) {
+      return res.status(404).json({ error: 'Open trade not found for closure update' });
+    }
+
+    return res.json({ ok: true, tradeId: result.tradeId });
+  } catch (err) {
+    console.error('[GoldX] reportTradeClosure error:', err);
+    return res.status(500).json({ error: 'Internal error' });
+  }
+};
+
 export const getSignalByAccountHandler = async (req: Request, res: Response) => {
   try {
     console.log('Signal endpoint hit');
@@ -383,11 +440,12 @@ export const getRealtimeConfigHandler = async (req: GoldxSessionRequest, res: Re
 export const getMyGoldxSubscription = async (req: AuthRequest, res: Response) => {
   try {
     if (!req.user) return res.status(401).json({ error: 'Auth required' });
-    const [sub, license, accountState, latestGrant] = await Promise.all([
+    const [sub, license, accountState, latestGrant, recentTrades] = await Promise.all([
       getUserSubscription(req.user.id),
       getUserLicense(req.user.id),
       getUserAccountState(req.user.id),
       consumePendingDashboardGrant(req.user.id),
+      getUserTradeHistory(req.user.id, 12, 0),
     ]);
     const [onboardingState, latestSetupRequest] = await Promise.all([
       getOnboardingState(req.user.id),
@@ -432,6 +490,7 @@ export const getMyGoldxSubscription = async (req: AuthRequest, res: Response) =>
             updatedAt: latestSetupRequest.updatedAt,
           }
         : null,
+      recentTrades,
       latestGrant,
     });
   } catch (err) {

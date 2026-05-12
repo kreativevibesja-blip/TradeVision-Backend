@@ -125,6 +125,20 @@ export interface GoldxTradeHistory {
   profit: number | null;
   openedAt: string;
   closedAt: string | null;
+  orderTicket?: string | null;
+  dealTicket?: string | null;
+}
+
+export interface GoldxUserTradeHistoryEntry extends GoldxTradeHistory {
+  batchId?: string | null;
+  batchIndex?: number | null;
+}
+
+export interface GoldxAdminTradeHistoryEntry extends GoldxUserTradeHistoryEntry {
+  userId: string | null;
+  ownerEmail: string | null;
+  ownerName: string | null;
+  ownerDisplayName: string | null;
 }
 
 export interface GoldxModeConfig {

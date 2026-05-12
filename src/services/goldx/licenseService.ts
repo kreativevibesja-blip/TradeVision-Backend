@@ -3,6 +3,7 @@
 // ============================================================
 
 import { supabase } from '../../lib/supabase';
+import { getUsersByIds } from '../../lib/supabase';
 import {
   hashLicenseKey,
   generateLicenseKey,
@@ -20,6 +21,7 @@ import type {
   GoldxAccountState,
   GoldxSubscription,
   GoldxAuditLog,
+  GoldxAdminTradeHistoryEntry,
   GoldxTradeHistory,
   GoldxPlan,
   GoldxVerifyRequest,
@@ -33,6 +35,7 @@ import type {
   GoldxMaskedSetupRequest,
   GoldxSetupRequestStatus,
   GoldxRealtimeConfig,
+  GoldxUserTradeHistoryEntry,
 } from './types';
 
 const SESSION_TTL_MINUTES = 10;
@@ -1222,13 +1225,84 @@ export async function adminGetSettings(): Promise<Record<string, unknown>> {
   return result;
 }
 
-export async function adminGetTradeHistory(limit = 100, offset = 0): Promise<GoldxTradeHistory[]> {
+async function listTradeHistoryByLicenseIds(
+  licenseIds: string[],
+  limit: number,
+  offset: number,
+): Promise<GoldxUserTradeHistoryEntry[]> {
+  if (!licenseIds.length) {
+    return [];
+  }
+
+  const { data } = await supabase
+    .from('goldx_trade_history')
+    .select('*')
+    .in('license_id', licenseIds)
+    .order('opened_at', { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  return (data ?? []).map((row: Record<string, unknown>) => snakeToCamel(row) as unknown as GoldxUserTradeHistoryEntry);
+}
+
+export async function getUserTradeHistory(
+  userId: string,
+  limit = 25,
+  offset = 0,
+): Promise<GoldxUserTradeHistoryEntry[]> {
+  const license = await getUserLicense(userId);
+  if (!license) {
+    return [];
+  }
+
+  return listTradeHistoryByLicenseIds([license.id], limit, offset);
+}
+
+export async function adminGetTradeHistory(limit = 100, offset = 0): Promise<GoldxAdminTradeHistoryEntry[]> {
   const { data } = await supabase
     .from('goldx_trade_history')
     .select('*')
     .order('opened_at', { ascending: false })
     .range(offset, offset + limit - 1);
-  return (data ?? []).map((r: Record<string, unknown>) => snakeToCamel(r) as unknown as GoldxTradeHistory);
+
+  const trades = (data ?? []).map((row: Record<string, unknown>) => snakeToCamel(row) as unknown as GoldxUserTradeHistoryEntry);
+  const licenseIds = Array.from(new Set(trades.map((trade) => trade.licenseId).filter(Boolean)));
+
+  if (!licenseIds.length) {
+    return [];
+  }
+
+  const { data: licenses } = await supabase
+    .from('goldx_licenses')
+    .select('id, user_id, mt5_account')
+    .in('id', licenseIds);
+
+  const licenseMap = new Map(
+    ((licenses ?? []) as Array<Record<string, unknown>>).map((row) => {
+      const license = snakeToCamel(row) as { id: string; userId: string | null; mt5Account: string | null };
+      return [license.id, license];
+    }),
+  );
+
+  const userIds = Array.from(new Set(
+    Array.from(licenseMap.values())
+      .map((license) => license.userId)
+      .filter((userId): userId is string => typeof userId === 'string' && userId.length > 0),
+  ));
+  const users = userIds.length ? await getUsersByIds(userIds) : [];
+  const userMap = new Map(users.map((user) => [user.id, user]));
+
+  return trades.map((trade) => {
+    const license = licenseMap.get(trade.licenseId);
+    const user = license?.userId ? userMap.get(license.userId) : undefined;
+    return {
+      ...trade,
+      mt5Account: trade.mt5Account ?? license?.mt5Account ?? '',
+      userId: license?.userId ?? null,
+      ownerEmail: user?.email ?? null,
+      ownerName: user?.name ?? null,
+      ownerDisplayName: user?.name ?? user?.email ?? null,
+    };
+  });
 }
 
 // ── User Operations ─────────────────────────────────────────

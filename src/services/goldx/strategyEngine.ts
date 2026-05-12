@@ -15,6 +15,7 @@ import type {
   GoldxSessionMode,
   GoldxSessionStatus,
   GoldxSignal,
+  GoldxTradeOutcome,
 } from './types';
 
 type TradeDirection = 'buy' | 'sell';
@@ -623,6 +624,8 @@ async function persistTradeHistory(
     entries: Array<{ lot: number; entry: number; tp: number; sl: number }>;
     batchId?: string | null;
     batchIndexStart?: number;
+    orderTicket?: string | null;
+    dealTicket?: string | null;
     burstActive?: boolean;
     burstTradesOpened?: number;
     maxBurstTrades?: number;
@@ -636,6 +639,8 @@ async function persistTradeHistory(
     entries,
     batchId,
     batchIndexStart = 1,
+    orderTicket = null,
+    dealTicket = null,
     burstActive = false,
     burstTradesOpened = entries.length,
     maxBurstTrades = HARD_OPEN_TRADE_LIMIT,
@@ -658,6 +663,8 @@ async function persistTradeHistory(
       mode,
       batch_id: batchId ?? null,
       batch_index: batchIndexStart + index,
+      order_ticket: orderTicket,
+      deal_ticket: dealTicket,
     })),
   );
 
@@ -762,6 +769,8 @@ export async function reportTradeExecution(
     }],
     batchId: execution.batchId ?? null,
     batchIndexStart: execution.batchIndex ?? 1,
+    orderTicket: execution.orderTicket ?? null,
+    dealTicket: execution.dealTicket ?? null,
     burstActive: execution.burstActive ?? false,
     burstTradesOpened: execution.burstTradesOpened ?? 1,
     maxBurstTrades: execution.maxBurstTrades ?? HARD_OPEN_TRADE_LIMIT,
@@ -775,4 +784,181 @@ export async function reportTradeExecution(
       batchIndex: execution.batchIndex ?? 1,
     },
   });
+}
+
+function normalizeTradeTicket(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim();
+  return normalized.length ? normalized : null;
+}
+
+async function findOpenTradeForClosure(
+  licenseId: string,
+  mt5Account: string,
+  identifiers: {
+    orderTicket?: string | null;
+    dealTicket?: string | null;
+    batchId?: string | null;
+    batchIndex?: number | null;
+  },
+): Promise<{ id: string } | null> {
+  const attempts: Array<PromiseLike<{ data: { id: string } | null; error: unknown }>> = [];
+
+  if (identifiers.orderTicket) {
+    attempts.push(
+      supabase
+        .from('goldx_trade_history')
+        .select('id')
+        .eq('license_id', licenseId)
+        .eq('mt5_account', mt5Account)
+        .eq('order_ticket', identifiers.orderTicket)
+        .is('closed_at', null)
+        .order('opened_at', { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+    );
+  }
+
+  if (identifiers.dealTicket) {
+    attempts.push(
+      supabase
+        .from('goldx_trade_history')
+        .select('id')
+        .eq('license_id', licenseId)
+        .eq('mt5_account', mt5Account)
+        .eq('deal_ticket', identifiers.dealTicket)
+        .is('closed_at', null)
+        .order('opened_at', { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+    );
+  }
+
+  if (identifiers.batchId) {
+    let query = supabase
+      .from('goldx_trade_history')
+      .select('id')
+      .eq('license_id', licenseId)
+      .eq('mt5_account', mt5Account)
+      .eq('batch_id', identifiers.batchId)
+      .is('closed_at', null)
+      .order('opened_at', { ascending: false })
+      .limit(1);
+
+    if (typeof identifiers.batchIndex === 'number' && Number.isFinite(identifiers.batchIndex)) {
+      query = query.eq('batch_index', identifiers.batchIndex);
+    }
+
+    attempts.push(query.maybeSingle());
+  }
+
+  for (const attempt of attempts) {
+    const { data, error } = await attempt;
+    if (!error && data?.id) {
+      return data;
+    }
+  }
+
+  return null;
+}
+
+export async function reportTradeClosure(
+  licenseId: string,
+  mt5Account: string,
+  closure: {
+    outcome: GoldxTradeOutcome;
+    profit?: number | null;
+    closedAt?: string | null;
+    stopLoss?: number | null;
+    takeProfit?: number | null;
+    orderTicket?: string | null;
+    dealTicket?: string | null;
+    batchId?: string | null;
+    batchIndex?: number | null;
+    reason?: string | null;
+  },
+): Promise<{ updated: boolean; tradeId: string | null }> {
+  const orderTicket = normalizeTradeTicket(closure.orderTicket);
+  const dealTicket = normalizeTradeTicket(closure.dealTicket);
+  const batchId = normalizeTradeTicket(closure.batchId);
+  const batchIndex = typeof closure.batchIndex === 'number' && Number.isFinite(closure.batchIndex)
+    ? closure.batchIndex
+    : null;
+
+  const trade = await findOpenTradeForClosure(licenseId, mt5Account, {
+    orderTicket,
+    dealTicket,
+    batchId,
+    batchIndex,
+  });
+
+  if (!trade) {
+    return { updated: false, tradeId: null };
+  }
+
+  const closedAt = typeof closure.closedAt === 'string' && closure.closedAt.trim().length
+    ? closure.closedAt
+    : new Date().toISOString();
+
+  const updatePayload: Record<string, unknown> = {
+    outcome: closure.outcome,
+    closed_at: closedAt,
+  };
+
+  if (closure.profit === null || typeof closure.profit === 'number') {
+    updatePayload.profit = closure.profit;
+  }
+  if (closure.stopLoss === null || typeof closure.stopLoss === 'number') {
+    updatePayload.sl_price = closure.stopLoss;
+  }
+  if (closure.takeProfit === null || typeof closure.takeProfit === 'number') {
+    updatePayload.tp_price = closure.takeProfit;
+  }
+  if (orderTicket) {
+    updatePayload.order_ticket = orderTicket;
+  }
+  if (dealTicket) {
+    updatePayload.deal_ticket = dealTicket;
+  }
+
+  await supabase
+    .from('goldx_trade_history')
+    .update(updatePayload)
+    .eq('id', trade.id);
+
+  const { data: state } = await supabase
+    .from('goldx_account_state')
+    .select('id, current_open_trades')
+    .eq('license_id', licenseId)
+    .eq('mt5_account', mt5Account)
+    .maybeSingle();
+
+  if (state?.id) {
+    await supabase
+      .from('goldx_account_state')
+      .update({
+        current_open_trades: Math.max(0, Number(state.current_open_trades ?? 0) - 1),
+        last_trade_at: closedAt,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', state.id);
+  }
+
+  await insertAuditLog('goldx_execution_closed', {
+    licenseId,
+    meta: {
+      outcome: closure.outcome,
+      profit: closure.profit ?? null,
+      orderTicket,
+      dealTicket,
+      batchId,
+      batchIndex,
+      reason: closure.reason ?? null,
+    },
+  });
+
+  return { updated: true, tradeId: trade.id };
 }
