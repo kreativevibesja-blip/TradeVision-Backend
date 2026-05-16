@@ -97,7 +97,7 @@ export function allowContinuation({
 // Once we've already taken a trade in this session,
 // raise the bar — only high-quality setups pass.
 
-const POST_FIRST_TRADE_CONFIDENCE_THRESHOLD = 7;
+const POST_FIRST_TRADE_CONFIDENCE_THRESHOLD = 6;
 
 export function passesPostFirstTradeFilter({
   sessionTradeCount,

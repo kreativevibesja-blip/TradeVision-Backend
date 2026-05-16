@@ -144,15 +144,15 @@ interface ScannerExecutionSettings {
 }
 
 const DEFAULT_SCANNER_ENABLED_STRATEGIES: Record<ScannerStrategyToggleKey, boolean> = {
-  trendPullback: false,
-  countertrendReversal: false,
-  fvgContinuation: false,
+  trendPullback: true,
+  countertrendReversal: true,
+  fvgContinuation: true,
   emaReclaim: true,
-  equalLevelSweep: false,
-  poiReclaim: false,
-  rangeRejection: false,
-  zoneTap: false,
-  sessionFlip: false,
+  equalLevelSweep: true,
+  poiReclaim: true,
+  rangeRejection: true,
+  zoneTap: true,
+  sessionFlip: true,
 };
 
 type OpenScanResult = Pick<ScanResult, 'id' | 'userId' | 'symbol' | 'status' | 'confidenceScore' | 'createdAt'>;
@@ -202,8 +202,8 @@ const SCANNER_SYMBOLS_BY_SESSION: Record<SessionType, readonly string[]> = {
 
 const SCANNER_TIMEFRAME = 'M15';
 const LIVE_RESULT_CACHE_SYNC_MS = 20_000;
-const HIGH_CONFIDENCE_POTENTIAL_THRESHOLD = 90;
-const AI_REVIEW_NEAR_LIVE_THRESHOLD = 86;
+const HIGH_CONFIDENCE_POTENTIAL_THRESHOLD = 82;
+const AI_REVIEW_NEAR_LIVE_THRESHOLD = 80;
 const AI_REVIEW_CACHE_TTL_MS = 10 * 60_000;
 const PREFER_HISTORY_BEFORE_CACHE_SYMBOLS = new Set(['XAUUSD']);
 const HISTORY_RATE_LIMIT_BACKOFF_MS = 60_000;
@@ -246,6 +246,11 @@ function parseStrategyTogglePayload(value: unknown): Record<ScannerStrategyToggl
   (Object.keys(base) as ScannerStrategyToggleKey[]).forEach((key) => {
     base[key] = parseBooleanSetting(source[key], defaults[key]);
   });
+
+  if (!(Object.values(base) as boolean[]).some(Boolean)) {
+    return { ...defaults };
+  }
+
   return base;
 }
 
@@ -910,7 +915,7 @@ function getRelevantScannerModes(enabledTypes: Set<SessionType>): SessionType[] 
 const recentScanKeys = new Map<string, number>();
 const DEDUP_WINDOW_MS = 5 * 60_000; // 5 minutes
 const recentPotentialAlertKeys = new Map<string, number>();
-const POTENTIAL_ALERT_THRESHOLD = 78;
+const POTENTIAL_ALERT_THRESHOLD = 72;
 const POTENTIAL_ALERT_WINDOW_MS = 20 * 60_000;
 
 function isDuplicate(userId: string, symbol: string, direction: string): boolean {
@@ -2032,8 +2037,8 @@ async function processResultLifecycle(
 
 // ── Session pacing rules ──
 
-const SESSION_REASSESS_COOLDOWN_MS = 90 * 60_000;
-const SESSION_ENTRY_SPACING_MS = 60 * 60_000;
+const SESSION_REASSESS_COOLDOWN_MS = 75 * 60_000;
+const SESSION_ENTRY_SPACING_MS = 45 * 60_000;
 const SCANNER_ACTIVITY_LOOKBACK_MS = 24 * 60 * 60_000;
 
 async function getTodayTradeCount(userId: string, sessionType?: SessionType): Promise<number> {
