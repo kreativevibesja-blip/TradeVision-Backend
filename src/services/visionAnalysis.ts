@@ -791,8 +791,7 @@ export async function analyzeVisionStructure(
     }
   },
   "price_position": {
-    "location": "premium | discount | equilibrium",
-    "explanation": "Brief explanation of price position"
+    "location": "premium | discount | equilibrium"
   },
   "entry_plan": {
     "bias": "buy | sell | none",
@@ -801,8 +800,7 @@ export async function analyzeVisionStructure(
       "min": number | null,
       "max": number | null
     },
-    "confirmation": "CHoCH | BOS | rejection | none",
-    "reason": "Brief reason for this entry"
+    "confirmation": "CHoCH | BOS | rejection | none"
   },
   "counter_trend_plan": {
     "action": "enter | wait | avoid",
@@ -845,8 +843,7 @@ export async function analyzeVisionStructure(
     "confidence": 1-100
   },
   "final_verdict": {
-    "action": "enter | wait | avoid",
-    "message": "Clear instruction for the user"
+    "action": "enter | wait | avoid"
   },
   "reasoning": "Concise explanation of the setup using SMC logic",
   "visible_price_range": {
@@ -1065,8 +1062,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
     }
   },
   "price_position": {
-    "location": "premium | discount | equilibrium",
-    "explanation": "Explain relative to the active impulse/dealing range"
+    "location": "premium | discount | equilibrium"
   },
   "entry_plan": {
     "bias": "buy | sell | none",
@@ -1075,8 +1071,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
       "min": number | null,
       "max": number | null
     },
-    "confirmation": "CHoCH | BOS | rejection | none",
-    "reason": "Explain the POI, the confirmations, and why the trade is valid"
+    "confirmation": "CHoCH | BOS | rejection | none"
   },
   "counter_trend_plan": {
     "action": "enter | wait | avoid",
@@ -1119,14 +1114,13 @@ OUTPUT FORMAT (STRICT JSON ONLY)
     "confidence": 1-100
   },
   "final_verdict": {
-    "action": "enter | wait | avoid",
-    "message": "Clear instruction for the user"
+    "action": "enter | wait | avoid"
   },
   "stop_loss": number | null,
   "take_profit_1": number | null,
   "take_profit_2": number | null,
   "take_profit_3": number | null,
-  "reasoning": "Concise explanation in 2-4 short sentences",
+  "reasoning": "Concise explanation in 2-3 short sentences",
   "visible_price_range": {
     "min": "lowest price number visible on the right-side Y-axis",
     "max": "highest price number visible on the right-side Y-axis"
@@ -1363,15 +1357,13 @@ OUTPUT FORMAT (STRICT JSON ONLY)
     }
   },
   "price_position": {
-    "location": "premium | discount | equilibrium",
-    "explanation": "Explain relative to the active dealing range"
+    "location": "premium | discount | equilibrium"
   },
   "entry_plan": {
     "bias": "buy | sell | none",
     "entry_type": "none",
     "entry_zone": null,
-    "confirmation": "none",
-    "reason": "HTF defines bias and POIs only"
+    "confirmation": "none"
   },
   "counter_trend_plan": {
     "action": "avoid",
@@ -1398,8 +1390,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
     "confidence": 1-100
   },
   "final_verdict": {
-    "action": "enter | wait | avoid",
-    "message": "Clear directional bias for the lower timeframe trader"
+    "action": "enter | wait | avoid"
   },
   "stop_loss": null,
   "take_profit_1": null,
@@ -1656,8 +1647,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
     }
   },
   "price_position": {
-    "location": "premium | discount | equilibrium",
-    "explanation": "Where price sits relative to the internal structure range"
+    "location": "premium | discount | equilibrium"
   },
   "entry_plan": {
     "bias": "buy | sell | none",
@@ -1666,8 +1656,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
       "min": number | null,
       "max": number | null
     },
-    "confirmation": "CHoCH | BOS | rejection | none",
-    "reason": "Explain the POI, the confirmations, and why the entry is valid"
+    "confirmation": "CHoCH | BOS | rejection | none"
   },
   "counter_trend_plan": {
     "action": "enter | wait | avoid",
@@ -1710,8 +1699,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
     "confidence": 1-100
   },
   "final_verdict": {
-    "action": "enter | wait | avoid",
-    "message": "Precise execution instruction"
+    "action": "enter | wait | avoid"
   },
   "stop_loss": number | null,
   "take_profit_1": number | null,
@@ -1738,7 +1726,6 @@ STRICT RULES:
 - Be concise and structured
 - stop_loss must align with structural invalidation and take_profit_1 should only be set when at least 3R is realistic
 - If price is already at the extreme high of a bullish push or extreme low of a bearish push, return wait/avoid and prefer a pullback first
-- The entry_plan.reason must mention POI and confirmations
 - counter_trend_plan, when present, must be explicitly warned as aggressive and should use nearer exits than the main trend trade
 - left_side_plan, when present, must be explicitly warned as a future left-side opportunity that only becomes active if price revisits that older zone and then confirms
 
