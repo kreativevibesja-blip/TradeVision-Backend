@@ -1493,6 +1493,23 @@ export const createCouponRecord = (
 export const listCoupons = () =>
   many<CouponRecord>('listCoupons', supabase.from(COUPON_TABLE).select('*').order('createdAt', { ascending: false }));
 
+export const listCouponsLegacy = async (): Promise<CouponRecord[]> => {
+  const rows = await many<Pick<CouponRecord, 'id' | 'code' | 'type' | 'value' | 'maxUses' | 'usedCount' | 'perUserLimit' | 'expiresAt' | 'active' | 'createdAt' | 'updatedAt'>>(
+    'listCouponsLegacy',
+    supabase
+      .from(COUPON_TABLE)
+      .select('id,code,type,value,maxUses,usedCount,perUserLimit,expiresAt,active,createdAt,updatedAt')
+      .order('createdAt', { ascending: false })
+  );
+
+  return rows.map((coupon) => ({
+    ...coupon,
+    overridePrice: null,
+    grantPlan: null,
+    grantDurationDays: null,
+  }));
+};
+
 export const getCouponByCode = (code: string) =>
   maybeSingle<CouponRecord>('getCouponByCode', supabase.from(COUPON_TABLE).select('*').eq('code', code.toUpperCase().trim()).maybeSingle());
 

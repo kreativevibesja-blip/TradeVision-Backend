@@ -3,6 +3,7 @@ import { AuthRequest } from '../middleware/auth';
 import {
   createCouponRecord,
   listCoupons,
+  listCouponsLegacy,
   getCouponByCode,
   getCouponById,
   updateCouponRecord,
@@ -21,7 +22,14 @@ export const getCoupons = async (_req: AuthRequest, res: Response) => {
     return res.json({ coupons });
   } catch (error) {
     console.error('Get coupons error:', error);
-    return res.status(500).json({ error: 'Failed to load coupons' });
+
+    try {
+      const coupons = await listCouponsLegacy();
+      return res.json({ coupons, compatibilityMode: true });
+    } catch (legacyError) {
+      console.error('Get coupons legacy fallback error:', legacyError);
+      return res.status(500).json({ error: 'Failed to load coupons' });
+    }
   }
 };
 
