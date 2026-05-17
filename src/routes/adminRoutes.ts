@@ -4,6 +4,7 @@ import { handleSingleImageUpload } from '../middleware/upload';
 import {
   createPricingPlan,
   getDashboardStats,
+  getAdminWorkspaceBadges,
   getAdminAnalysisById,
   getUserDetails,
   getUsers,
@@ -18,9 +19,12 @@ import {
   getPricingPlans,
   getPublicPricingPlans,
   getPublicSupportSettings,
+  getAdminFeedback,
   updatePricingPlan,
   deletePricingPlan,
   getSystemSettings,
+  markAdminFeedbackSeen,
+  deleteAdminFeedback,
   updateSystemSetting,
   getAnnouncements,
   getActiveAnnouncements,
@@ -63,6 +67,7 @@ router.get('/public-support-settings', getPublicSupportSettings);
 router.use(authenticate, requireAdmin);
 
 router.get('/dashboard', getDashboardStats);
+router.get('/workspace-badges', getAdminWorkspaceBadges);
 router.get('/users', getUsers);
 router.get('/users/:id', getUserDetails);
 router.post('/users/:id/reset-usage', resetUserUsage);
@@ -76,6 +81,9 @@ router.get('/policies', getPolicyAcceptances);
 router.patch('/payments/:id', updatePaymentStatus);
 router.post('/payments/:id/send-reminder', sendPaymentReminder);
 router.get('/analytics', getAnalytics);
+router.get('/feedback', getAdminFeedback);
+router.post('/feedback/seen', markAdminFeedbackSeen);
+router.delete('/feedback/:id', deleteAdminFeedback);
 router.get('/pricing-plans', getPricingPlans);
 router.post('/pricing-plans', createPricingPlan);
 router.patch('/pricing-plans/:id', updatePricingPlan);

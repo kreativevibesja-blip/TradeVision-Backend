@@ -230,7 +230,7 @@ const getAnnouncementPopupSettings = async () => {
 export const getDashboardStats = async (_req: Request, res: Response) => {
   try {
     const jamaicaToday = getJamaicaTodayDate();
-    const [totalUsers, proSubscribers, topTierSubscribers, vipAutoTraderSubscribers, totalAnalyses, payments, liveMetrics] = await Promise.all([
+    const [totalUsers, proSubscribers, topTierSubscribers, vipAutoTraderSubscribers, totalAnalyses, payments, liveMetrics, pendingBankTransferCount, feedbackUnreadCount] = await Promise.all([
       countUsers(),
       countUsers('PRO'),
       countUsers('TOP_TIER'),
@@ -238,6 +238,8 @@ export const getDashboardStats = async (_req: Request, res: Response) => {
       countAnalyses(),
       getCompletedRevenue(),
       getLivePlatformMetrics(jamaicaToday, getJamaicaDayStartIso(jamaicaToday), getActiveVisitorSinceIso()),
+      countRows('countPendingBankTransferPayments', PAYMENT_TABLE, (query) => query.eq('status', 'PENDING').eq('paymentMethod', 'BANK_TRANSFER')),
+      countRows('countUnreadFeedback', 'feedback', (query) => query.eq('admin_seen', false)),
     ]);
 
     return res.json({
@@ -246,10 +248,90 @@ export const getDashboardStats = async (_req: Request, res: Response) => {
       totalAnalyses,
       totalRevenue: payments || 0,
       liveMetrics,
+      pendingBankTransferCount,
+      feedbackUnreadCount,
     });
   } catch (error) {
     console.error('Admin dashboard error:', error);
     return res.status(500).json({ error: 'Failed to get stats' });
+  }
+};
+
+export const getAdminWorkspaceBadges = async (_req: Request, res: Response) => {
+  try {
+    const [pendingBankTransferCount, feedbackUnreadCount] = await Promise.all([
+      countRows('countPendingBankTransferPayments', PAYMENT_TABLE, (query) => query.eq('status', 'PENDING').eq('paymentMethod', 'BANK_TRANSFER')),
+      countRows('countUnreadFeedback', 'feedback', (query) => query.eq('admin_seen', false)),
+    ]);
+
+    return res.json({ pendingBankTransferCount, feedbackUnreadCount });
+  } catch (error) {
+    console.error('Admin workspace badge error:', error);
+    return res.status(500).json({ error: 'Failed to load admin workspace badges' });
+  }
+};
+
+export const getAdminFeedback = async (_req: Request, res: Response) => {
+  try {
+    const { data, error } = await supabase
+      .from('feedback')
+      .select('id,user_id,rating,reason,message,created_at,admin_seen')
+      .order('created_at', { ascending: false })
+      .limit(500);
+
+    if (error) {
+      throw error;
+    }
+
+    return res.json({ rows: data ?? [] });
+  } catch (error) {
+    console.error('Admin feedback load error:', error);
+    return res.status(500).json({ error: 'Failed to load feedback' });
+  }
+};
+
+export const markAdminFeedbackSeen = async (req: Request, res: Response) => {
+  try {
+    const ids = Array.isArray(req.body?.ids)
+      ? req.body.ids.filter((value: unknown): value is string => typeof value === 'string' && value.trim().length > 0)
+      : [];
+
+    if (ids.length === 0) {
+      return res.json({ success: true, updated: 0 });
+    }
+
+    const { error } = await supabase
+      .from('feedback')
+      .update({ admin_seen: true })
+      .in('id', ids);
+
+    if (error) {
+      throw error;
+    }
+
+    return res.json({ success: true, updated: ids.length });
+  } catch (error) {
+    console.error('Admin feedback seen-state update error:', error);
+    return res.status(500).json({ error: 'Failed to update feedback state' });
+  }
+};
+
+export const deleteAdminFeedback = async (req: Request, res: Response) => {
+  try {
+    const id = typeof req.params.id === 'string' ? req.params.id : '';
+    if (!id) {
+      return res.status(400).json({ error: 'Feedback id is required' });
+    }
+
+    const { error } = await supabase.from('feedback').delete().eq('id', id);
+    if (error) {
+      throw error;
+    }
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Admin feedback delete error:', error);
+    return res.status(500).json({ error: 'Failed to delete feedback' });
   }
 };
 
