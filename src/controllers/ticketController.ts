@@ -21,18 +21,15 @@ const TICKET_STATUSES: TicketStatus[] = ['OPEN', 'IN_PROGRESS', 'WAITING_ON_USER
 
 const normalizeText = (value: unknown) => (typeof value === 'string' ? value.trim() : '');
 
-const sanitizeWhatsAppNumber = (value: unknown) => {
-  const normalized = normalizeText(value).replace(/[^\d+]/g, '');
-  return normalized.length >= 7 ? normalized : null;
-};
-
 const createTicketNumber = () => `TV-${Date.now().toString().slice(-6)}-${randomUUID().slice(0, 4).toUpperCase()}`;
 
-const mapTicket = (ticket: Awaited<ReturnType<typeof createTicketRecord>>) => ({
-  ...ticket,
-  canReplyByWhatsApp: Boolean(ticket.whatsappNumber),
-  canReplyByEmail: Boolean(ticket.userEmail),
-});
+const mapTicket = (ticket: Awaited<ReturnType<typeof createTicketRecord>>) => {
+  const { whatsappNumber: _whatsappNumber, ...rest } = ticket;
+  return {
+    ...rest,
+    canReplyByEmail: Boolean(ticket.userEmail),
+  };
+};
 
 export const getOpenTicketCount = async (_req: AuthRequest, res: Response) => {
   try {
@@ -77,7 +74,6 @@ export const createTicket = async (req: AuthRequest, res: Response) => {
       userId: user.id,
       userEmail: user.email,
       userName: user.name,
-      whatsappNumber: sanitizeWhatsAppNumber(req.body.whatsappNumber),
       subject,
       category,
       priority,
@@ -130,7 +126,6 @@ export const createAdminTicket = async (req: AuthRequest, res: Response) => {
       userId: user.id,
       userEmail: user.email,
       userName: user.name,
-      whatsappNumber: sanitizeWhatsAppNumber(req.body.whatsappNumber),
       subject,
       category,
       priority,

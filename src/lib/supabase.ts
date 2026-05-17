@@ -1359,9 +1359,10 @@ export const deleteAnnouncementRecords = async (ids: string[]) => {
   }
 };
 
-export const createTicketRecord = (values: Pick<TicketRecord, 'ticketNumber' | 'userId' | 'userEmail' | 'userName' | 'whatsappNumber' | 'subject' | 'category' | 'priority' | 'message'>) =>
+export const createTicketRecord = (values: Pick<TicketRecord, 'ticketNumber' | 'userId' | 'userEmail' | 'userName' | 'subject' | 'category' | 'priority' | 'message'>) =>
   insertSingle<TicketRecord>('createTicketRecord', TICKET_TABLE, {
     status: 'OPEN',
+    whatsappNumber: null,
     ...values,
   });
 

@@ -18,7 +18,6 @@ import {
   getAnalytics,
   getPricingPlans,
   getPublicPricingPlans,
-  getPublicSupportSettings,
   getAdminFeedback,
   updatePricingPlan,
   deletePricingPlan,
@@ -62,7 +61,6 @@ const router = Router();
 
 router.get('/public-announcements', getActiveAnnouncements);
 router.get('/public-pricing-plans', getPublicPricingPlans);
-router.get('/public-support-settings', getPublicSupportSettings);
 
 router.use(authenticate, requireAdmin);
 

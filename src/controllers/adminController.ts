@@ -54,8 +54,6 @@ import { getGoldxPulseAccess } from '../services/goldxPulse/access';
 import { config } from '../config';
 
 const ANNOUNCEMENT_CONTENT_VERSION = 1;
-const DEFAULT_SUPPORT_WHATSAPP_NUMBER = '18762797956';
-const DEFAULT_SUPPORT_WHATSAPP_MESSAGE = 'Hi TradeVision AI, I need support.';
 const DEFAULT_ANNOUNCEMENT_POPUPS_ENABLED = true;
 const DEFAULT_ANNOUNCEMENT_POPUP_REPEAT_HOURS = 24;
 const FEEDBACK_TABLE = 'feedback';
@@ -852,26 +850,6 @@ export const updateSystemSetting = async (req: Request, res: Response) => {
     return res.json({ setting });
   } catch (error) {
     return res.status(500).json({ error: 'Failed to update setting' });
-  }
-};
-
-export const getPublicSupportSettings = async (_req: Request, res: Response) => {
-  try {
-    const [numberSetting, messageSetting] = await Promise.all([
-      getSystemSetting('support_whatsapp_number'),
-      getSystemSetting('support_whatsapp_message'),
-    ]);
-
-    return res.json({
-      whatsappNumber: typeof numberSetting?.value === 'string' && numberSetting.value.trim().length > 0
-        ? numberSetting.value.trim()
-        : DEFAULT_SUPPORT_WHATSAPP_NUMBER,
-      whatsappMessage: typeof messageSetting?.value === 'string' && messageSetting.value.trim().length > 0
-        ? messageSetting.value.trim()
-        : DEFAULT_SUPPORT_WHATSAPP_MESSAGE,
-    });
-  } catch (error) {
-    return res.status(500).json({ error: 'Failed to get support settings' });
   }
 };
 
