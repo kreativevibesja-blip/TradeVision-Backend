@@ -7,6 +7,7 @@ import {
   type PaymentMethod,
   type SubscriptionTier,
   createPaymentRecord,
+  getPaymentByOrderId,
   getPricingPlanByTierWithFallback,
   listPaymentsForUserId,
   updatePaymentByOrderId,
@@ -14,6 +15,7 @@ import {
 import { getBillingSummaryForUser, renewGoldxPulseState, setBillingStateFromCancellation, setBillingStateFromPayment, setGoldxPulseStateFromCancellation, setGoldxPulseStateFromPayment } from '../services/billing';
 import { validateCouponInternal, applyDiscount, incrementCouponUsage } from './couponController';
 import { processReferralPayment, getReferralDiscountForUser } from '../services/referralService';
+import { assertNoRefundPolicyAccepted, PolicyAcceptanceRequiredError } from '../services/policyAcceptance';
 
 const isCheckoutMethod = (value: unknown): value is Extract<PaymentMethod, 'PAYPAL' | 'CARD'> => value === 'PAYPAL' || value === 'CARD';
 const isBankTransferBank = (value: unknown): value is BankTransferBank => value === 'SCOTIABANK' || value === 'NCB';
@@ -49,7 +51,7 @@ const resolvePlanPaymentAmount = async (userId: string, plan: Extract<Subscripti
 
 export const createPayment = async (req: AuthRequest, res: Response) => {
   try {
-    const { plan, couponCode, method } = req.body;
+    const { plan, couponCode, method, policyAccepted } = req.body;
     if (!plan || !['PRO', 'TOP_TIER', 'GOLDX_PULSE'].includes(plan)) {
       return res.status(400).json({ error: 'Invalid plan' });
     }
@@ -57,6 +59,13 @@ export const createPayment = async (req: AuthRequest, res: Response) => {
     const paymentMethod: Extract<PaymentMethod, 'PAYPAL' | 'CARD'> = isCheckoutMethod(method) ? method : 'PAYPAL';
 
     const selectedPlan = plan as Extract<SubscriptionTier, 'PRO' | 'TOP_TIER'> | 'GOLDX_PULSE';
+    await assertNoRefundPolicyAccepted({
+      userId: req.user!.id,
+      planId: selectedPlan,
+      policyAccepted: policyAccepted === true,
+      req,
+      persistAcceptance: true,
+    });
     const { amount, appliedCouponId, planName } = await resolvePlanPaymentAmount(req.user!.id, selectedPlan, couponCode);
 
     if (amount <= 0) {
@@ -103,6 +112,9 @@ export const createPayment = async (req: AuthRequest, res: Response) => {
 
     return res.json({ orderId: order.id, approveUrl: approveLink });
   } catch (error) {
+    if (error instanceof PolicyAcceptanceRequiredError) {
+      return res.status(403).json({ error: 'Policy acceptance required.' });
+    }
     console.error('Create payment error:', error);
     return res.status(500).json({ error: 'Payment creation failed' });
   }
@@ -110,7 +122,7 @@ export const createPayment = async (req: AuthRequest, res: Response) => {
 
 export const createBankTransferRequest = async (req: AuthRequest, res: Response) => {
   try {
-    const { plan, couponCode, bank } = req.body;
+    const { plan, couponCode, bank, policyAccepted } = req.body;
 
     if (plan !== 'PRO' && plan !== 'TOP_TIER' && plan !== 'GOLDX_PULSE') {
       return res.status(400).json({ error: 'Invalid plan' });
@@ -121,6 +133,13 @@ export const createBankTransferRequest = async (req: AuthRequest, res: Response)
     }
 
     const selectedPlan = plan as Extract<SubscriptionTier, 'PRO' | 'TOP_TIER'> | 'GOLDX_PULSE';
+    await assertNoRefundPolicyAccepted({
+      userId: req.user!.id,
+      planId: selectedPlan,
+      policyAccepted: policyAccepted === true,
+      req,
+      persistAcceptance: true,
+    });
     const { amount } = await resolvePlanPaymentAmount(req.user!.id, selectedPlan, couponCode);
     const referenceId = createManualPaymentReference();
     const payment = await createPaymentRecord({
@@ -145,6 +164,9 @@ export const createBankTransferRequest = async (req: AuthRequest, res: Response)
       },
     });
   } catch (error) {
+    if (error instanceof PolicyAcceptanceRequiredError) {
+      return res.status(403).json({ error: 'Policy acceptance required.' });
+    }
     console.error('Bank transfer request error:', error);
     return res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to create bank transfer request' });
   }
@@ -166,10 +188,27 @@ export const getPayPalClientToken = async (_req: AuthRequest, res: Response) => 
 
 export const handlePaymentSuccess = async (req: AuthRequest, res: Response) => {
   try {
-    const { orderId } = req.body;
+    const { orderId, policyAccepted } = req.body;
     if (!orderId) {
       return res.status(400).json({ error: 'Order ID is required' });
     }
+
+    const existingPayment = await getPaymentByOrderId(orderId);
+    if (!existingPayment) {
+      return res.status(404).json({ error: 'Payment not found' });
+    }
+
+    if (existingPayment.userId !== req.user!.id) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    await assertNoRefundPolicyAccepted({
+      userId: req.user!.id,
+      planId: existingPayment.plan,
+      policyAccepted: policyAccepted === true,
+      req,
+      persistAcceptance: false,
+    });
 
     const capture = await captureOrder(orderId);
 
@@ -201,6 +240,9 @@ export const handlePaymentSuccess = async (req: AuthRequest, res: Response) => {
 
     return res.status(400).json({ error: 'Payment not completed' });
   } catch (error) {
+    if (error instanceof PolicyAcceptanceRequiredError) {
+      return res.status(403).json({ error: 'Policy acceptance required.' });
+    }
     console.error('Payment success error:', error);
     return res.status(500).json({ error: 'Payment processing failed' });
   }

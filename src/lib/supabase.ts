@@ -99,6 +99,7 @@ const AUTO_TRADE_TABLE = 'AutoTrade';
 const AUTO_TRADE_LOG_TABLE = 'AutoTradeLog';
 const AUTO_PERFORMANCE_TABLE = 'AutoPerformance';
 const TRACKED_TRADE_TABLE = 'TrackedTrade';
+const POLICY_ACCEPTANCE_TABLE = 'policy_acceptance';
 
 export type SubscriptionTier = 'FREE' | 'PRO' | 'TOP_TIER' | 'VIP_AUTO_TRADER';
 export type BillingPlan = SubscriptionTier | 'GOLDX_PULSE';
@@ -113,6 +114,7 @@ export type TicketStatus = 'OPEN' | 'IN_PROGRESS' | 'WAITING_ON_USER' | 'RESOLVE
 export type TicketPriority = 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT';
 export type TicketCategory = 'ACCOUNT' | 'BILLING' | 'ANALYSIS' | 'BUG' | 'FEATURE' | 'GENERAL';
 export type UploadErrorType = 'INVALID_TYPE' | 'FILE_TOO_LARGE' | 'CORRUPTED_FILE' | 'READ_ERROR' | 'EMPTY_IMAGE';
+export type PolicyType = 'NO_REFUND';
 
 export type SignalDirection = 'buy' | 'sell';
 export type SignalConfidence = 'A+' | 'A' | 'B' | 'avoid';
@@ -227,6 +229,18 @@ export interface PaymentRecord {
   verifiedAt: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface PolicyAcceptanceRecord {
+  id: string;
+  user_id: string;
+  plan_id: string;
+  policy_type: PolicyType;
+  policy_version: string;
+  accepted: boolean;
+  accepted_at: string;
+  ip_address: string | null;
+  user_agent: string | null;
 }
 
 interface ListPaymentsFilters {
@@ -1131,8 +1145,30 @@ export const deletePricingPlan = (id: string) =>
 export const createPaymentRecord = (values: Partial<PaymentRecord> & Pick<PaymentRecord, 'userId' | 'paypalOrderId' | 'amount' | 'status' | 'plan'>) =>
   insertSingle<PaymentRecord>('createPaymentRecord', PAYMENT_TABLE, { currency: 'USD', paymentMethod: 'PAYPAL', ...values });
 
+export const createPolicyAcceptanceRecord = (values: Omit<PolicyAcceptanceRecord, 'id'>) =>
+  insertSingle<PolicyAcceptanceRecord>('createPolicyAcceptanceRecord', POLICY_ACCEPTANCE_TABLE, values);
+
 export const getPaymentById = (id: string) =>
   maybeSingle<PaymentRecord>('getPaymentById', supabase.from(PAYMENT_TABLE).select('*').eq('id', id).maybeSingle());
+
+export const getPaymentByOrderId = (paypalOrderId: string) =>
+  maybeSingle<PaymentRecord>('getPaymentByOrderId', supabase.from(PAYMENT_TABLE).select('*').eq('paypalOrderId', paypalOrderId).maybeSingle());
+
+export const getLatestAcceptedPolicyAcceptance = (userId: string, planId: string, policyType: PolicyType, policyVersion: string) =>
+  maybeSingle<PolicyAcceptanceRecord>(
+    'getLatestAcceptedPolicyAcceptance',
+    supabase
+      .from(POLICY_ACCEPTANCE_TABLE)
+      .select('*')
+      .eq('user_id', userId)
+      .eq('plan_id', planId)
+      .eq('policy_type', policyType)
+      .eq('policy_version', policyVersion)
+      .eq('accepted', true)
+      .order('accepted_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+  );
 
 export const updatePaymentById = (id: string, values: Partial<PaymentRecord>) =>
   updateSingle<PaymentRecord>('updatePaymentById', PAYMENT_TABLE, values, (query) => query.eq('id', id));
@@ -1189,6 +1225,62 @@ export const listAllPaymentsPage = async (page: number, limit: number, filters: 
         ? {
             email: usersMap.get(payment.userId)?.email,
             name: usersMap.get(payment.userId)?.name,
+          }
+        : null,
+    })),
+    total: count ?? 0,
+  };
+};
+
+export const listPolicyAcceptancePage = async (page: number, limit: number, search?: string) => {
+  const skip = (page - 1) * limit;
+  const trimmedSearch = typeof search === 'string' ? normalizeSearch(search) : '';
+  let query = supabase
+    .from(POLICY_ACCEPTANCE_TABLE)
+    .select('*', { count: 'exact' })
+    .order('accepted_at', { ascending: false });
+
+  if (trimmedSearch) {
+    const matchingUsers = await many<Pick<UserRecord, 'id'>>(
+      'listPolicyAcceptancePage.searchUsers',
+      supabase
+        .from(USER_TABLE)
+        .select('id')
+        .or(`email.ilike.%${trimmedSearch}%,name.ilike.%${trimmedSearch}%`)
+        .limit(100)
+    );
+
+    const filters = [
+      `plan_id.ilike.%${trimmedSearch}%`,
+      `policy_type.ilike.%${trimmedSearch}%`,
+      `policy_version.ilike.%${trimmedSearch}%`,
+      `ip_address.ilike.%${trimmedSearch}%`,
+      `user_agent.ilike.%${trimmedSearch}%`,
+    ];
+
+    if (matchingUsers.length > 0) {
+      filters.push(`user_id.in.(${matchingUsers.map((user) => user.id).join(',')})`);
+    }
+
+    query = query.or(filters.join(','));
+  }
+
+  const { data, count, error } = await query.range(skip, skip + limit - 1);
+
+  if (error) {
+    logDbError('listPolicyAcceptancePage', error);
+  }
+
+  const acceptances = (data as PolicyAcceptanceRecord[]) ?? [];
+  const usersMap = await getUsersMap(Array.from(new Set(acceptances.map((acceptance) => acceptance.user_id))));
+
+  return {
+    acceptances: acceptances.map((acceptance) => ({
+      ...acceptance,
+      user: usersMap.has(acceptance.user_id)
+        ? {
+            email: usersMap.get(acceptance.user_id)?.email ?? null,
+            name: usersMap.get(acceptance.user_id)?.name ?? null,
           }
         : null,
     })),

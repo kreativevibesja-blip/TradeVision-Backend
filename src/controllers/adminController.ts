@@ -14,6 +14,7 @@ import {
   getCompletedRevenue,
   getLivePlatformMetrics,
   getPaymentById,
+  listPolicyAcceptancePage,
   getSystemSetting,
   getUserById,
   getUsersByIds,
@@ -464,6 +465,21 @@ export const getPayments = async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Admin payments error:', error);
     return res.status(500).json({ error: 'Failed to get payments' });
+  }
+};
+
+export const getPolicyAcceptances = async (req: Request, res: Response) => {
+  try {
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = Math.min(parseInt(req.query.limit as string) || 25, 100);
+    const search = typeof req.query.search === 'string' ? req.query.search : undefined;
+
+    const { acceptances, total } = await listPolicyAcceptancePage(page, limit, search);
+
+    return res.json({ acceptances, total, page, pages: Math.ceil(total / limit) });
+  } catch (error) {
+    console.error('Admin policy acceptances error:', error);
+    return res.status(500).json({ error: 'Failed to get policy acceptances' });
   }
 };
 

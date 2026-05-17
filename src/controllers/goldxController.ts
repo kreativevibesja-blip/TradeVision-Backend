@@ -53,6 +53,7 @@ import { getGoldxPulseAccess } from '../services/goldxPulse/access';
 import { getBillingSummaryForUser } from '../services/billing';
 import { sendGoldxEaDeliveryEmail } from '../services/goldxDeliveryEmail';
 import { getUsersByIds, getUserById, listSystemSettingsByPrefix } from '../lib/supabase';
+import { assertNoRefundPolicyAccepted, PolicyAcceptanceRequiredError } from '../services/policyAcceptance';
 
 const GOLDX_PULSE_SETTING_PREFIX = 'goldxPulse:subscription:';
 
@@ -629,6 +630,7 @@ export const createGoldxSetupRequest = async (req: AuthRequest, res: Response) =
 export const createGoldxPayment = async (req: AuthRequest, res: Response) => {
   try {
     if (!req.user) return res.status(401).json({ error: 'Auth required' });
+    const policyAccepted = req.body?.policyAccepted === true;
 
     const plan = await getGoldxPlan();
     if (!plan) return res.status(404).json({ error: 'No active plan' });
@@ -639,9 +641,20 @@ export const createGoldxPayment = async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: 'Already subscribed to GoldX' });
     }
 
+    await assertNoRefundPolicyAccepted({
+      userId: req.user.id,
+      planId: 'GOLDX',
+      policyAccepted,
+      req,
+      persistAcceptance: true,
+    });
+
     const order = await createOrder(plan.price.toString(), `GoldX - ${plan.name}`);
     res.json({ orderId: order.id, planId: plan.id });
   } catch (err) {
+    if (err instanceof PolicyAcceptanceRequiredError) {
+      return res.status(403).json({ error: 'Policy acceptance required.' });
+    }
     console.error('[GoldX] createPayment error:', err);
     res.status(500).json({ error: 'Failed to create payment' });
   }
@@ -650,11 +663,19 @@ export const createGoldxPayment = async (req: AuthRequest, res: Response) => {
 export const captureGoldxPayment = async (req: AuthRequest, res: Response) => {
   try {
     if (!req.user) return res.status(401).json({ error: 'Auth required' });
-    const { orderId, planId } = req.body as { orderId: string; planId: string };
+    const { orderId, planId, policyAccepted } = req.body as { orderId: string; planId: string; policyAccepted?: boolean };
 
     if (!orderId || !planId) {
       return res.status(400).json({ error: 'orderId and planId required' });
     }
+
+    await assertNoRefundPolicyAccepted({
+      userId: req.user.id,
+      planId: 'GOLDX',
+      policyAccepted: policyAccepted === true,
+      req,
+      persistAcceptance: false,
+    });
 
     // Capture PayPal payment
     const capture = await captureOrder(orderId);
@@ -676,6 +697,9 @@ export const captureGoldxPayment = async (req: AuthRequest, res: Response) => {
       message: 'Save your license key — it will only be shown once.',
     });
   } catch (err) {
+    if (err instanceof PolicyAcceptanceRequiredError) {
+      return res.status(403).json({ error: 'Policy acceptance required.' });
+    }
     console.error('[GoldX] capturePayment error:', err);
     res.status(500).json({ error: 'Failed to process payment' });
   }

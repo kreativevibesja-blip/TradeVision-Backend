@@ -11,6 +11,7 @@ import {
   updateUser,
   getAnalysisLogs,
   getPayments,
+  getPolicyAcceptances,
   updatePaymentStatus,
   sendPaymentReminder,
   getAnalytics,
@@ -71,6 +72,7 @@ router.post('/subscribers/:userId/send-renewal', sendSubscriptionRenewalReminder
 router.get('/analyses', getAnalysisLogs);
 router.get('/analyses/:id', getAdminAnalysisById);
 router.get('/payments', getPayments);
+router.get('/policies', getPolicyAcceptances);
 router.patch('/payments/:id', updatePaymentStatus);
 router.post('/payments/:id/send-reminder', sendPaymentReminder);
 router.get('/analytics', getAnalytics);
