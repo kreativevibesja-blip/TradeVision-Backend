@@ -84,7 +84,7 @@ export const createCoupon = async (req: AuthRequest, res: Response) => {
     const coupon = await createCouponRecord({
       code,
       type,
-      value: hasSpecialAccessOffer ? 0 : numValue,
+      value: hasSpecialAccessOffer ? (normalizedOverridePrice ?? numValue) : numValue,
       maxUses: Math.max(0, parseInt(maxUses, 10) || 0),
       perUserLimit: Math.max(1, parseInt(perUserLimit, 10) || 1),
       expiresAt: expiresAt || null,
