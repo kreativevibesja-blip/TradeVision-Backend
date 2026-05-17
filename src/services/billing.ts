@@ -260,11 +260,16 @@ export async function setBillingStateFromAdmin(userId: string, subscription: Sub
   return nextState;
 }
 
-export async function setBillingStateFromPayment(userId: string, paymentAt: string, plan: Exclude<SubscriptionTier, 'FREE'>) {
+export async function setBillingStateFromPayment(
+  userId: string,
+  paymentAt: string,
+  plan: Exclude<SubscriptionTier, 'FREE'>,
+  durationDays = BILLING_PERIOD_DAYS,
+) {
   const state: BillingState = {
     currentPlan: plan,
     status: 'active',
-    expiresAt: addDays(paymentAt, BILLING_PERIOD_DAYS),
+    expiresAt: addDays(paymentAt, durationDays),
     lastPaymentAt: paymentAt,
     canceledAt: null,
     source: 'payment',

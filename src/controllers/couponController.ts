@@ -10,6 +10,7 @@ import {
   getCouponUsage,
   incrementCouponUsage,
   type CouponRecord,
+  type CouponGrantPlan,
 } from '../lib/supabase';
 
 // ---- Admin endpoints ----
@@ -26,7 +27,15 @@ export const getCoupons = async (_req: AuthRequest, res: Response) => {
 
 export const createCoupon = async (req: AuthRequest, res: Response) => {
   try {
-    const { code, type, value, maxUses, perUserLimit, expiresAt } = req.body;
+    const { code, type, value, maxUses, perUserLimit, expiresAt, overridePrice, grantPlan, grantDurationDays } = req.body;
+    const normalizedGrantPlan: CouponGrantPlan | null = grantPlan === 'PRO' || grantPlan === 'TOP_TIER' ? grantPlan : null;
+    const normalizedOverridePrice = overridePrice === undefined || overridePrice === null || overridePrice === ''
+      ? null
+      : Number(overridePrice);
+    const normalizedGrantDurationDays = grantDurationDays === undefined || grantDurationDays === null || grantDurationDays === ''
+      ? null
+      : parseInt(grantDurationDays, 10);
+    const hasSpecialAccessOffer = normalizedOverridePrice !== null || normalizedGrantPlan !== null || normalizedGrantDurationDays !== null;
 
     if (!code || typeof code !== 'string' || code.trim().length < 2) {
       return res.status(400).json({ error: 'Coupon code must be at least 2 characters' });
@@ -37,12 +46,26 @@ export const createCoupon = async (req: AuthRequest, res: Response) => {
     }
 
     const numValue = Number(value);
-    if (!Number.isFinite(numValue) || numValue <= 0) {
+    if (!Number.isFinite(numValue) || (numValue <= 0 && !hasSpecialAccessOffer)) {
       return res.status(400).json({ error: 'Value must be a positive number' });
     }
 
     if (type === 'percentage' && numValue > 100) {
       return res.status(400).json({ error: 'Percentage discount cannot exceed 100%' });
+    }
+
+    if (hasSpecialAccessOffer) {
+      if (!Number.isFinite(normalizedOverridePrice) || normalizedOverridePrice === null || normalizedOverridePrice <= 0) {
+        return res.status(400).json({ error: 'Special access offer price must be a positive number' });
+      }
+
+      if (!normalizedGrantPlan) {
+        return res.status(400).json({ error: 'Special access offer plan must be PRO or TOP_TIER' });
+      }
+
+      if (!Number.isFinite(normalizedGrantDurationDays) || normalizedGrantDurationDays === null || normalizedGrantDurationDays <= 0) {
+        return res.status(400).json({ error: 'Special access offer duration must be at least 1 day' });
+      }
     }
 
     const existing = await getCouponByCode(code);
@@ -53,10 +76,13 @@ export const createCoupon = async (req: AuthRequest, res: Response) => {
     const coupon = await createCouponRecord({
       code,
       type,
-      value: numValue,
+      value: hasSpecialAccessOffer ? 0 : numValue,
       maxUses: Math.max(0, parseInt(maxUses, 10) || 0),
       perUserLimit: Math.max(1, parseInt(perUserLimit, 10) || 1),
       expiresAt: expiresAt || null,
+      overridePrice: normalizedOverridePrice,
+      grantPlan: normalizedGrantPlan,
+      grantDurationDays: normalizedGrantDurationDays,
     });
 
     return res.json({ coupon });
@@ -99,6 +125,11 @@ const validateCouponInternal = async (code: string, userId: string): Promise<{
   valid: boolean;
   discount?: { type: CouponRecord['type']; value: number };
   couponId?: string;
+  specialOffer?: {
+    overridePrice: number;
+    grantPlan: CouponGrantPlan;
+    grantDurationDays: number;
+  };
   message: string;
 }> => {
   const coupon = await getCouponByCode(code);
@@ -126,9 +157,19 @@ const validateCouponInternal = async (code: string, userId: string): Promise<{
 
   return {
     valid: true,
-    discount: { type: coupon.type, value: coupon.value },
+    discount: coupon.overridePrice == null ? { type: coupon.type, value: coupon.value } : undefined,
     couponId: coupon.id,
-    message: 'Coupon applied successfully',
+    specialOffer: coupon.overridePrice != null && coupon.grantPlan && coupon.grantDurationDays
+      ? {
+          overridePrice: coupon.overridePrice,
+          grantPlan: coupon.grantPlan,
+          grantDurationDays: coupon.grantDurationDays,
+        }
+      : undefined,
+    message:
+      coupon.overridePrice != null && coupon.grantPlan && coupon.grantDurationDays
+        ? `Special offer applied: ${coupon.grantDurationDays} days of ${coupon.grantPlan === 'TOP_TIER' ? 'PRO+' : 'PRO'} access for $${coupon.overridePrice.toFixed(2)}.`
+        : 'Coupon applied successfully',
   };
 };
 

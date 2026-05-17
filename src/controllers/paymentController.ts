@@ -16,6 +16,7 @@ import { getBillingSummaryForUser, renewGoldxPulseState, setBillingStateFromCanc
 import { validateCouponInternal, applyDiscount, incrementCouponUsage } from './couponController';
 import { processReferralPayment, getReferralDiscountForUser } from '../services/referralService';
 import { assertNoRefundPolicyAccepted, PolicyAcceptanceRequiredError } from '../services/policyAcceptance';
+import { clearPaymentCouponContext, getPaymentCouponContext, storePaymentCouponContext } from '../services/paymentCouponContext';
 
 const isCheckoutMethod = (value: unknown): value is Extract<PaymentMethod, 'PAYPAL' | 'CARD'> => value === 'PAYPAL' || value === 'CARD';
 const isBankTransferBank = (value: unknown): value is BankTransferBank => value === 'SCOTIABANK' || value === 'NCB';
@@ -25,8 +26,9 @@ const createManualPaymentReference = () => `BANK-${Date.now()}-${Math.random().t
 const resolvePlanPaymentAmount = async (userId: string, plan: Extract<SubscriptionTier, 'PRO' | 'TOP_TIER'> | 'GOLDX_PULSE', couponCode?: string) => {
   const pricing = plan === 'GOLDX_PULSE' ? null : await getPricingPlanByTierWithFallback(plan);
   let amount = pricing ? pricing.price : plan === 'TOP_TIER' ? 39.95 : plan === 'GOLDX_PULSE' ? 79.95 : 19.95;
-  const planName = pricing ? pricing.name : plan === 'TOP_TIER' ? 'Top Tier 👑' : plan === 'GOLDX_PULSE' ? 'GoldX Pulse' : 'Pro';
-  let appliedCouponId: string | null = null;
+  let effectivePlan: Extract<SubscriptionTier, 'PRO' | 'TOP_TIER'> | 'GOLDX_PULSE' = plan;
+  let planName = pricing ? pricing.name : plan === 'TOP_TIER' ? 'Top Tier 👑' : plan === 'GOLDX_PULSE' ? 'GoldX Pulse' : 'Pro';
+  let appliedCoupon: { couponId: string; grantPlan: Extract<SubscriptionTier, 'PRO' | 'TOP_TIER'> | null; grantDurationDays: number | null } | null = null;
 
   const referralDiscount = await getReferralDiscountForUser(userId);
   if (referralDiscount > 0) {
@@ -35,17 +37,30 @@ const resolvePlanPaymentAmount = async (userId: string, plan: Extract<Subscripti
 
   if (couponCode && typeof couponCode === 'string') {
     const couponResult = await validateCouponInternal(couponCode, userId);
-    if (!couponResult.valid || !couponResult.discount) {
+    if (!couponResult.valid) {
       throw new Error(couponResult.message || 'Invalid coupon');
     }
-    amount = Math.round(applyDiscount(amount, couponResult.discount) * 100) / 100;
-    appliedCouponId = couponResult.couponId!;
+
+    if (couponResult.specialOffer) {
+      amount = Math.round(couponResult.specialOffer.overridePrice * 100) / 100;
+      effectivePlan = couponResult.specialOffer.grantPlan;
+      planName = couponResult.specialOffer.grantPlan === 'TOP_TIER' ? 'PRO+' : 'Pro';
+    } else if (couponResult.discount) {
+      amount = Math.round(applyDiscount(amount, couponResult.discount) * 100) / 100;
+    }
+
+    appliedCoupon = {
+      couponId: couponResult.couponId!,
+      grantPlan: couponResult.specialOffer?.grantPlan ?? null,
+      grantDurationDays: couponResult.specialOffer?.grantDurationDays ?? null,
+    };
   }
 
   return {
     amount,
     planName,
-    appliedCouponId,
+    appliedCoupon,
+    effectivePlan,
   };
 };
 
@@ -66,7 +81,7 @@ export const createPayment = async (req: AuthRequest, res: Response) => {
       req,
       persistAcceptance: true,
     });
-    const { amount, appliedCouponId, planName } = await resolvePlanPaymentAmount(req.user!.id, selectedPlan, couponCode);
+    const { amount, appliedCoupon, effectivePlan, planName } = await resolvePlanPaymentAmount(req.user!.id, selectedPlan, couponCode);
 
     if (amount <= 0) {
       // Free via full discount — activate immediately without PayPal
@@ -76,18 +91,23 @@ export const createPayment = async (req: AuthRequest, res: Response) => {
         amount: 0,
         status: 'COMPLETED',
         paymentMethod: 'COUPON',
-        plan: selectedPlan,
+        plan: effectivePlan,
         verifiedAt: new Date().toISOString(),
       });
 
-      if (appliedCouponId) {
-        await incrementCouponUsage(appliedCouponId, req.user!.id);
+      if (appliedCoupon) {
+        await incrementCouponUsage(appliedCoupon.couponId, req.user!.id);
       }
 
       if (selectedPlan === 'GOLDX_PULSE') {
         await setGoldxPulseStateFromPayment(req.user!.id, new Date().toISOString());
       } else {
-        await setBillingStateFromPayment(req.user!.id, new Date().toISOString(), selectedPlan);
+        await setBillingStateFromPayment(
+          req.user!.id,
+          new Date().toISOString(),
+          (appliedCoupon?.grantPlan ?? effectivePlan) as Extract<SubscriptionTier, 'PRO' | 'TOP_TIER'>,
+          appliedCoupon?.grantDurationDays ?? undefined,
+        );
       }
       return res.json({ orderId: null, approveUrl: null, freeActivation: true });
     }
@@ -100,12 +120,16 @@ export const createPayment = async (req: AuthRequest, res: Response) => {
       amount,
       status: 'PENDING',
       paymentMethod,
-      plan: selectedPlan,
+      plan: effectivePlan,
     });
 
-    // Stash coupon for post-capture usage tracking
-    if (appliedCouponId) {
-      pendingCouponMap.set(order.id, { couponId: appliedCouponId, userId: req.user!.id });
+    if (appliedCoupon) {
+      await storePaymentCouponContext(order.id, {
+        couponId: appliedCoupon.couponId,
+        userId: req.user!.id,
+        grantPlan: appliedCoupon.grantPlan,
+        grantDurationDays: appliedCoupon.grantDurationDays,
+      });
     }
 
     const approveLink = order.links?.find((l) => l.rel === 'approve')?.href;
@@ -140,7 +164,7 @@ export const createBankTransferRequest = async (req: AuthRequest, res: Response)
       req,
       persistAcceptance: true,
     });
-    const { amount } = await resolvePlanPaymentAmount(req.user!.id, selectedPlan, couponCode);
+    const { amount, appliedCoupon, effectivePlan } = await resolvePlanPaymentAmount(req.user!.id, selectedPlan, couponCode);
     const referenceId = createManualPaymentReference();
     const payment = await createPaymentRecord({
       userId: req.user!.id,
@@ -149,8 +173,17 @@ export const createBankTransferRequest = async (req: AuthRequest, res: Response)
       status: 'PENDING',
       paymentMethod: 'BANK_TRANSFER',
       bankTransferBank: bank,
-      plan: selectedPlan as BillingPlan,
+      plan: effectivePlan as BillingPlan,
     });
+
+    if (appliedCoupon) {
+      await storePaymentCouponContext(referenceId, {
+        couponId: appliedCoupon.couponId,
+        userId: req.user!.id,
+        grantPlan: appliedCoupon.grantPlan,
+        grantDurationDays: appliedCoupon.grantDurationDays,
+      });
+    }
 
     return res.json({
       success: true,
@@ -171,10 +204,6 @@ export const createBankTransferRequest = async (req: AuthRequest, res: Response)
     return res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to create bank transfer request' });
   }
 };
-
-// Temporary in-memory map to track which order used a coupon.
-// In a production cluster you would use a DB column on the Payment table instead.
-const pendingCouponMap = new Map<string, { couponId: string; userId: string }>();
 
 export const getPayPalClientToken = async (_req: AuthRequest, res: Response) => {
   try {
@@ -215,19 +244,23 @@ export const handlePaymentSuccess = async (req: AuthRequest, res: Response) => {
     if (capture.status === 'COMPLETED') {
       const payment = await updatePaymentByOrderId(orderId, { status: 'COMPLETED', verifiedAt: new Date().toISOString() });
 
-      // Track coupon usage if this order used a coupon
-      const couponInfo = pendingCouponMap.get(orderId);
+      const couponInfo = await getPaymentCouponContext(orderId);
       if (couponInfo) {
         await incrementCouponUsage(couponInfo.couponId, couponInfo.userId).catch((err) =>
           console.error('Failed to track coupon usage:', err)
         );
-        pendingCouponMap.delete(orderId);
+        await clearPaymentCouponContext(orderId);
       }
 
       if (payment.plan === 'GOLDX_PULSE') {
         await setGoldxPulseStateFromPayment(req.user!.id, payment.verifiedAt || new Date().toISOString());
       } else {
-        await setBillingStateFromPayment(req.user!.id, payment.verifiedAt || new Date().toISOString(), payment.plan as Extract<SubscriptionTier, 'PRO' | 'TOP_TIER'>);
+        await setBillingStateFromPayment(
+          req.user!.id,
+          payment.verifiedAt || new Date().toISOString(),
+          (couponInfo?.grantPlan ?? payment.plan) as Extract<SubscriptionTier, 'PRO' | 'TOP_TIER'>,
+          couponInfo?.grantDurationDays ?? undefined,
+        );
       }
 
       // Process referral commission on successful payment

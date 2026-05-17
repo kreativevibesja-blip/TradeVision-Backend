@@ -319,6 +319,7 @@ export interface AnnouncementContentPayload {
 }
 
 export type CouponType = 'percentage' | 'fixed';
+export type CouponGrantPlan = Extract<SubscriptionTier, 'PRO' | 'TOP_TIER'>;
 
 export interface CouponRecord {
   id: string;
@@ -329,6 +330,9 @@ export interface CouponRecord {
   usedCount: number;
   perUserLimit: number;
   expiresAt: string | null;
+  overridePrice: number | null;
+  grantPlan: CouponGrantPlan | null;
+  grantDurationDays: number | null;
   active: boolean;
   createdAt: string;
   updatedAt: string;
@@ -1468,12 +1472,22 @@ const bucketByDay = <T>(rows: T[], getDate: (row: T) => string, getValue: (row: 
 
 // ---- Coupon helpers ----
 
-export const createCouponRecord = (values: Pick<CouponRecord, 'code' | 'type' | 'value' | 'maxUses' | 'perUserLimit'> & { expiresAt?: string | null }) =>
+export const createCouponRecord = (
+  values: Pick<CouponRecord, 'code' | 'type' | 'value' | 'maxUses' | 'perUserLimit'> & {
+    expiresAt?: string | null;
+    overridePrice?: number | null;
+    grantPlan?: CouponGrantPlan | null;
+    grantDurationDays?: number | null;
+  }
+) =>
   insertSingle<CouponRecord>('createCouponRecord', COUPON_TABLE, {
     ...values,
     code: values.code.toUpperCase().trim(),
     usedCount: 0,
     active: true,
+    overridePrice: values.overridePrice ?? null,
+    grantPlan: values.grantPlan ?? null,
+    grantDurationDays: values.grantDurationDays ?? null,
   });
 
 export const listCoupons = () =>

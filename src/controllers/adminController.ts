@@ -46,6 +46,7 @@ import { serializeAnalysis } from './analysisController';
 import { setBillingStateFromAdmin } from '../services/billing';
 import { getBillingSummaryForUser } from '../services/billing';
 import { setBillingStateFromPayment, setGoldxPulseStateFromPayment } from '../services/billing';
+import { clearPaymentCouponContext, getPaymentCouponContext } from '../services/paymentCouponContext';
 import { processReferralPayment } from '../services/referralService';
 import { sendPaymentReminderEmail } from '../services/paymentReminderEmail';
 import { sendRenewalReminderEmail } from '../services/renewalReminderEmail';
@@ -658,10 +659,20 @@ export const updatePaymentStatus = async (req: Request, res: Response) => {
     });
 
     if (existingPayment.status !== 'COMPLETED' && status === 'COMPLETED') {
+      const couponInfo = await getPaymentCouponContext(payment.paypalOrderId);
+      if (couponInfo) {
+        await clearPaymentCouponContext(payment.paypalOrderId);
+      }
+
       if (payment.plan === 'GOLDX_PULSE') {
         await setGoldxPulseStateFromPayment(payment.userId, now);
       } else {
-        await setBillingStateFromPayment(payment.userId, now, payment.plan === 'TOP_TIER' ? 'TOP_TIER' : 'PRO');
+        await setBillingStateFromPayment(
+          payment.userId,
+          now,
+          couponInfo?.grantPlan ?? (payment.plan === 'TOP_TIER' ? 'TOP_TIER' : 'PRO'),
+          couponInfo?.grantDurationDays ?? undefined,
+        );
       }
       await processReferralPayment(payment.userId, payment.amount ?? 0).catch((error) => {
         console.error('Failed to process referral payment from admin approval:', error);
