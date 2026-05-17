@@ -58,6 +58,9 @@ const DEFAULT_SUPPORT_WHATSAPP_NUMBER = '18762797956';
 const DEFAULT_SUPPORT_WHATSAPP_MESSAGE = 'Hi TradeVision AI, I need support.';
 const DEFAULT_ANNOUNCEMENT_POPUPS_ENABLED = true;
 const DEFAULT_ANNOUNCEMENT_POPUP_REPEAT_HOURS = 24;
+const FEEDBACK_TABLE = 'feedback';
+const FEEDBACK_ADMIN_SEEN_COLUMN = 'admin_seen';
+const FEEDBACK_ADMIN_SEEN_LEGACY_COLUMN = 'adminseen';
 
 const VALID_ANNOUNCEMENT_TYPES: AnnouncementType[] = ['update', 'maintenance', 'discount', 'new_feature', 'security', 'event'];
 const VALID_ANNOUNCEMENT_TARGET_PLANS = ['PRO', 'TOP_TIER', 'GOLDX', 'GOLDX_PULSE'] as const;
@@ -229,6 +232,91 @@ const getAnnouncementPopupSettings = async () => {
   };
 };
 
+const isMissingFeedbackColumnError = (error: unknown, columnName: string) => {
+  if (!error) {
+    return false;
+  }
+
+  const message = error instanceof Error
+    ? `${error.name} ${error.message}`.toLowerCase()
+    : JSON.stringify(error).toLowerCase();
+
+  return message.includes(columnName.toLowerCase()) && (message.includes('column') || message.includes('schema cache'));
+};
+
+const countUnreadFeedback = async () => {
+  try {
+    return await countRows('countUnreadFeedback', FEEDBACK_TABLE, (query) => query.eq(FEEDBACK_ADMIN_SEEN_COLUMN, false));
+  } catch (error) {
+    if (!isMissingFeedbackColumnError(error, FEEDBACK_ADMIN_SEEN_COLUMN)) {
+      throw error;
+    }
+
+    return countRows('countUnreadFeedbackLegacy', FEEDBACK_TABLE, (query) => query.eq(FEEDBACK_ADMIN_SEEN_LEGACY_COLUMN, false));
+  }
+};
+
+const listAdminFeedbackRows = async () => {
+  try {
+    const { data, error } = await supabase
+      .from(FEEDBACK_TABLE)
+      .select(`id,user_id,rating,reason,message,created_at,${FEEDBACK_ADMIN_SEEN_COLUMN}`)
+      .order('created_at', { ascending: false })
+      .limit(500);
+
+    if (error) {
+      throw error;
+    }
+
+    return (data ?? []).map((row) => ({ ...row, admin_seen: Boolean(row.admin_seen) }));
+  } catch (error) {
+    if (!isMissingFeedbackColumnError(error, FEEDBACK_ADMIN_SEEN_COLUMN)) {
+      throw error;
+    }
+
+    const { data, error: legacyError } = await supabase
+      .from(FEEDBACK_TABLE)
+      .select(`id,user_id,rating,reason,message,created_at,${FEEDBACK_ADMIN_SEEN_LEGACY_COLUMN}`)
+      .order('created_at', { ascending: false })
+      .limit(500);
+
+    if (legacyError) {
+      throw legacyError;
+    }
+
+    return (data ?? []).map((row) => ({
+      ...row,
+      admin_seen: Boolean((row as { adminseen?: boolean }).adminseen),
+    }));
+  }
+};
+
+const markFeedbackRowsSeen = async (ids: string[]) => {
+  try {
+    const { error } = await supabase
+      .from(FEEDBACK_TABLE)
+      .update({ [FEEDBACK_ADMIN_SEEN_COLUMN]: true })
+      .in('id', ids);
+
+    if (error) {
+      throw error;
+    }
+  } catch (error) {
+    if (!isMissingFeedbackColumnError(error, FEEDBACK_ADMIN_SEEN_COLUMN)) {
+      throw error;
+    }
+
+    const { error: legacyError } = await supabase
+      .from(FEEDBACK_TABLE)
+      .update({ [FEEDBACK_ADMIN_SEEN_LEGACY_COLUMN]: true })
+      .in('id', ids);
+
+    if (legacyError) {
+      throw legacyError;
+    }
+  }
+};
+
 export const getDashboardStats = async (_req: Request, res: Response) => {
   try {
     const jamaicaToday = getJamaicaTodayDate();
@@ -241,7 +329,7 @@ export const getDashboardStats = async (_req: Request, res: Response) => {
       getCompletedRevenue(),
       getLivePlatformMetrics(jamaicaToday, getJamaicaDayStartIso(jamaicaToday), getActiveVisitorSinceIso()),
       countRows('countPendingBankTransferPayments', PAYMENT_TABLE, (query) => query.eq('status', 'PENDING').eq('paymentMethod', 'BANK_TRANSFER')),
-      countRows('countUnreadFeedback', 'feedback', (query) => query.eq('admin_seen', false)),
+      countUnreadFeedback(),
     ]);
 
     return res.json({
@@ -263,7 +351,7 @@ export const getAdminWorkspaceBadges = async (_req: Request, res: Response) => {
   try {
     const [pendingBankTransferCount, feedbackUnreadCount] = await Promise.all([
       countRows('countPendingBankTransferPayments', PAYMENT_TABLE, (query) => query.eq('status', 'PENDING').eq('paymentMethod', 'BANK_TRANSFER')),
-      countRows('countUnreadFeedback', 'feedback', (query) => query.eq('admin_seen', false)),
+      countUnreadFeedback(),
     ]);
 
     return res.json({ pendingBankTransferCount, feedbackUnreadCount });
@@ -275,17 +363,8 @@ export const getAdminWorkspaceBadges = async (_req: Request, res: Response) => {
 
 export const getAdminFeedback = async (_req: Request, res: Response) => {
   try {
-    const { data, error } = await supabase
-      .from('feedback')
-      .select('id,user_id,rating,reason,message,created_at,admin_seen')
-      .order('created_at', { ascending: false })
-      .limit(500);
-
-    if (error) {
-      throw error;
-    }
-
-    return res.json({ rows: data ?? [] });
+    const rows = await listAdminFeedbackRows();
+    return res.json({ rows });
   } catch (error) {
     console.error('Admin feedback load error:', error);
     return res.status(500).json({ error: 'Failed to load feedback' });
@@ -302,14 +381,7 @@ export const markAdminFeedbackSeen = async (req: Request, res: Response) => {
       return res.json({ success: true, updated: 0 });
     }
 
-    const { error } = await supabase
-      .from('feedback')
-      .update({ admin_seen: true })
-      .in('id', ids);
-
-    if (error) {
-      throw error;
-    }
+    await markFeedbackRowsSeen(ids);
 
     return res.json({ success: true, updated: ids.length });
   } catch (error) {
