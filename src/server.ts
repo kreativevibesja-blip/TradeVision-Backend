@@ -23,6 +23,7 @@ import debugRoutes from './routes/debugRoutes';
 import { startQueueWorker } from './workers/queueWorker';
 import { startSystem } from './server/start';
 import { startRadarTracker } from './services/radarTracker';
+import { startSignalsMonitor } from './services/signalsMonitor';
 
 export const app = express();
 
@@ -112,4 +113,5 @@ export const startServer = () =>
     startQueueWorker();
     startSystem();
     startRadarTracker();
+    startSignalsMonitor();
   });
