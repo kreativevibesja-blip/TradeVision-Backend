@@ -74,7 +74,7 @@ export const supabase = createClient(config.supabase.url, config.supabase.servic
 
 const USER_TABLE = 'User';
 const ANALYSIS_TABLE = 'Analysis';
-const PAYMENT_TABLE = 'Payment';
+export const PAYMENT_TABLE = 'Payment';
 const PRICING_PLAN_TABLE = 'PricingPlan';
 const ANALYSIS_INTERACTIONS_TABLE = 'analysis_interactions';
 const SYSTEM_SETTINGS_TABLE = 'SystemSettings';
@@ -556,7 +556,7 @@ const many = async <T>(context: string, query: any): Promise<T[]> => {
   return (data as T[]) ?? [];
 };
 
-const countRows = async (context: string, table: string, apply?: (query: any) => any): Promise<number> => {
+export const countRows = async (context: string, table: string, apply?: (query: any) => any): Promise<number> => {
   let query = supabase.from(table).select('*', { count: 'exact', head: true });
   if (apply) {
     query = apply(query);

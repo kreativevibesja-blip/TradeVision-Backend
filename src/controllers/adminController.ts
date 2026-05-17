@@ -4,6 +4,7 @@ import path from 'path';
 import { Request, Response } from 'express';
 import {
   countAnalyses,
+  countRows,
   countUsers,
   createPricingPlan as createPricingPlanRecord,
   deleteAnnouncementRecord,
@@ -36,6 +37,7 @@ import {
   type AnnouncementContentPayload,
   type AnnouncementRecord,
   type AnnouncementType,
+  PAYMENT_TABLE,
   type PaymentMethod,
   updatePaymentById,
   supabase,
