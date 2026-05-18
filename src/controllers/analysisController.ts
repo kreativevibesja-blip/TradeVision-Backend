@@ -12,6 +12,8 @@ import {
   getAnalysisByIdForUser,
   getMonthlyAnalysisLimit,
   getUserById,
+  hasPaidSubscription,
+  hasTopTierAccess,
   listAnalysisInteractionsForUser,
   listAnalysesForUser,
   releaseUserDailyUsageReservation,
@@ -27,6 +29,7 @@ import { runAnalysisPipeline } from '../services/analysis/runAnalysisPipeline';
 import { getCachedCandles } from '../lib/db/saveCandles';
 import { getDerivLiveChartSnapshot, isSupportedDerivGranularity } from '../services/derivMarketData';
 import { fetchMarketDataForLiveChart, isSupportedLiveChartTimeframe, resolveLiveChartSymbol } from '../services/marketData';
+import { scanSignalsMarket, type SignalScanTarget } from '../services/signalsMonitor';
 import { runLiveChartAnalysisPipeline } from '../services/analysis/runLiveChartAnalysisPipeline';
 import { buildConfidenceThermometer, buildReactionChallengeResult, buildTradeReplay } from '../services/analysisInteractive';
 import { checkFeatureAccess } from '../middleware/checkFeatureAccess';
@@ -580,6 +583,80 @@ export const getDerivLiveChartMarketData = async (req: AuthRequest, res: Respons
     return res.json({ marketData });
   } catch (error: any) {
     return res.status(500).json({ error: error?.message || 'Unable to fetch Deriv live chart market data.' });
+  }
+};
+
+export const scanSignalsMarketData = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const source = req.body?.source === 'deriv' || req.body?.source === 'tradingview' ? req.body.source : null;
+    const timeframe = typeof req.body?.timeframe === 'string' ? req.body.timeframe.trim() : '';
+    const rawTargets = Array.isArray(req.body?.targets) ? req.body.targets : [];
+    const derivTimeframeGranularity: Record<string, number> = {
+      '1m': 60,
+      '5m': 300,
+      '15m': 900,
+      '30m': 1800,
+      '1H': 3600,
+      '4H': 14400,
+      '1D': 86400,
+    };
+
+    if (!source || !timeframe) {
+      return res.status(400).json({ error: 'Source and timeframe are required' });
+    }
+
+    const allowed = source === 'deriv'
+      ? hasTopTierAccess(req.user.subscription)
+      : hasPaidSubscription(req.user.subscription);
+
+    if (!allowed) {
+      return res.status(403).json({ error: 'Signals scanning is not available on your current plan' });
+    }
+
+    if (source === 'tradingview' && !isSupportedLiveChartTimeframe(timeframe)) {
+      return res.status(400).json({ error: 'Unsupported TradingView timeframe' });
+    }
+
+    if (source === 'deriv' && !isSupportedDerivGranularity(derivTimeframeGranularity[timeframe] ?? NaN)) {
+      return res.status(400).json({ error: 'Unsupported Deriv timeframe' });
+    }
+
+    const targets = rawTargets
+      .map((target: unknown): SignalScanTarget | null => {
+        if (!target || typeof target !== 'object') {
+          return null;
+        }
+
+        const record = target as Record<string, unknown>;
+        const symbol = typeof record.symbol === 'string' ? record.symbol.trim() : '';
+        if (!symbol) {
+          return null;
+        }
+
+        if (source === 'tradingview' && !resolveLiveChartSymbol(symbol)) {
+          return null;
+        }
+
+        return {
+          symbol,
+          symbolLabel: typeof record.symbolLabel === 'string' ? record.symbolLabel : undefined,
+          assetClass: typeof record.assetClass === 'string' ? record.assetClass : undefined,
+        };
+      })
+      .filter((target: SignalScanTarget | null): target is SignalScanTarget => Boolean(target));
+
+    if (targets.length === 0) {
+      return res.json({ signals: [], generatedAt: new Date().toISOString() });
+    }
+
+    const signals = await scanSignalsMarket(source, timeframe, targets);
+    return res.json({ signals, generatedAt: new Date().toISOString() });
+  } catch (error: any) {
+    return res.status(500).json({ error: error?.message || 'Unable to scan signals market data.' });
   }
 };
 

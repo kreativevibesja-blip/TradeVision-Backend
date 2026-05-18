@@ -32,6 +32,34 @@ interface SessionSignal {
   takeProfit: number;
   confidence: number;
   candleTime: number;
+  reason: string;
+  setupLabel: string;
+  executionNote: string;
+}
+
+export interface SignalScanTarget {
+  symbol: string;
+  symbolLabel?: string;
+  assetClass?: string;
+}
+
+export interface ActiveMarketSignal {
+  key: string;
+  source: SignalSource;
+  assetClass: string;
+  session: SignalSession;
+  direction: SignalDirection;
+  symbol: string;
+  symbolLabel: string;
+  timeframe: string;
+  entry: number;
+  stopLoss: number;
+  takeProfit: number;
+  confidence: number;
+  candleTime: number;
+  reason: string;
+  executionNote: string;
+  setupLabel: string;
 }
 
 interface SignalsWatchlistSetting {
@@ -220,6 +248,13 @@ const buildSignalsFromCandles = (source: SignalSource, symbol: string, timeframe
       takeProfit,
       confidence,
       candleTime: candle.time,
+      reason: bullishCross
+        ? 'Price reclaimed both EMAs, closed strong above the stack, and left risk tucked under the demand pocket.'
+        : 'Price reclaimed both EMAs to the downside, closed strong below the stack, and left risk tucked above the supply pocket.',
+      setupLabel: bullishCross ? 'EMA reclaim continuation' : 'EMA rejection continuation',
+      executionNote: bullishCross
+        ? 'Buy the close or the first shallow retest into the EMA stack.'
+        : 'Sell the close or the first shallow retest into the EMA stack.',
     });
   }
 
@@ -307,6 +342,66 @@ const fetchCandlesForWatchlist = async (watchlist: SignalsWatchlistSetting) => {
     close: candle.close,
   }));
 };
+
+export async function scanSignalsMarket(source: SignalSource, timeframe: string, targets: SignalScanTarget[]) {
+  const trimmedTargets = targets
+    .map((target) => ({
+      symbol: typeof target.symbol === 'string' ? target.symbol.trim() : '',
+      symbolLabel: typeof target.symbolLabel === 'string' ? target.symbolLabel.trim() : '',
+      assetClass: typeof target.assetClass === 'string' ? target.assetClass.trim() : '',
+    }))
+    .filter((target) => target.symbol.length > 0);
+
+  const timeframeSeconds = source === 'deriv'
+    ? DERIV_TIMEFRAME_GRANULARITY[timeframe] ?? 900
+    : TRADINGVIEW_TIMEFRAME_SECONDS[timeframe] ?? 900;
+
+  const freshnessWindow = Math.max(timeframeSeconds * 2, 12 * 60);
+  const nowSeconds = Math.floor(Date.now() / 1000);
+
+  const settled = await Promise.allSettled(
+    trimmedTargets.map(async (target) => {
+      const candles = await fetchCandlesForWatchlist({
+        userId: 'scan',
+        source,
+        symbol: target.symbol,
+        timeframe,
+        enabled: true,
+      });
+
+      return buildSignalsFromCandles(source, target.symbol, timeframe, candles)
+        .filter((signal) => nowSeconds - signal.candleTime <= freshnessWindow)
+        .map((signal) => ({
+          key: signal.key,
+          source,
+          assetClass: target.assetClass || 'Unclassified',
+          session: signal.session,
+          direction: signal.direction,
+          symbol: target.symbol,
+          symbolLabel: target.symbolLabel || target.symbol,
+          timeframe,
+          entry: signal.entry,
+          stopLoss: signal.stopLoss,
+          takeProfit: signal.takeProfit,
+          confidence: signal.confidence,
+          candleTime: signal.candleTime,
+          reason: signal.reason,
+          executionNote: signal.executionNote,
+          setupLabel: signal.setupLabel,
+        } satisfies ActiveMarketSignal));
+    }),
+  );
+
+  return settled
+    .flatMap((result) => (result.status === 'fulfilled' ? result.value : []))
+    .sort((left, right) => {
+      if (left.candleTime !== right.candleTime) {
+        return right.candleTime - left.candleTime;
+      }
+
+      return right.confidence - left.confidence;
+    });
+}
 
 const maybeDispatchSignals = async (watchlistKey: string, watchlist: SignalsWatchlistSetting, subscription: SubscriptionTier) => {
   if (!watchlist.enabled || !getAllowedForSource(subscription, watchlist.source)) {

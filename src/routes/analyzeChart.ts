@@ -8,6 +8,7 @@ import {
   getAnalysisConfidence,
   getAnalysisInteractions,
   getLiveChartMarketData,
+  scanSignalsMarketData,
   getTradeReplay,
   recordUploadError,
 } from '../controllers/analysisController';
@@ -22,6 +23,7 @@ router.post('/upload-errors', recordUploadError);
 router.post('/analyze-chart', authenticate, analysisLimiter, handleChartUpload, analyzeChart);
 router.get('/live-chart-market-data', authenticate, getLiveChartMarketData);
 router.get('/deriv-live-chart-market-data', authenticate, getDerivLiveChartMarketData);
+router.post('/signals-market-scan', authenticate, scanSignalsMarketData);
 router.get('/analyses', authenticate, getAnalyses);
 router.get('/analyses/:id', authenticate, getAnalysisById);
 router.get('/analysis/confidence/:analysisId', authenticate, requireFeatureAccess('confidenceThermometer'), getAnalysisConfidence);
