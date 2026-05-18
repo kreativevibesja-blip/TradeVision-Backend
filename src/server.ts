@@ -29,16 +29,33 @@ export const app = express();
 
 app.set('trust proxy', 1);
 
-const allowedOrigins = new Set(config.frontend.urls);
+const normalizeOrigin = (value: string) => {
+  try {
+    return new URL(value).origin;
+  } catch {
+    return value.replace(/\/$/, '').toLowerCase();
+  }
+};
+
+const allowedOrigins = new Set(config.frontend.urls.map(normalizeOrigin));
+const allowedHostnames = new Set(
+  config.frontend.urls
+    .map((value) => {
+      try {
+        return new URL(value).hostname.toLowerCase();
+      } catch {
+        return null;
+      }
+    })
+    .filter((value): value is string => Boolean(value)),
+);
 const previewDomains = config.frontend.previewDomains;
 
 const isAllowedOrigin = (origin: string) => {
-  if (allowedOrigins.has(origin)) {
-    return true;
-  }
+  const normalizedOrigin = normalizeOrigin(origin);
 
-  if (!previewDomains.length) {
-    return false;
+  if (allowedOrigins.has(normalizedOrigin)) {
+    return true;
   }
 
   try {
@@ -48,6 +65,14 @@ const isAllowedOrigin = (origin: string) => {
     }
 
     const normalizedHostname = hostname.toLowerCase();
+    if (allowedHostnames.has(normalizedHostname)) {
+      return true;
+    }
+
+    if (!previewDomains.length) {
+      return false;
+    }
+
     return previewDomains.some((domain) => normalizedHostname === domain || normalizedHostname.endsWith(`.${domain}`));
   } catch {
     return false;
