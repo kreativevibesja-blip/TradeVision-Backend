@@ -14,6 +14,9 @@ import { sendPushToUser } from './pushService';
 type SignalSource = 'deriv' | 'tradingview';
 type SignalSession = 'asian' | 'london' | 'newyork';
 type SignalDirection = 'buy' | 'sell';
+type SignalStatus = 'active' | 'running_profit' | 'tp_hit' | 'sl_hit' | 'expired';
+type SignalGrade = 'A+' | 'A' | 'B+';
+type SnapshotTone = 'bullish' | 'bearish' | 'neutral';
 
 interface SignalCandle {
   time: number;
@@ -35,6 +38,35 @@ interface SessionSignal {
   reason: string;
   setupLabel: string;
   executionNote: string;
+  currentPrice: number;
+  rrRatio: number;
+  grade: SignalGrade;
+  status: SignalStatus;
+  confluences: string[];
+  quality: {
+    structure: number;
+    liquidity: number;
+    fvg: number;
+    session: number;
+    trend: number;
+    volatility: number;
+    rr: number;
+  };
+  snapshot: {
+    candles: SignalCandle[];
+    annotations: Array<{
+      label: string;
+      candleTime: number;
+      price: number;
+      tone: SnapshotTone;
+    }>;
+    zones: Array<{
+      label: string;
+      top: number;
+      bottom: number;
+      tone: 'entry' | 'risk' | 'target' | 'demand' | 'supply' | 'value';
+    }>;
+  };
 }
 
 export interface SignalScanTarget {
@@ -60,6 +92,35 @@ export interface ActiveMarketSignal {
   reason: string;
   executionNote: string;
   setupLabel: string;
+  currentPrice: number;
+  rrRatio: number;
+  grade: SignalGrade;
+  status: SignalStatus;
+  confluences: string[];
+  quality: {
+    structure: number;
+    liquidity: number;
+    fvg: number;
+    session: number;
+    trend: number;
+    volatility: number;
+    rr: number;
+  };
+  snapshot: {
+    candles: SignalCandle[];
+    annotations: Array<{
+      label: string;
+      candleTime: number;
+      price: number;
+      tone: SnapshotTone;
+    }>;
+    zones: Array<{
+      label: string;
+      top: number;
+      bottom: number;
+      tone: 'entry' | 'risk' | 'target' | 'demand' | 'supply' | 'value';
+    }>;
+  };
 }
 
 interface SignalsWatchlistSetting {
@@ -104,6 +165,11 @@ const TRADINGVIEW_TIMEFRAME_SECONDS: Record<string, number> = {
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
+const round = (value: number, decimals = 4) => {
+  const factor = 10 ** decimals;
+  return Math.round(value * factor) / factor;
+};
+
 const average = (values: number[]) => {
   if (values.length === 0) {
     return 0;
@@ -111,6 +177,8 @@ const average = (values: number[]) => {
 
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 };
+
+const sum = (values: number[]) => values.reduce((total, value) => total + value, 0);
 
 const getNewYorkHour = (unixSeconds: number) => {
   const parts = new Intl.DateTimeFormat('en-US', {
@@ -154,6 +222,161 @@ const calculateEmaSeries = (candles: SignalCandle[], period: number) => {
   return points;
 };
 
+const findSwingHigh = (candles: SignalCandle[], index: number, strength = 2) => {
+  if (index <= strength || index >= candles.length - strength) {
+    return false;
+  }
+
+  const current = candles[index];
+  for (let offset = 1; offset <= strength; offset += 1) {
+    if (candles[index - offset].high >= current.high || candles[index + offset].high > current.high) {
+      return false;
+    }
+  }
+
+  return true;
+};
+
+const findSwingLow = (candles: SignalCandle[], index: number, strength = 2) => {
+  if (index <= strength || index >= candles.length - strength) {
+    return false;
+  }
+
+  const current = candles[index];
+  for (let offset = 1; offset <= strength; offset += 1) {
+    if (candles[index - offset].low <= current.low || candles[index + offset].low < current.low) {
+      return false;
+    }
+  }
+
+  return true;
+};
+
+const findPreviousSwing = (
+  candles: SignalCandle[],
+  index: number,
+  direction: 'high' | 'low',
+  strength = 2,
+) => {
+  for (let cursor = index - strength - 1; cursor >= strength; cursor -= 1) {
+    if (direction === 'high' ? findSwingHigh(candles, cursor, strength) : findSwingLow(candles, cursor, strength)) {
+      return candles[cursor];
+    }
+  }
+
+  return null;
+};
+
+const scoreToBucket = (value: number) => Math.round(clamp(value, 0, 100));
+
+const getSessionBoost = (session: SignalSession) => {
+  if (session === 'london') {
+    return 100;
+  }
+
+  if (session === 'newyork') {
+    return 96;
+  }
+
+  return 88;
+};
+
+const resolveSignalStatus = (
+  direction: SignalDirection,
+  currentPrice: number,
+  entry: number,
+  stopLoss: number,
+  takeProfit: number,
+  ageSeconds: number,
+  expirySeconds: number,
+): SignalStatus => {
+  if (direction === 'buy') {
+    if (currentPrice >= takeProfit) return 'tp_hit';
+    if (currentPrice <= stopLoss) return 'sl_hit';
+    if (ageSeconds >= expirySeconds) return 'expired';
+    if (currentPrice >= entry + (takeProfit - entry) * 0.35) return 'running_profit';
+    return 'active';
+  }
+
+  if (currentPrice <= takeProfit) return 'tp_hit';
+  if (currentPrice >= stopLoss) return 'sl_hit';
+  if (ageSeconds >= expirySeconds) return 'expired';
+  if (currentPrice <= entry - (entry - takeProfit) * 0.35) return 'running_profit';
+  return 'active';
+};
+
+const getGrade = (confidence: number): SignalGrade | null => {
+  if (confidence >= 92) return 'A+';
+  if (confidence >= 85) return 'A';
+  if (confidence >= 78) return 'B+';
+  return null;
+};
+
+const getMarketStructureRange = (candles: SignalCandle[], index: number, lookback = 24) => {
+  const window = candles.slice(Math.max(0, index - lookback), index + 1);
+  const high = Math.max(...window.map((candle) => candle.high));
+  const low = Math.min(...window.map((candle) => candle.low));
+  return {
+    high,
+    low,
+    midpoint: low + (high - low) / 2,
+  };
+};
+
+const getDecimalsForSymbol = (price: number) => {
+  if (Math.abs(price) >= 1000) return 2;
+  if (Math.abs(price) >= 10) return 3;
+  if (Math.abs(price) >= 1) return 4;
+  return 5;
+};
+
+const createSnapshot = (
+  candles: SignalCandle[],
+  signalIndex: number,
+  direction: SignalDirection,
+  entry: number,
+  stopLoss: number,
+  takeProfit: number,
+  rangeTop: number,
+  rangeBottom: number,
+  liquidityPrice: number,
+  bosPrice: number,
+  chochPrice: number,
+  fvgTop: number,
+  fvgBottom: number,
+) => {
+  const snapshotCandles = candles.slice(Math.max(0, signalIndex - 24), signalIndex + 8).map((candle) => ({
+    time: candle.time,
+    open: candle.open,
+    high: candle.high,
+    low: candle.low,
+    close: candle.close,
+  }));
+
+  return {
+    candles: snapshotCandles,
+    annotations: [
+      { label: 'BOS', candleTime: candles[signalIndex].time, price: bosPrice, tone: direction === 'buy' ? 'bullish' : 'bearish' as SnapshotTone },
+      { label: 'CHOCH', candleTime: candles[Math.max(signalIndex - 2, 0)].time, price: chochPrice, tone: 'neutral' as SnapshotTone },
+      { label: 'SWEEP', candleTime: candles[Math.max(signalIndex - 1, 0)].time, price: liquidityPrice, tone: direction === 'buy' ? 'bullish' : 'bearish' as SnapshotTone },
+      { label: 'FVG', candleTime: candles[signalIndex].time, price: direction === 'buy' ? fvgBottom : fvgTop, tone: direction === 'buy' ? 'bullish' : 'bearish' as SnapshotTone },
+      { label: direction === 'buy' ? 'DEMAND' : 'SUPPLY', candleTime: candles[Math.max(signalIndex - 1, 0)].time, price: direction === 'buy' ? rangeBottom : rangeTop, tone: direction === 'buy' ? 'bullish' : 'bearish' as SnapshotTone },
+    ],
+    zones: [
+      { label: 'ENTRY', top: entry, bottom: entry, tone: 'entry' as const },
+      { label: 'SL', top: stopLoss, bottom: stopLoss, tone: 'risk' as const },
+      { label: 'TP', top: takeProfit, bottom: takeProfit, tone: 'target' as const },
+      { label: direction === 'buy' ? 'FVG' : 'FVG', top: fvgTop, bottom: fvgBottom, tone: 'value' as const },
+      {
+        label: direction === 'buy' ? 'DEMAND' : 'SUPPLY',
+        top: rangeTop,
+        bottom: rangeBottom,
+        tone: direction === 'buy' ? 'demand' as const : 'supply' as const,
+      },
+    ],
+  };
+};
+
 const buildSignalsFromCandles = (source: SignalSource, symbol: string, timeframe: string, candles: SignalCandle[]) => {
   if (candles.length < 220) {
     return [] as SessionSignal[];
@@ -162,6 +385,7 @@ const buildSignalsFromCandles = (source: SignalSource, symbol: string, timeframe
   const ema50ByTime = new Map(calculateEmaSeries(candles, 50).map((point) => [point.time, point.value]));
   const ema200ByTime = new Map(calculateEmaSeries(candles, 200).map((point) => [point.time, point.value]));
   const latestTime = candles[candles.length - 1]?.time ?? 0;
+  const latestClose = candles[candles.length - 1]?.close ?? 0;
   const candidates: SessionSignal[] = [];
 
   for (let index = 200; index < candles.length; index += 1) {
@@ -180,8 +404,8 @@ const buildSignalsFromCandles = (source: SignalSource, symbol: string, timeframe
       continue;
     }
 
-    const rangeWindow = candles.slice(Math.max(0, index - 14), index + 1);
-    const zoneWindow = candles.slice(Math.max(0, index - 8), index + 1);
+    const rangeWindow = candles.slice(Math.max(0, index - 18), index + 1);
+    const zoneWindow = candles.slice(Math.max(0, index - 10), index + 1);
     const avgRange = average(rangeWindow.map((item) => Math.max(item.high - item.low, Number.EPSILON)));
     const range = Math.max(candle.high - candle.low, Number.EPSILON);
     const bodySize = Math.abs(candle.close - candle.open);
@@ -192,88 +416,165 @@ const buildSignalsFromCandles = (source: SignalSource, symbol: string, timeframe
     const emaSlopeStrength = ((ema50 - prevEma50) + (ema200 - prevEma200)) / Math.max(avgRange, Number.EPSILON);
     const bearishSlopeStrength = ((prevEma50 - ema50) + (prevEma200 - ema200)) / Math.max(avgRange, Number.EPSILON);
 
-    const bullishCross =
-      ema50 > ema200 &&
-      candle.close > topEma &&
-      previous.close <= Math.max(prevEma50, prevEma200) &&
-      candle.low <= topEma + avgRange * 0.18 &&
-      candle.close > candle.open &&
-      bodyRatio >= 0.48 &&
-      candle.close - topEma <= avgRange * 1.3;
+    const marketRange = getMarketStructureRange(candles, index, 24);
+    const previousSwingHigh = findPreviousSwing(candles, index, 'high');
+    const previousSwingLow = findPreviousSwing(candles, index, 'low');
 
-    const bearishCross =
-      ema50 < ema200 &&
-      candle.close < bottomEma &&
-      previous.close >= Math.min(prevEma50, prevEma200) &&
-      candle.high >= bottomEma - avgRange * 0.18 &&
-      candle.close < candle.open &&
-      bodyRatio >= 0.48 &&
-      bottomEma - candle.close <= avgRange * 1.3;
-
-    if (!bullishCross && !bearishCross) {
+    if (!previousSwingHigh || !previousSwingLow) {
       continue;
     }
 
+    const bullishBos = candle.close > previousSwingHigh.high + avgRange * 0.05;
+    const bearishBos = candle.close < previousSwingLow.low - avgRange * 0.05;
+    const bullishChoch = previous.close < ema50 && candle.close > ema50;
+    const bearishChoch = previous.close > ema50 && candle.close < ema50;
+    const recentLows = candles.slice(Math.max(0, index - 8), index).map((item) => item.low);
+    const recentHighs = candles.slice(Math.max(0, index - 8), index).map((item) => item.high);
+    const bullishSweep = recentLows.length > 0 && candle.low < Math.min(...recentLows) && candle.close > candle.open;
+    const bearishSweep = recentHighs.length > 0 && candle.high > Math.max(...recentHighs) && candle.close < candle.open;
+    const bullishFvg = index >= 2 && candle.low > candles[index - 2].high && bodySize >= avgRange * 0.7;
+    const bearishFvg = index >= 2 && candle.high < candles[index - 2].low && bodySize >= avgRange * 0.7;
+    const bullishPremiumDiscount = candle.close <= marketRange.midpoint + avgRange * 0.15;
+    const bearishPremiumDiscount = candle.close >= marketRange.midpoint - avgRange * 0.15;
+    const bullishTrendAligned = ema50 > ema200 && emaSlopeStrength > 0.04;
+    const bearishTrendAligned = ema50 < ema200 && bearishSlopeStrength > 0.04;
+    const relativeVolatility = avgRange / Math.max(Math.abs(candle.close), Number.EPSILON);
+    const volatilityOkay = relativeVolatility >= 0.0007 && relativeVolatility <= 0.028;
+    const session = getSessionForTime(candle.time);
+
+    const bullishSetup = bullishBos && bullishChoch && bullishSweep && bullishFvg && bullishPremiumDiscount && bullishTrendAligned && volatilityOkay;
+    const bearishSetup = bearishBos && bearishChoch && bearishSweep && bearishFvg && bearishPremiumDiscount && bearishTrendAligned && volatilityOkay;
+
+    if (!bullishSetup && !bearishSetup) {
+      continue;
+    }
+
+    const direction: SignalDirection = bullishSetup ? 'buy' : 'sell';
+    const zoneTop = direction === 'buy'
+      ? Math.max(...zoneWindow.map((item) => Math.max(item.open, item.close)))
+      : Math.max(...zoneWindow.map((item) => item.high));
+    const zoneBottom = direction === 'buy'
+      ? Math.min(...zoneWindow.map((item) => item.low))
+      : Math.min(...zoneWindow.map((item) => Math.min(item.open, item.close)));
+
     const stopBuffer = avgRange * 0.22;
     const entry = candle.close;
-    const stopLoss = bullishCross
-      ? Math.min(...zoneWindow.map((item) => item.low), bottomEma) - stopBuffer
-      : Math.max(...zoneWindow.map((item) => item.high), topEma) + stopBuffer;
-    const risk = bullishCross ? entry - stopLoss : stopLoss - entry;
+    const stopLoss = direction === 'buy'
+      ? Math.min(zoneBottom, previousSwingLow.low, bottomEma) - stopBuffer
+      : Math.max(zoneTop, previousSwingHigh.high, topEma) + stopBuffer;
+    const risk = direction === 'buy' ? entry - stopLoss : stopLoss - entry;
 
     if (!Number.isFinite(risk) || risk <= avgRange * 0.35 || risk >= avgRange * 6) {
       continue;
     }
 
-    const direction: SignalDirection = bullishCross ? 'buy' : 'sell';
-    const takeProfit = bullishCross ? entry + risk * 2 : entry - risk * 2;
-    const confidence = Math.round(
+    const targetLiquidity = direction === 'buy'
+      ? Math.max(...candles.slice(index, Math.min(candles.length, index + 18)).map((item) => item.high), entry + risk * 2.3)
+      : Math.min(...candles.slice(index, Math.min(candles.length, index + 18)).map((item) => item.low), entry - risk * 2.3);
+    const takeProfit = direction === 'buy'
+      ? Math.max(entry + risk * 2.2, targetLiquidity)
+      : Math.min(entry - risk * 2.2, targetLiquidity);
+    const rrRatio = Math.abs((takeProfit - entry) / Math.max(risk, Number.EPSILON));
+    const quality = {
+      structure: scoreToBucket(72 + bodyRatio * 18 + (direction === 'buy' ? (bullishBos ? 10 : 0) + (bullishChoch ? 8 : 0) : (bearishBos ? 10 : 0) + (bearishChoch ? 8 : 0))),
+      liquidity: scoreToBucket(70 + (direction === 'buy' ? (bullishSweep ? 16 : 0) : (bearishSweep ? 16 : 0)) + clamp((crossDistance / Math.max(avgRange, Number.EPSILON)) * 4, 0, 10)),
+      fvg: scoreToBucket(68 + (direction === 'buy' ? (bullishFvg ? 18 : 0) : (bearishFvg ? 18 : 0)) + bodyRatio * 10),
+      session: getSessionBoost(session),
+      trend: scoreToBucket(72 + clamp((direction === 'buy' ? emaSlopeStrength : bearishSlopeStrength) * 18, 0, 14) + (direction === 'buy' ? (bullishTrendAligned ? 10 : 0) : (bearishTrendAligned ? 10 : 0))),
+      volatility: scoreToBucket(volatilityOkay ? 86 + clamp((1 - Math.abs(relativeVolatility - 0.006) / 0.01) * 10, 0, 10) : 60),
+      rr: scoreToBucket(72 + clamp(rrRatio * 10, 0, 24)),
+    };
+    const weightedConfidence = Math.round(
       clamp(
-        58 +
-          bodyRatio * 18 +
-          clamp((crossDistance / Math.max(avgRange, Number.EPSILON)) * 5, 0, 10) +
-          clamp((bullishCross ? emaSlopeStrength : bearishSlopeStrength) * 9, 0, 10),
-        55,
-        96,
+        quality.structure * 0.22 +
+        quality.liquidity * 0.14 +
+        quality.fvg * 0.14 +
+        quality.session * 0.1 +
+        quality.trend * 0.16 +
+        quality.volatility * 0.08 +
+        quality.rr * 0.16,
+        65,
+        98,
       ),
     );
-    const session = getSessionForTime(candle.time);
+    const grade = getGrade(weightedConfidence);
+
+    if (!grade || rrRatio < 2) {
+      continue;
+    }
+
+    const ageSeconds = latestTime - candle.time;
+    const status = resolveSignalStatus(direction, latestClose, entry, stopLoss, takeProfit, ageSeconds, Math.max(6 * (latestTime - previous.time), 12 * 60 * 60));
+    const fvgTop = direction === 'buy' ? candle.low : candles[index - 2].low;
+    const fvgBottom = direction === 'buy' ? candles[index - 2].high : candle.high;
+    const sweepPrice = direction === 'buy' ? candle.low : candle.high;
+    const bosPrice = direction === 'buy' ? previousSwingHigh.high : previousSwingLow.low;
+    const chochPrice = direction === 'buy' ? ema50 : ema50;
+    const confluences = [
+      'BOS',
+      'CHOCH',
+      'Liquidity sweep',
+      direction === 'buy' ? 'Discount array' : 'Premium array',
+      'FVG displacement',
+      direction === 'buy' ? 'Fresh demand' : 'Fresh supply',
+      'HTF trend alignment',
+      `${session === 'newyork' ? 'New York' : session === 'london' ? 'London' : 'Asian'} session confirmation`,
+      'Volatility filter',
+      'RR filter',
+    ];
+    const decimals = getDecimalsForSymbol(entry);
+    const snapshot = createSnapshot(
+      candles,
+      index,
+      direction,
+      round(entry, decimals),
+      round(stopLoss, decimals),
+      round(takeProfit, decimals),
+      round(zoneTop, decimals),
+      round(zoneBottom, decimals),
+      round(sweepPrice, decimals),
+      round(bosPrice, decimals),
+      round(chochPrice, decimals),
+      round(Math.max(fvgTop, fvgBottom), decimals),
+      round(Math.min(fvgTop, fvgBottom), decimals),
+    );
 
     candidates.push({
       key: `${source}:${symbol}:${timeframe}:${session}:${direction}:${candle.time}`,
       session,
       direction,
-      entry,
-      stopLoss,
-      takeProfit,
-      confidence,
+      entry: round(entry, decimals),
+      stopLoss: round(stopLoss, decimals),
+      takeProfit: round(takeProfit, decimals),
+      confidence: weightedConfidence,
       candleTime: candle.time,
-      reason: bullishCross
-        ? 'Price reclaimed both EMAs, closed strong above the stack, and left risk tucked under the demand pocket.'
-        : 'Price reclaimed both EMAs to the downside, closed strong below the stack, and left risk tucked above the supply pocket.',
-      setupLabel: bullishCross ? 'EMA reclaim continuation' : 'EMA rejection continuation',
-      executionNote: bullishCross
-        ? 'Buy the close or the first shallow retest into the EMA stack.'
-        : 'Sell the close or the first shallow retest into the EMA stack.',
+      reason: direction === 'buy'
+        ? 'Liquidity was swept beneath discount, structure shifted higher, and displacement left a clean fair-value gap into demand.'
+        : 'Liquidity was swept above premium, structure shifted lower, and displacement left a clean fair-value gap into supply.',
+      setupLabel: direction === 'buy' ? 'SMC continuation displacement' : 'SMC reversal displacement',
+      executionNote: direction === 'buy'
+        ? 'Execute on the active entry while demand and imbalance remain intact under session momentum.'
+        : 'Execute on the active entry while supply and imbalance remain intact under session momentum.',
+      currentPrice: round(latestClose, decimals),
+      rrRatio: round(rrRatio, 2),
+      grade,
+      status,
+      confluences,
+      quality,
+      snapshot,
     });
   }
 
   const freshCandidates = candidates.filter((signal) => latestTime - signal.candleTime <= DAILY_SIGNAL_WINDOW_SECONDS);
-  const sessionOrder: SignalSession[] = ['asian', 'london', 'newyork'];
+  return freshCandidates
+    .sort((left, right) => {
+      if (left.confidence !== right.confidence) {
+        return right.confidence - left.confidence;
+      }
 
-  return sessionOrder.flatMap((session) => {
-    const topSignal = freshCandidates
-      .filter((signal) => signal.session === session)
-      .sort((left, right) => {
-        if (left.confidence !== right.confidence) {
-          return right.confidence - left.confidence;
-        }
-
-        return right.candleTime - left.candleTime;
-      })[0];
-
-    return topSignal ? [topSignal] : [];
-  });
+      return right.candleTime - left.candleTime;
+    })
+    .slice(0, 2);
 };
 
 const getWatchlistKey = (userId: string, source: SignalSource) => `${SIGNALS_WATCHLIST_PREFIX}${userId}:${source}`;
@@ -388,6 +689,13 @@ export async function scanSignalsMarket(source: SignalSource, timeframe: string,
           reason: signal.reason,
           executionNote: signal.executionNote,
           setupLabel: signal.setupLabel,
+          currentPrice: signal.currentPrice,
+          rrRatio: signal.rrRatio,
+          grade: signal.grade,
+          status: signal.status,
+          confluences: signal.confluences,
+          quality: signal.quality,
+          snapshot: signal.snapshot,
         } satisfies ActiveMarketSignal));
     }),
   );
@@ -395,12 +703,18 @@ export async function scanSignalsMarket(source: SignalSource, timeframe: string,
   return settled
     .flatMap((result) => (result.status === 'fulfilled' ? result.value : []))
     .sort((left, right) => {
+      const gradePriority: Record<SignalGrade, number> = { 'A+': 3, A: 2, 'B+': 1 };
+      if (gradePriority[left.grade] !== gradePriority[right.grade]) {
+        return gradePriority[right.grade] - gradePriority[left.grade];
+      }
+
       if (left.candleTime !== right.candleTime) {
         return right.candleTime - left.candleTime;
       }
 
       return right.confidence - left.confidence;
-    });
+    })
+    .slice(0, 16);
 }
 
 const maybeDispatchSignals = async (watchlistKey: string, watchlist: SignalsWatchlistSetting, subscription: SubscriptionTier) => {
@@ -429,8 +743,8 @@ const maybeDispatchSignals = async (watchlistKey: string, watchlist: SignalsWatc
     }
 
     await sendPushToUser(watchlist.userId, {
-      title: `${watchlist.symbolLabel ?? watchlist.symbol} ${signal.direction.toUpperCase()} signal`,
-      body: `${signal.session.toUpperCase()} · ${watchlist.timeframe} · Entry ${signal.entry} · SL ${signal.stopLoss} · TP ${signal.takeProfit}`,
+      title: `${watchlist.symbolLabel ?? watchlist.symbol} ${signal.direction.toUpperCase()} ${signal.grade}`,
+      body: `${signal.session.toUpperCase()} · ${watchlist.timeframe} · ${signal.confidence}% confidence · Entry ${signal.entry} · TP ${signal.takeProfit}`,
       tag: `signals-monitor:${signal.key}`,
       url: watchlist.source === 'tradingview' ? '/dashboard/tradingview' : '/dashboard/signals',
     });
