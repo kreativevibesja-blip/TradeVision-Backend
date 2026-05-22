@@ -20,9 +20,11 @@ import radarRoutes from './routes/radarRoutes';
 import goldxRoutes from './routes/goldx';
 import goldxPulseRoutes from './routes/goldxPulseRoutes';
 import debugRoutes from './routes/debugRoutes';
+import findTradeRoutes from './routes/findTradeRoutes';
 import { startQueueWorker } from './workers/queueWorker';
 import { startSystem } from './server/start';
 import { startRadarTracker } from './services/radarTracker';
+import { startFindTradeMonitor } from './services/findTradeService';
 import { startSignalsMonitor } from './services/signalsMonitor';
 
 export const app = express();
@@ -114,6 +116,7 @@ app.use('/api/radar', radarRoutes);
 app.use('/api/goldx', goldxRoutes);
 app.use('/api/goldx-pulse', goldxPulseRoutes);
 app.use('/api/debug', debugRoutes);
+app.use('/api', findTradeRoutes);
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
@@ -139,4 +142,5 @@ export const startServer = () =>
     startSystem();
     startRadarTracker();
     startSignalsMonitor();
+    startFindTradeMonitor();
   });
