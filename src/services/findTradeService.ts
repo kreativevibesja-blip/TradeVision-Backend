@@ -324,6 +324,9 @@ const DEFAULT_NOTIFICATION_FREQUENCY_MINUTES = 180;
 const DEFAULT_TRADINGVIEW_TIMEFRAME = 'M15';
 const DEFAULT_DERIV_TIMEFRAME = '15m';
 const FORCE_TEST_SIGNALS = /^true$/i.test(process.env.FORCE_TEST_SIGNALS ?? '');
+const PRIMARY_SIGNAL_MIN_SCORE = 64;
+const PRIMARY_SIGNAL_FALLBACK_MIN_SCORE = 58;
+const PRIMARY_SIGNAL_FALLBACK_MIN_CONFIDENCE = 72;
 
 const CATEGORY_KEYS: Record<FindTradeCategory, string> = {
   forex: 'find_trade_category_forex_enabled',
@@ -504,6 +507,17 @@ function buildNoTradeMessage(errors: string[]) {
   }
 
   return 'Market conditions currently lack high-confluence opportunities. The system recommends patience.';
+}
+
+function pickBestCandidate(candidates: ScanSignalCandidate[]) {
+  const primaryCandidate = candidates.find((candidate) => candidate.weightedScore >= PRIMARY_SIGNAL_MIN_SCORE && candidate.qualityGrade !== 'C');
+  if (primaryCandidate) {
+    return primaryCandidate;
+  }
+
+  return candidates.find(
+    (candidate) => candidate.weightedScore >= PRIMARY_SIGNAL_FALLBACK_MIN_SCORE && candidate.signal.confidence >= PRIMARY_SIGNAL_FALLBACK_MIN_CONFIDENCE,
+  ) ?? null;
 }
 
 function getMonitoringMessage(status: TrackingStatus, direction: 'buy' | 'sell', progressPercent: number) {
@@ -931,7 +945,7 @@ export async function runFindTradeScan(userId: string, mode: ScanMode = 'on_dema
   await archiveCurrentActiveScan(userId, 'archived');
 
   const { candidates, enabledCategories, errors } = await collectScanCandidates();
-  const bestCandidate = candidates.find((candidate) => candidate.weightedScore >= 80 && candidate.qualityGrade !== 'C') ?? null;
+  const bestCandidate = pickBestCandidate(candidates);
   const developingCandidates = candidates
     .filter((candidate) => candidate.signal.key !== bestCandidate?.signal.key)
     .slice(0, 3);
@@ -946,6 +960,8 @@ export async function runFindTradeScan(userId: string, mode: ScanMode = 'on_dema
       forceTestSignals: FORCE_TEST_SIGNALS,
       totalCandidates: candidates.length,
       bestScore: bestCandidate?.weightedScore ?? null,
+      bestThreshold: PRIMARY_SIGNAL_MIN_SCORE,
+      fallbackThreshold: PRIMARY_SIGNAL_FALLBACK_MIN_SCORE,
       scanErrors: errors,
     },
     generated_at: new Date().toISOString(),
