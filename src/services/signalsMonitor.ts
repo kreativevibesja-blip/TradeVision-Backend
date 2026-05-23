@@ -7,6 +7,7 @@ import {
   upsertSystemSetting,
   type SubscriptionTier,
 } from '../lib/supabase';
+import { isSupportedDerivSymbolId } from '../lib/deriv/symbols';
 import { fetchMarketDataForLiveChart, isSupportedLiveChartTimeframe, resolveLiveChartSymbol } from './marketData';
 import { getDerivHistoryCandles } from '../lib/deriv/ws';
 import { sendPushToUser } from './pushService';
@@ -613,6 +614,39 @@ const parseWatchlistValue = (value: unknown): SignalsWatchlistSetting | null => 
   };
 };
 
+const DERIV_HISTORY_COUNTS = [500, 300, 200, 120] as const;
+
+const isRetryableDerivHistoryError = (error: unknown) => {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  return /sorry, an error occurred while processing your request|history|ticks_history|candles/i.test(error.message);
+};
+
+const getDerivWatchlistCandles = async (watchlist: SignalsWatchlistSetting, granularity: number) => {
+  if (!isSupportedDerivSymbolId(watchlist.symbol)) {
+    throw new Error(`Unsupported Deriv watchlist symbol: ${watchlist.symbol}`);
+  }
+
+  let lastError: Error | null = null;
+
+  for (const count of DERIV_HISTORY_COUNTS) {
+    try {
+      return await getDerivHistoryCandles(watchlist.symbol, granularity, count);
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error('Unknown Deriv history error');
+      if (!isRetryableDerivHistoryError(error) || count === DERIV_HISTORY_COUNTS[DERIV_HISTORY_COUNTS.length - 1]) {
+        break;
+      }
+    }
+  }
+
+  throw new Error(
+    `Failed to fetch Deriv watchlist candles for ${watchlist.symbol} ${watchlist.timeframe}: ${lastError?.message ?? 'Unknown error'}`,
+  );
+};
+
 const fetchCandlesForWatchlist = async (watchlist: SignalsWatchlistSetting) => {
   if (watchlist.source === 'tradingview') {
     if (!isSupportedLiveChartTimeframe(watchlist.timeframe) || !resolveLiveChartSymbol(watchlist.symbol)) {
@@ -634,7 +668,7 @@ const fetchCandlesForWatchlist = async (watchlist: SignalsWatchlistSetting) => {
     throw new Error('Unsupported Deriv watchlist timeframe');
   }
 
-  const candles = await getDerivHistoryCandles(watchlist.symbol, granularity, 500);
+  const candles = await getDerivWatchlistCandles(watchlist, granularity);
   return candles.map((candle) => ({
     time: candle.time,
     open: candle.open,
@@ -791,7 +825,10 @@ async function tick() {
       try {
         await maybeDispatchSignals(setting.key, watchlist, user.subscription);
       } catch (error) {
-        console.error(`[signals-monitor] failed for ${setting.key}:`, error);
+        console.error(
+          `[signals-monitor] failed for ${setting.key} (${watchlist.source}:${watchlist.symbol}:${watchlist.timeframe}):`,
+          error,
+        );
       }
     }
   } catch (error) {

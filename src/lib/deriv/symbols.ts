@@ -3,6 +3,8 @@ export interface DerivScannerSymbolConfig {
   aliases: string[];
 }
 
+const normalizeSymbolId = (value: string) => value.trim().toUpperCase();
+
 function buildAliases(symbol: string, extras: string[] = []) {
   const compact = symbol.toLowerCase();
   const slash = symbol.length === 6 ? `${symbol.slice(0, 3)}/${symbol.slice(3)}`.toLowerCase() : compact;
@@ -113,3 +115,12 @@ export const VOLATILITY_SCANNER_SYMBOL_IDS = [
 ] as const;
 
 export const DERIV_SCANNER_SYMBOL_IDS = [...SESSION_SCANNER_SYMBOL_IDS, ...VOLATILITY_SCANNER_SYMBOL_IDS];
+
+const SUPPORTED_DERIV_SYMBOL_IDS = new Set(
+  [
+    ...DERIV_SCANNER_SYMBOLS.map((item) => item.symbol),
+    ...VOLATILITY_SCANNER_SYMBOL_IDS,
+  ].map(normalizeSymbolId),
+);
+
+export const isSupportedDerivSymbolId = (value: string) => SUPPORTED_DERIV_SYMBOL_IDS.has(normalizeSymbolId(value));

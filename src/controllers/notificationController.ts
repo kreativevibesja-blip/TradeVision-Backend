@@ -1,6 +1,7 @@
 import type { Response } from 'express';
 import type { AuthRequest } from '../middleware/auth';
 import { hasPaidSubscription, hasTopTierAccess } from '../lib/supabase';
+import { isSupportedDerivSymbolId } from '../lib/deriv/symbols';
 import { isSupportedLiveChartTimeframe, resolveLiveChartSymbol } from '../services/marketData';
 import { savePushSubscription, removePushSubscription, sendPushToUser } from '../services/pushService';
 import { getSignalsWatchlist, saveSignalsWatchlist } from '../services/signalsMonitor';
@@ -17,7 +18,7 @@ const isSupportedWatchlist = (source: 'deriv' | 'tradingview', symbol: string, t
     return Boolean(resolveLiveChartSymbol(symbol)) && isSupportedLiveChartTimeframe(timeframe);
   }
 
-  return VALID_DERIV_TIMEFRAMES.has(timeframe);
+  return VALID_DERIV_TIMEFRAMES.has(timeframe) && isSupportedDerivSymbolId(symbol);
 };
 
 // POST /api/notifications/subscribe
