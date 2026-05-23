@@ -85,6 +85,9 @@ const mapEntryType = (
   return entryType === 'confirmation' ? 'continuation' : 'reversal';
 };
 
+const shouldValidateCurrentPriceAgainstEntry = (entryType: VisionAnalysisResult['entryPlan']['entryType']) =>
+  entryType === 'instant' || entryType === 'confirmation';
+
 const mapConfirmation = (
   confirmation: VisionAnalysisResult['entryPlan']['confirmation']
 ): 'bos' | 'choch' | 'rejection' | 'none' => {
@@ -245,7 +248,9 @@ export function generateFinalSignal(aiData: VisionAnalysisResult, currentPrice: 
     aiData.riskManagement.invalidationLevel
   );
 
-  const shouldValidateEntry = signalType !== 'wait' && aiData.entryPlan.entryType !== 'none';
+  const shouldValidateEntry = signalType !== 'wait'
+    && aiData.entryPlan.entryType !== 'none'
+    && shouldValidateCurrentPriceAgainstEntry(aiData.entryPlan.entryType);
   const hasValidEntry = !shouldValidateEntry || validateEntry(entryZone, currentPrice);
   const matchesWinningModel = !shouldValidateEntry || hasWinningTradeConfluence(aiData, currentPrice);
 

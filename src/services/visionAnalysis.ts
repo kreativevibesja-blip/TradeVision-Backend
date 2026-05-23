@@ -34,7 +34,7 @@ export interface SMCPricePosition {
 
 export interface SMCEntryPlan {
   bias: 'buy' | 'sell' | 'none';
-  entryType: 'instant' | 'confirmation' | 'none';
+  entryType: 'instant' | 'limit' | 'confirmation' | 'none';
   entryZone: SMCZone | null;
   confirmation: 'CHoCH' | 'BOS' | 'rejection' | 'none';
   reason: string;
@@ -43,7 +43,7 @@ export interface SMCEntryPlan {
 export interface SMCCounterTrendPlan {
   action: 'enter' | 'wait' | 'avoid';
   bias: 'buy' | 'sell' | 'none';
-  entryType: 'instant' | 'confirmation' | 'none';
+  entryType: 'instant' | 'limit' | 'confirmation' | 'none';
   entryZone: SMCZone | null;
   confirmation: 'CHoCH' | 'BOS' | 'rejection' | 'none';
   reason: string;
@@ -242,7 +242,7 @@ const normalizeEntryType = (value: unknown): SMCEntryPlan['entryType'] => {
   }
 
   const normalized = value.trim().toLowerCase();
-  if (normalized === 'instant' || normalized === 'confirmation') {
+  if (normalized === 'instant' || normalized === 'limit' || normalized === 'confirmation') {
     return normalized;
   }
 
@@ -795,7 +795,7 @@ export async function analyzeVisionStructure(
   },
   "entry_plan": {
     "bias": "buy | sell | none",
-    "entry_type": "instant | confirmation | none",
+    "entry_type": "instant | limit | confirmation | none",
     "entry_zone": {
       "min": number | null,
       "max": number | null
@@ -805,7 +805,7 @@ export async function analyzeVisionStructure(
   "counter_trend_plan": {
     "action": "enter | wait | avoid",
     "bias": "buy | sell | none",
-    "entry_type": "instant | confirmation | none",
+    "entry_type": "instant | limit | confirmation | none",
     "entry_zone": { "min": number | null, "max": number | null },
     "confirmation": "CHoCH | BOS | rejection | none",
     "reason": "Brief reason for the aggressive counter-trend idea",
@@ -819,7 +819,7 @@ export async function analyzeVisionStructure(
   "left_side_plan": {
     "action": "enter | wait | avoid",
     "bias": "buy | sell | none",
-    "entry_type": "instant | confirmation | none",
+    "entry_type": "instant | limit | confirmation | none",
     "entry_zone": { "min": number | null, "max": number | null },
     "confirmation": "CHoCH | BOS | rejection | none",
     "reason": "string",
@@ -863,7 +863,7 @@ STRICT RULES (DO NOT BREAK)
 4. Distinguish inducement from the main liquidity target when visible.
 5. Justify supply and demand zones.
 6. Include an invalidation level.
-7. If price is not in a key zone, entry_type MUST be "none".
+7. If price is not in or clearly rotating back toward a valid POI, entry_type MUST be "none".
 8. If structure is unclear, setup_rating MUST be "avoid".
 9. setup_rating must be "A+" for strong confluence, "B" for weaker but valid structure, otherwise "avoid".
 10. Zone min and max must be tight.
@@ -1021,7 +1021,9 @@ STEP 6 - CONFIRMATION LOGIC
 STEP 7 - EXECUTION RULES
 ================================
 
-- Prefer LIMIT entries over market entries
+- Use "instant" only when current price is already at the valid POI and confirmations are complete.
+- Use "limit" when the idea is valid but price should retrace into the POI before entry, without needing an extra structure confirmation after the retrace.
+- Use "confirmation" when price still needs an additional close-confirmed CHoCH, BOS, or rejection after touching the POI.
 - Entry must be after the confirmation candle closes and never from a random level
 - Stop loss must sit at the structural invalidation level that proves the idea wrong
 - Plan targets at prior highs/lows, equal highs/lows, and obvious liquidity pools before approving the trade
@@ -1066,7 +1068,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
   },
   "entry_plan": {
     "bias": "buy | sell | none",
-    "entry_type": "instant | confirmation | none",
+    "entry_type": "instant | limit | confirmation | none",
     "entry_zone": {
       "min": number | null,
       "max": number | null
@@ -1076,7 +1078,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
   "counter_trend_plan": {
     "action": "enter | wait | avoid",
     "bias": "buy | sell | none",
-    "entry_type": "instant | confirmation | none",
+    "entry_type": "instant | limit | confirmation | none",
     "entry_zone": { "min": number | null, "max": number | null },
     "confirmation": "CHoCH | BOS | rejection | none",
     "reason": "Explain the support/resistance rejection logic behind the aggressive counter-trend idea",
@@ -1092,7 +1094,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
   "left_side_plan": {
     "action": "enter | wait | avoid",
     "bias": "buy | sell | none",
-    "entry_type": "instant | confirmation | none",
+    "entry_type": "instant | limit | confirmation | none",
     "entry_zone": { "min": number | null, "max": number | null },
     "confirmation": "CHoCH | BOS | rejection | none",
     "reason": "Explain the older left-side zone and why it could become tradable if price returns there later",
@@ -1605,7 +1607,9 @@ STEP 4 - CONFIRMATION SYSTEM
 STEP 5 - TRADE EXECUTION RULES
 ================================
 
-- Prefer LIMIT entries over market entries
+- Use "instant" only when current price is already at the valid POI and confirmations are complete.
+- Use "limit" when the setup is valid but price should retrace into the POI before entry, without needing another confirmation after the revisit.
+- Use "confirmation" when price still needs an additional close-confirmed trigger after touching the POI.
 - Entry must be at POI
 - Entry must be after the confirmation candle closes, never from a random level
 - Stop loss must be placed at the structural invalidation swing that proves the setup wrong
@@ -1651,7 +1655,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
   },
   "entry_plan": {
     "bias": "buy | sell | none",
-    "entry_type": "instant | confirmation | none",
+    "entry_type": "instant | limit | confirmation | none",
     "entry_zone": {
       "min": number | null,
       "max": number | null
@@ -1661,7 +1665,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
   "counter_trend_plan": {
     "action": "enter | wait | avoid",
     "bias": "buy | sell | none",
-    "entry_type": "instant | confirmation | none",
+    "entry_type": "instant | limit | confirmation | none",
     "entry_zone": { "min": number | null, "max": number | null },
     "confirmation": "CHoCH | BOS | rejection | none",
     "reason": "Explain the support/resistance rejection logic behind the aggressive counter-trend idea",
@@ -1677,7 +1681,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
   "left_side_plan": {
     "action": "enter | wait | avoid",
     "bias": "buy | sell | none",
-    "entry_type": "instant | confirmation | none",
+    "entry_type": "instant | limit | confirmation | none",
     "entry_zone": { "min": number | null, "max": number | null },
     "confirmation": "CHoCH | BOS | rejection | none",
     "reason": "Explain the older left-side zone and why it could become tradable if price returns there later",

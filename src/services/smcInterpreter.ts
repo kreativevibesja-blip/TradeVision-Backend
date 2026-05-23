@@ -15,6 +15,7 @@ export function interpretSMC(aiData: VisionAnalysisResult): InterpretedSMCResult
   const lowQuality = aiData.quality.setupRating === 'avoid';
   const waitingAction = aiData.finalVerdict.action === 'wait';
   const avoidAction = aiData.finalVerdict.action === 'avoid';
+  const limitEntry = aiData.entryPlan.entryType === 'limit';
   const confirmationNeeded = aiData.entryPlan.entryType === 'confirmation';
 
   if (lowQuality || structureUnclear || avoidAction) {
@@ -43,6 +44,16 @@ export function interpretSMC(aiData: VisionAnalysisResult): InterpretedSMCResult
       recommendation: 'pending',
       signalType: 'pending',
       confirmationNeeded: true,
+      message: aiData.finalVerdict.message,
+    };
+  }
+
+  if (limitEntry) {
+    return {
+      ...aiData,
+      recommendation: 'pending',
+      signalType: 'pending',
+      confirmationNeeded: false,
       message: aiData.finalVerdict.message,
     };
   }

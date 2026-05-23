@@ -64,7 +64,7 @@ const normalizeBias = (value: unknown): VisionAnalysisResult['entryPlan']['bias'
 
 const normalizeEntryType = (value: unknown): VisionAnalysisResult['entryPlan']['entryType'] => {
   const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
-  return normalized === 'instant' || normalized === 'confirmation' ? normalized : 'none';
+  return normalized === 'instant' || normalized === 'limit' || normalized === 'confirmation' ? normalized : 'none';
 };
 
 const normalizeConfirmation = (value: unknown): VisionAnalysisResult['entryPlan']['confirmation'] => {
@@ -539,7 +539,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
   },
   "entry_plan": {
     "bias": "buy | sell | none",
-    "entry_type": "instant | confirmation | none",
+    "entry_type": "instant | limit | confirmation | none",
     "entry_zone": {
       "min": number | null,
       "max": number | null
@@ -550,7 +550,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
   "counter_trend_plan": {
     "action": "enter | wait | avoid",
     "bias": "buy | sell | none",
-    "entry_type": "instant | confirmation | none",
+    "entry_type": "instant | limit | confirmation | none",
     "entry_zone": { "min": number | null, "max": number | null },
     "confirmation": "CHoCH | BOS | rejection | none",
     "reason": "Explain the support/resistance rejection logic behind the aggressive counter-trend idea",
@@ -564,7 +564,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
   "left_side_plan": {
     "action": "enter | wait | avoid",
     "bias": "buy | sell | none",
-    "entry_type": "instant | confirmation | none",
+    "entry_type": "instant | limit | confirmation | none",
     "entry_zone": { "min": number | null, "max": number | null },
     "confirmation": "CHoCH | BOS | rejection | none",
     "reason": "Explain the older left-side zone and why it could become tradable if price returns there later",
