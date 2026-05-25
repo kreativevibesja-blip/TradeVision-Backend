@@ -100,6 +100,7 @@ const AUTO_TRADE_LOG_TABLE = 'AutoTradeLog';
 const AUTO_PERFORMANCE_TABLE = 'AutoPerformance';
 const TRACKED_TRADE_TABLE = 'TrackedTrade';
 const POLICY_ACCEPTANCE_TABLE = 'policy_acceptance';
+const USER_ONBOARDING_TABLE = 'user_onboarding_profiles';
 
 export type SubscriptionTier = 'FREE' | 'PRO' | 'TOP_TIER' | 'VIP_AUTO_TRADER';
 export type BillingPlan = SubscriptionTier | 'GOLDX_PULSE';
@@ -174,6 +175,24 @@ export interface UserRecord {
   banned: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface UserOnboardingResponses {
+  traderLevel: string | null;
+  markets: string[];
+  biggestChallenge: string | null;
+  primaryGoal: string | null;
+  assistanceModes: string[];
+}
+
+export interface UserOnboardingRecord {
+  id: string;
+  user_id: string;
+  completed: boolean;
+  responses: UserOnboardingResponses;
+  mentor_summary: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface AnalysisRecord {
@@ -647,6 +666,34 @@ export const createUser = async (values: Partial<UserRecord> & Pick<UserRecord, 
 
 export const updateUser = (id: string, values: Partial<UserRecord>) =>
   updateSingle<UserRecord>('updateUser', USER_TABLE, values, (query) => query.eq('id', id));
+
+export const getUserOnboardingProfile = (userId: string) =>
+  maybeSingle<UserOnboardingRecord>('getUserOnboardingProfile', supabase.from(USER_ONBOARDING_TABLE).select('*').eq('user_id', userId).maybeSingle());
+
+export const upsertUserOnboardingProfile = async (
+  userId: string,
+  values: {
+    completed: boolean;
+    responses: UserOnboardingResponses;
+    mentor_summary: string;
+  }
+) => {
+  const query = supabase
+    .from(USER_ONBOARDING_TABLE)
+    .upsert(
+      {
+        user_id: userId,
+        completed: values.completed,
+        responses: values.responses,
+        mentor_summary: values.mentor_summary,
+      },
+      { onConflict: 'user_id' }
+    )
+    .select('*')
+    .maybeSingle();
+
+  return single<UserOnboardingRecord>('upsertUserOnboardingProfile', query);
+};
 
 export const listUsersPage = async (
   search: string | undefined,
