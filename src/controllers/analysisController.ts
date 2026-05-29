@@ -9,8 +9,10 @@ import {
   countAnalysesForUserSince,
   createAnalysis,
   createAnalysisInteraction,
+  getPaidAnalysisLimit,
+  getPaidAnalysisPeriod,
+  getPaidUsageWindowStart,
   getAnalysisByIdForUser,
-  getMonthlyAnalysisLimit,
   getUserById,
   hasPaidSubscription,
   hasTopTierAccess,
@@ -105,20 +107,6 @@ const parseInlineImage = (value: unknown) => {
     mimeType: 'image/jpeg',
     base64Image: trimmed,
   };
-};
-
-const getMonthStartIso = () => {
-  const now = new Date();
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0)).toISOString();
-};
-
-const getPaidUsageWindowStart = (lastUsageReset?: string | null) => {
-  const monthStartIso = getMonthStartIso();
-  if (lastUsageReset && lastUsageReset > monthStartIso) {
-    return lastUsageReset;
-  }
-
-  return monthStartIso;
 };
 
 const classifyUploadFailure = (value: unknown): UploadErrorType => {
@@ -276,13 +264,16 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
         return res.status(400).json({ error: 'At least 50 Deriv candles are required for persisted live analysis' });
       }
 
-      const monthlyUsage = await countAnalysesForUserSince(req.user!.id, getPaidUsageWindowStart(user.lastUsageReset));
-      const monthlyLimit = getMonthlyAnalysisLimit(user.subscription);
-      if (monthlyUsage >= monthlyLimit) {
+      const usageWindowStart = getPaidUsageWindowStart(user.subscription, user.lastUsageReset);
+      const paidUsage = await countAnalysesForUserSince(req.user!.id, usageWindowStart);
+      const paidLimit = getPaidAnalysisLimit(user.subscription);
+      const paidPeriod = getPaidAnalysisPeriod(user.subscription);
+      if (paidUsage >= paidLimit) {
         return res.status(429).json({
-          error: 'Monthly fair use limit reached',
-          limit: monthlyLimit,
-          usage: monthlyUsage,
+          error: `${paidPeriod === 'week' ? 'Weekly' : 'Monthly'} fair use limit reached`,
+          limit: paidLimit,
+          usage: paidUsage,
+          period: paidPeriod,
         });
       }
 
@@ -402,13 +393,16 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
 
     // ── PRO PATH: process instantly (no queue) ──────────────────────
     if (user.subscription !== 'FREE') {
-      const monthlyUsage = await countAnalysesForUserSince(req.user!.id, getPaidUsageWindowStart(user.lastUsageReset));
-      const monthlyLimit = getMonthlyAnalysisLimit(user.subscription);
-      if (monthlyUsage >= monthlyLimit) {
+      const usageWindowStart = getPaidUsageWindowStart(user.subscription, user.lastUsageReset);
+      const paidUsage = await countAnalysesForUserSince(req.user!.id, usageWindowStart);
+      const paidLimit = getPaidAnalysisLimit(user.subscription);
+      const paidPeriod = getPaidAnalysisPeriod(user.subscription);
+      if (paidUsage >= paidLimit) {
         return res.status(429).json({
-          error: 'Monthly fair use limit reached',
-          limit: monthlyLimit,
-          usage: monthlyUsage,
+          error: `${paidPeriod === 'week' ? 'Weekly' : 'Monthly'} fair use limit reached`,
+          limit: paidLimit,
+          usage: paidUsage,
+          period: paidPeriod,
         });
       }
 

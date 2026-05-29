@@ -159,7 +159,27 @@ const DEFAULT_USER_TRADING_SETTINGS: Omit<UserTradingSettingsRecord, 'user_id' |
 export const hasPaidSubscription = (subscription: SubscriptionTier | string) => subscription === 'PRO' || subscription === 'TOP_TIER' || subscription === 'VIP_AUTO_TRADER';
 export const hasAutoTraderSubscription = (subscription: SubscriptionTier | string) => subscription === 'VIP_AUTO_TRADER';
 export const hasTopTierAccess = (subscription: SubscriptionTier | string) => subscription === 'TOP_TIER' || subscription === 'VIP_AUTO_TRADER';
-export const getMonthlyAnalysisLimit = (subscription: SubscriptionTier | string) => (subscription === 'TOP_TIER' || subscription === 'VIP_AUTO_TRADER') ? config.limits.topTierMonthly : config.limits.proMonthly;
+export const getPaidAnalysisLimit = (subscription: SubscriptionTier | string) => (subscription === 'TOP_TIER' || subscription === 'VIP_AUTO_TRADER') ? config.limits.topTierMonthly : config.limits.proWeekly;
+export const getPaidAnalysisPeriod = (subscription: SubscriptionTier | string) => (subscription === 'TOP_TIER' || subscription === 'VIP_AUTO_TRADER') ? 'month' : 'week';
+
+const getWeekStartIso = () => {
+  const now = new Date();
+  const day = now.getUTCDay();
+  const daysSinceMonday = (day + 6) % 7;
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - daysSinceMonday, 0, 0, 0, 0)).toISOString();
+};
+
+export const getPaidUsageWindowStart = (subscription: SubscriptionTier | string, lastUsageReset?: string | null) => {
+  const baseline = getPaidAnalysisPeriod(subscription) === 'month'
+    ? new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1, 0, 0, 0, 0)).toISOString()
+    : getWeekStartIso();
+
+  if (lastUsageReset && lastUsageReset > baseline) {
+    return lastUsageReset;
+  }
+
+  return baseline;
+};
 
 export interface UserRecord {
   id: string;
@@ -292,10 +312,10 @@ const DEFAULT_PRICING_PLANS: Array<Pick<PricingPlanRecord, 'name' | 'tier' | 'pr
     isActive: true,
   },
   {
-    name: 'TradeVision AI Pro',
+    name: 'Weekly Pro',
     tier: 'PRO',
-    price: 19.95,
-    features: ['300 analyses per month', 'Advanced Smart Money Concepts', 'Priority AI processing'],
+    price: 9.95,
+    features: ['100 analyses per week', 'Advanced Smart Money Concepts', 'Priority AI processing'],
     dailyLimit: 999999,
     isActive: true,
   },
@@ -709,7 +729,6 @@ export const listUsersPage = async (
 
   const skip = (page - 1) * limit;
   const todayStamp = new Date().toISOString().slice(0, 10);
-  const monthStartIso = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1, 0, 0, 0, 0)).toISOString();
   let query = supabase
     .from(USER_TABLE)
     .select('id,email,name,role,subscription,banned,dailyUsage,lastUsageReset,createdAt', { count: 'exact' })
@@ -755,13 +774,6 @@ export const listUsersPage = async (
     return acc;
   }, {});
 
-  const monthlyAnalysisCountMap = analysisRows.reduce<Record<string, number>>((acc, row) => {
-    if (row.createdAt >= monthStartIso) {
-      acc[row.userId] = (acc[row.userId] || 0) + 1;
-    }
-    return acc;
-  }, {});
-
   const paymentCountMap = paymentRows.reduce<Record<string, number>>((acc, row) => {
     acc[row.userId] = (acc[row.userId] || 0) + 1;
     return acc;
@@ -774,14 +786,14 @@ export const listUsersPage = async (
         hasPaidSubscription(user.subscription)
           ? {
               current: analysisRows.reduce((count, row) => {
-                const usageWindowStart = user.lastUsageReset && user.lastUsageReset > monthStartIso ? user.lastUsageReset : monthStartIso;
+                const usageWindowStart = getPaidUsageWindowStart(user.subscription, user.lastUsageReset);
                 if (row.userId === user.id && row.createdAt >= usageWindowStart) {
                   return count + 1;
                 }
                 return count;
               }, 0),
-              limit: getMonthlyAnalysisLimit(user.subscription),
-              period: 'month',
+              limit: getPaidAnalysisLimit(user.subscription),
+              period: getPaidAnalysisPeriod(user.subscription),
             }
           : {
               current: getUsageDayStamp(user.lastUsageReset || new Date(0).toISOString()) === todayStamp ? user.dailyUsage || 0 : 0,

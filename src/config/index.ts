@@ -108,7 +108,7 @@ export const config = {
   
   limits: {
     freeDaily: 2,
-    proMonthly: 300,
+    proWeekly: 100,
     topTierMonthly: 500,
   },
 

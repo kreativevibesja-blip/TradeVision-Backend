@@ -45,13 +45,12 @@ import {
 import { serializeAnalysis } from './analysisController';
 import { setBillingStateFromAdmin } from '../services/billing';
 import { getBillingSummaryForUser } from '../services/billing';
-import { setBillingStateFromPayment, setGoldxPulseStateFromPayment } from '../services/billing';
+import { setBillingStateFromPayment } from '../services/billing';
 import { clearPaymentCouponContext, getPaymentCouponContext } from '../services/paymentCouponContext';
 import { processReferralPayment } from '../services/referralService';
 import { sendPaymentReminderEmail } from '../services/paymentReminderEmail';
 import { sendRenewalReminderEmail } from '../services/renewalReminderEmail';
 import { getUserSubscription as getGoldxSubscription, getUserLicense as getGoldxLicense, peekPendingDashboardGrant } from '../services/goldx/licenseService';
-import { getGoldxPulseAccess } from '../services/goldxPulse/access';
 import { config } from '../config';
 
 const ANNOUNCEMENT_CONTENT_VERSION = 1;
@@ -62,7 +61,7 @@ const FEEDBACK_ADMIN_SEEN_COLUMN = 'admin_seen';
 const FEEDBACK_ADMIN_SEEN_LEGACY_COLUMN = 'adminseen';
 
 const VALID_ANNOUNCEMENT_TYPES: AnnouncementType[] = ['update', 'maintenance', 'discount', 'new_feature', 'security', 'event'];
-const VALID_ANNOUNCEMENT_TARGET_PLANS = ['PRO', 'TOP_TIER', 'GOLDX', 'GOLDX_PULSE'] as const;
+const VALID_ANNOUNCEMENT_TARGET_PLANS = ['PRO', 'TOP_TIER', 'GOLDX'] as const;
 type AnnouncementTargetPlan = typeof VALID_ANNOUNCEMENT_TARGET_PLANS[number];
 
 const isAnnouncementTargetPlan = (value: unknown): value is AnnouncementTargetPlan =>
@@ -445,13 +444,12 @@ export const getUserDetails = async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    const [billingSummary, ticketData, goldxSubscription, goldxLicense, pendingGrant, goldxPulse] = await Promise.all([
+    const [billingSummary, ticketData, goldxSubscription, goldxLicense, pendingGrant] = await Promise.all([
       getBillingSummaryForUser(user.id, user.subscription),
       listTicketsForUser(user.id, 1, 20),
       getGoldxSubscription(user.id),
       getGoldxLicense(user.id),
       peekPendingDashboardGrant(user.id),
-      getGoldxPulseAccess(user.id, user.subscription, user.role),
     ]);
 
     const openTickets = ticketData.tickets
@@ -480,10 +478,6 @@ export const getUserDetails = async (req: Request, res: Response) => {
           pendingLicenseKey: pendingGrant?.licenseKey ?? null,
           pendingKeyIssuedAt: pendingGrant?.issuedAt ?? null,
           pendingKeyExpiresAt: pendingGrant?.expiresAt ?? null,
-          pulseActive: goldxPulse.active,
-          pulseSource: goldxPulse.source,
-          pulsePlanName: goldxPulse.planName,
-          pulseExpiresAt: goldxPulse.expiresAt,
         },
         openTickets,
         openTicketCount: openTickets.length,
@@ -580,7 +574,7 @@ export const getPayments = async (req: Request, res: Response) => {
     const scope = req.query.scope === 'COMPLETED_CHECKOUTS' || req.query.scope === 'BANK_TRANSFERS' || req.query.scope === 'ALL_PAYMENTS'
       ? req.query.scope
       : undefined;
-    const plan = req.query.plan === 'FREE' || req.query.plan === 'PRO' || req.query.plan === 'TOP_TIER' || req.query.plan === 'VIP_AUTO_TRADER' || req.query.plan === 'GOLDX_PULSE' ? req.query.plan : undefined;
+    const plan = req.query.plan === 'FREE' || req.query.plan === 'PRO' || req.query.plan === 'TOP_TIER' || req.query.plan === 'VIP_AUTO_TRADER' ? req.query.plan : undefined;
     const requestedStatus = req.query.status === 'PENDING' || req.query.status === 'COMPLETED' || req.query.status === 'FAILED' || req.query.status === 'REFUNDED'
       ? req.query.status
       : undefined;
@@ -664,16 +658,16 @@ export const updatePaymentStatus = async (req: Request, res: Response) => {
         await clearPaymentCouponContext(payment.paypalOrderId);
       }
 
-      if (payment.plan === 'GOLDX_PULSE') {
-        await setGoldxPulseStateFromPayment(payment.userId, now);
-      } else {
-        await setBillingStateFromPayment(
-          payment.userId,
-          now,
-          couponInfo?.grantPlan ?? (payment.plan === 'TOP_TIER' ? 'TOP_TIER' : 'PRO'),
-          couponInfo?.grantDurationDays ?? undefined,
-        );
+      if (payment.plan !== 'PRO' && payment.plan !== 'TOP_TIER') {
+        return res.status(400).json({ error: 'Unsupported payment plan for admin completion' });
       }
+
+      await setBillingStateFromPayment(
+        payment.userId,
+        now,
+        couponInfo?.grantPlan ?? (payment.plan === 'TOP_TIER' ? 'TOP_TIER' : 'PRO'),
+        couponInfo?.grantDurationDays ?? undefined,
+      );
       await processReferralPayment(payment.userId, payment.amount ?? 0).catch((error) => {
         console.error('Failed to process referral payment from admin approval:', error);
       });
