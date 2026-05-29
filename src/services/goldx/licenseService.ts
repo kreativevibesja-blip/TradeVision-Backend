@@ -1424,7 +1424,10 @@ export async function getGoldxPlan(): Promise<GoldxPlan | null> {
     .limit(1)
     .single();
   if (!data) return null;
-  return snakeToCamel(data) as unknown as GoldxPlan;
+  return {
+    ...(snakeToCamel(data) as unknown as GoldxPlan),
+    price: 99.95,
+  };
 }
 
 // Re-exports for convenience

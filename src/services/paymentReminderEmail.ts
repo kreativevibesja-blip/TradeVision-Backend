@@ -10,7 +10,7 @@ const PLAN_LABELS: Record<string, string> = {
 };
 
 const PLAN_PRICES: Record<string, number> = {
-  PRO: 19.95,
+  PRO: 9.95,
   TOP_TIER: 39.95,
   FREE: 0,
 };
