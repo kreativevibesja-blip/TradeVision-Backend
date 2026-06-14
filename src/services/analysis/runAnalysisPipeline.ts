@@ -130,7 +130,7 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
 
     await updateAnalysis(analysisId, {
       progress: isDualChart ? 60 : 45,
-      currentStage: 'Interpreting SMC structure...',
+      currentStage: 'Interpreting market structure...',
       layer1Output: vision,
     });
 
@@ -223,7 +223,7 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
     const analysis = await updateAnalysis(analysisId, {
       status: 'COMPLETED',
       progress: 100,
-      currentStage: 'Preparing final SMC signal...',
+      currentStage: 'Preparing market analysis...',
       bias,
       entry: null,
       stopLoss: enrichedSignal.stopLoss,
@@ -235,7 +235,7 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
       analysisText: enrichedSignal.reasoning,
       rawResponse: enrichedSignal,
       structure: enrichedSignal.structure,
-      strategy: enrichedSignal.primaryStrategy ?? `${enrichedSignal.trend.toUpperCase()} ${enrichedSignal.entryLogic.type.toUpperCase()} SMC setup`,
+      strategy: enrichedSignal.primaryStrategy ?? 'Market Read',
       waitConditions: enrichedSignal.message,
       errorMessage: null,
     });

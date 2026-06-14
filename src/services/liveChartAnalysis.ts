@@ -181,6 +181,10 @@ const normalizeMarketCondition = (value: unknown): VisionAnalysisResult['marketC
 
 const normalizePrimaryStrategy = (value: unknown): VisionAnalysisResult['primaryStrategy'] => {
   const trimmed = typeof value === 'string' ? value.trim() : '';
+  const normalized = trimmed.toLowerCase();
+  if (normalized === 'market read' || normalized === 'market_read' || normalized === 'market analysis') {
+    return 'Market Read';
+  }
   return trimmed === 'SMC' || trimmed === 'Supply & Demand' || trimmed === 'S&R' || trimmed === 'Pattern'
     ? trimmed as VisionAnalysisResult['primaryStrategy']
     : null;
@@ -384,9 +388,12 @@ const buildPrompt = (symbol: string, timeframe: string, candles: MarketCandle[])
     c: candle.close,
   }));
 
-  return `You are an advanced trading analyst.
+  return `You are Orion, an advanced independent market analyst for TradeVision.
 
-Your job is NOT to find trades, but to FILTER OUT low-probability setups and only return high-quality opportunities.
+Your job is to read the live market data as it is and explain what the market is showing.
+Do not force the dataset into Smart Money Concepts, Supply & Demand, S&R, Pattern, or any predefined strategy bucket.
+Use named concepts only when they are clearly visible and helpful.
+If the market is unclear, ranging, noisy, or not offering an obvious edge, say that directly.
 
 Analyze this live market dataset for ${symbol} on ${timeframe}.
 
@@ -400,13 +407,13 @@ ${advancedSmcGuidance}
 
 ${winningTradeGuidance}
 
-Use multi-strategy confluence including:
+Use any relevant visible evidence, including but not limited to:
 - Market structure (HH, HL, LH, LL)
-- Supply & Demand
-- Fair Value Gaps (FVG)
-- Liquidity (equal highs/lows, stop hunts)
-- Momentum / displacement
-- Price behavior inside zones
+- Support/resistance and supply/demand
+- Liquidity, stop runs, equal highs/lows
+- Momentum, displacement, compression, expansion
+- Breakouts, retests, pullbacks, reversals, or failed moves
+- Price behavior around important zones
 
 COUNTER-TREND RULES
 - The main trend-following plan remains the priority.
@@ -470,13 +477,11 @@ STEP 4 - FILTER BAD CONDITIONS
 - Do NOT allow a trade if price has not interacted with a meaningful POI or liquidity-backed area of interest
 
 ================================
-STEP 5 - PRIMARY STRATEGY SELECTION
+STEP 5 - MARKET INTERPRETATION
 ================================
-Select ONE primary strategy only:
-- SMC
-- Supply & Demand
-- S&R
-- Pattern
+Set "primary_strategy" to "Market Read" unless one named concept is clearly the dominant lens.
+Do not pick a named strategy just because the field exists.
+The result should sound like Orion independently reading the market, not like a checklist.
 
 ================================
 STEP 6 - CONFIRMATION LOGIC
@@ -497,7 +502,7 @@ STEP 6 - CONFIRMATION LOGIC
 - Plan targets at prior highs/lows, equal highs/lows, and obvious liquidity pools before approving the trade
 - Minimum risk-to-reward must be 1:3 for take_profit_1
 - If the setup is not clear, clean, and high probability, return NO TRADE
-- You are a filter, not a signal generator
+- You are a market analyst, not a strategy-template matcher
 - Prefer setups where price returns into an OTE/premium-discount area and then confirms with a close-based CHoCH or BOS
 - Ideal A+ setups usually combine at least 3 of these: liquidity sweep/IDM, order block or FVG retest, close-confirmed CHoCH/BOS, correct premium-discount location, and clean target path
 - Entry should preferably come from a return into the order block/FVG rather than chasing the displacement candle
@@ -509,7 +514,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
 ========================================
 {
   "market_condition": "trending | ranging | breakout | consolidation",
-  "primary_strategy": "SMC | Supply & Demand | S&R | Pattern",
+  "primary_strategy": "Market Read | SMC | Supply & Demand | S&R | Pattern",
   "confirmations": ["max 3 short bullet points"],
   "trend": "bullish | bearish | ranging",
   "structure": {

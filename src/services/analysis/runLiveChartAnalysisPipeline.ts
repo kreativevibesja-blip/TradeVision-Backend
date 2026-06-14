@@ -73,7 +73,7 @@ export async function runLiveChartAnalysisPipeline({ analysisId, pair, timeframe
     analysisText: enrichedSignal.reasoning,
     rawResponse: enrichedSignal,
     structure: enrichedSignal.structure,
-    strategy: enrichedSignal.primaryStrategy ?? `${enrichedSignal.trend.toUpperCase()} ${enrichedSignal.entryLogic.type.toUpperCase()} SMC setup`,
+    strategy: enrichedSignal.primaryStrategy ?? 'Market Read',
     waitConditions: enrichedSignal.message,
     errorMessage: null,
   });

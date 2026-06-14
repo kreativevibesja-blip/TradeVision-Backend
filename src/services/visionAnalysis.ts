@@ -75,7 +75,7 @@ export interface SMCFinalVerdict {
 }
 
 export type MarketCondition = 'trending' | 'ranging' | 'breakout' | 'consolidation';
-export type PrimaryStrategy = 'SMC' | 'Supply & Demand' | 'S&R' | 'Pattern';
+export type PrimaryStrategy = 'Market Read' | 'SMC' | 'Supply & Demand' | 'S&R' | 'Pattern';
 
 export interface VisionAnalysisResult {
   trend: 'bullish' | 'bearish' | 'ranging';
@@ -371,6 +371,9 @@ const normalizePrimaryStrategy = (value: unknown): PrimaryStrategy | null => {
   }
 
   const normalized = value.trim().toLowerCase();
+  if (normalized === 'market read' || normalized === 'market_read' || normalized === 'market analysis') {
+    return 'Market Read';
+  }
   if (normalized === 'smc') {
     return 'SMC';
   }
@@ -568,7 +571,12 @@ const formatZoneRange = (zone: SMCQualifiedZone | null) => {
 };
 
 const advancedSmcGuidance = `
-ADVANCED SMC CONCEPTS YOU MUST APPLY WHEN CLEARLY VISIBLE
+MARKET READING PRINCIPLES
+- Your first job is to describe what the market is doing, not to force a trade setup or match a predefined strategy.
+- Read the chart naturally from visible price action: trend, range, momentum, volatility, compression, expansion, support/resistance, supply/demand, liquidity, gaps, patterns, and invalidation.
+- Use SMC, supply/demand, support/resistance, chart patterns, liquidity, moving averages, or any other visible concept only when it is actually visible and useful.
+- If a named concept is not visible, do not mention it.
+- If the market is unclear, say it is unclear and explain what would make it clearer.
 - Start with higher-timeframe or broader visible structure before thinking about entries.
 - If the broader chart shows lower highs and lower lows, default to bearish context unless price clearly invalidates that structure.
 - If the broader chart shows higher highs and higher lows, default to bullish context unless price clearly invalidates that structure.
@@ -576,7 +584,7 @@ ADVANCED SMC CONCEPTS YOU MUST APPLY WHEN CLEARLY VISIBLE
 - Identify external highs and lows, protected highs and lows, and the liquidity resting around them.
 - Respect protected highs/lows: the trade idea remains valid until that protected swing is actually broken.
 - Treat BOS and CHoCH as valid only when price closes through structure, not when a wick briefly pokes through.
-- A strong model setup often looks like: structure break, liquidity sweep or inducement, return into a clean POI such as an order block or FVG, then continuation in the dominant direction.
+- A strong setup can take many forms. Do not require a specific sequence; only describe the setup that the chart actually shows.
 - For continuation ideas, prefer pullbacks into previous structure, moving-average value areas when visible, supply/demand zones, order blocks, or FVGs instead of chasing impulse candles.
 - If price is already stretched at the extreme high of a bullish move or the extreme low of a bearish move, prefer wait-for-pullback rather than forcing an entry.
 - Treat an order block retest after displacement or BOS as stronger than a random touch of a zone.
@@ -845,7 +853,7 @@ export async function analyzeVisionStructure(
   "final_verdict": {
     "action": "enter | wait | avoid"
   },
-  "reasoning": "Concise explanation of the setup using SMC logic",
+  "reasoning": "Concise independent explanation of what the chart shows",
   "visible_price_range": {
     "min": "lowest price number visible on the right-side Y-axis",
     "max": "highest price number visible on the right-side Y-axis"
@@ -890,39 +898,44 @@ Return STRICT JSON ONLY.
 Do not use markdown.
 Do not add commentary outside the JSON.`;
 
-  const freePromptHeader = `You are an institutional-level Smart Money Concepts (SMC) trading analyst.
+  const freePromptHeader = `You are Orion, an independent market analyst for TradeVision.
 
-Your job is to analyze the provided chart like a professional trader, not a signal generator.
+Your job is to analyze the provided chart like a professional trader and explain what the market is showing.
+Do not force the chart into Smart Money Concepts or any predefined TradeVision strategy.
 
-You MUST think in terms of:
-- Market structure
-- Liquidity
-- Order flow
-- Premium vs Discount
-- Confirmation-based entries
+Think freely in terms of any visible market evidence:
+- Trend, range, momentum, volatility, compression, expansion
+- Support and resistance
+- Supply and demand
+- Liquidity and stop runs
+- Breakouts, pullbacks, reversals, continuation, or failed moves
+- Risk and invalidation
 
 ${advancedSmcGuidance}
 
 Trading pair/index: ${pair}
 Timeframe: ${timeframe}`;
 
-  const proPrompt = `You are an advanced trading analyst.
+  const proPrompt = `You are Orion, an advanced independent market analyst for TradeVision.
 
-Your job is NOT to find trades, but to FILTER OUT low-probability setups and only return high-quality opportunities.
+Your job is to read the chart as it is and explain what the market is showing.
+Do not force the chart into Smart Money Concepts, Supply & Demand, S&R, Pattern, or any predefined strategy bucket.
+Use named concepts only when they are clearly visible and helpful.
+If the market is unclear, ranging, noisy, or not offering an obvious edge, say that directly.
 
 You are given ONE chart image for timeframe ${timeframe} on ${pair}.
 
-If only one chart is uploaded, analyze ONLY the uploaded timeframe and choose the cleanest single strategy setup from that timeframe.
+Analyze ONLY the uploaded timeframe. Start with a neutral market read before discussing any possible trade idea.
 
 ${advancedSmcGuidance}
 
-Use multi-strategy confluence including:
+Use any relevant visible evidence, including but not limited to:
 - Market structure (HH, HL, LH, LL)
-- Supply & Demand
-- Fair Value Gaps (FVG)
-- Liquidity (equal highs/lows, stop hunts)
-- Momentum / displacement
-- Price behavior inside zones
+- Support/resistance and supply/demand
+- Liquidity, stop runs, equal highs/lows
+- Momentum, displacement, compression, expansion
+- Chart patterns, breakouts, retests, pullbacks, reversals
+- Price behavior around important zones
 
 COUNTER-TREND RULES
 - The main trend-following plan remains the priority.
@@ -988,16 +1001,12 @@ STEP 4 - FILTER BAD CONDITIONS
 - If any invalid condition exists, return a no-trade outcome
 
 ================================
-STEP 5 - PRIMARY STRATEGY SELECTION
+STEP 5 - MARKET INTERPRETATION
 ================================
 
-Select ONE primary strategy based on the cleanest chart condition:
-- SMC
-- Supply & Demand
-- S&R
-- Pattern
-
-Do NOT mix strategies.
+Set "primary_strategy" to "Market Read" unless one named concept is clearly the dominant lens.
+Do not pick a named strategy just because the field exists.
+The result should sound like Orion independently reading the market, not like a checklist.
 
 ================================
 STEP 6 - CONFIRMATION LOGIC
@@ -1030,7 +1039,7 @@ STEP 7 - EXECUTION RULES
 - Minimum risk-to-reward = 1:3 for take_profit_1
 - Do NOT force trades
 - If the setup is not clear, clean, and high probability, return NO TRADE
-- You are a filter, not a signal generator
+- You are a market analyst, not a strategy-template matcher
 - When two logical targets exist, take_profit_1 should map to the first clear structure target and take_profit_2 to the next obvious liquidity target
 - Entry should preferably come from a return into the order block/FVG rather than chasing the displacement candle
 
@@ -1039,7 +1048,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
 ========================================
 {
   "market_condition": "trending | ranging | breakout | consolidation",
-  "primary_strategy": "SMC | Supply & Demand | S&R | Pattern",
+  "primary_strategy": "Market Read | SMC | Supply & Demand | S&R | Pattern",
   "confirmations": ["max 3 short bullet points"],
   "trend": "bullish | bearish | ranging",
   "structure": {
@@ -1133,8 +1142,8 @@ OUTPUT FORMAT (STRICT JSON ONLY)
 STRICT RULES
 ================================
 
-- Do NOT use multiple primary strategies
-- Do NOT give trades without at least 2 confirmations
+- Do NOT force a predefined strategy label
+- Do NOT give trades without clear market evidence
 - Do NOT give trades when the market is ranging, consolidating, or structurally unclear
 - Do NOT use heavily mitigated or multi-tapped zones as the main entry zone
 - Do NOT approve setups with weak zone behavior, internal chop, or repeated wicks inside the zone
@@ -1257,9 +1266,11 @@ export async function analyzeHTFVisionStructure(
   pair: string,
   timeframe: string
 ): Promise<VisionAnalysisResult> {
-  const prompt = `You are an advanced trading analyst.
+  const prompt = `You are Orion, an advanced independent market analyst for TradeVision.
 
-Your job is NOT to find trades, but to FILTER OUT low-probability setups and only return high-quality opportunities.
+Your job is to read the higher-timeframe chart as it is and explain what the market is showing.
+Do not force the chart into Smart Money Concepts, Supply & Demand, S&R, Pattern, or any predefined strategy bucket.
+Use named concepts only when they are clearly visible and helpful.
 
 You are given TWO chart images:
 - Image 1 = HIGHER TIMEFRAME (HTF): ${timeframe}
@@ -1316,16 +1327,11 @@ STEP 2 - IDENTIFY ZONES, BUT DO NOT TRUST THEM YET
 - Give extra weight to order blocks that caused displacement or a clear structural shift
 
 ================================
-STEP 3 - PRIMARY STRATEGY SELECTION
+STEP 3 - MARKET INTERPRETATION
 ================================
 
-Select ONE primary strategy based on HTF condition:
-- SMC
-- Supply & Demand
-- S&R
-- Pattern
-
-Do NOT mix strategies.
+Set "primary_strategy" to "Market Read" unless one named concept is clearly the dominant lens.
+Do not pick a named strategy just because the field exists.
 
 If you mention a counter_trend_plan on HTF, it must default to avoid/none because HTF alone does not execute aggressive counter-trend entries.
 
@@ -1334,7 +1340,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
 ========================================
 {
   "market_condition": "trending | ranging | breakout | consolidation",
-  "primary_strategy": "SMC | Supply & Demand | S&R | Pattern",
+  "primary_strategy": "Market Read | SMC | Supply & Demand | S&R | Pattern",
   "confirmations": [],
   "trend": "bullish | bearish | ranging",
   "structure": {
@@ -1498,9 +1504,11 @@ export async function analyzeLTFVisionStructure(
   timeframe: string,
   context: LTFPromptContext
 ): Promise<VisionAnalysisResult> {
-  const prompt = `You are an advanced trading analyst.
+  const prompt = `You are Orion, an advanced independent market analyst for TradeVision.
 
-Your job is NOT to find trades, but to FILTER OUT low-probability setups and only return high-quality opportunities.
+Your job is to read the lower-timeframe chart as it is within the higher-timeframe context.
+Do not force the chart into Smart Money Concepts, Supply & Demand, S&R, Pattern, or any predefined strategy bucket.
+Use named concepts only when they are clearly visible and helpful.
 
 You are given TWO chart images:
 - Image 1 = HIGHER TIMEFRAME (HTF): ${context.higherTimeframe}
@@ -1527,13 +1535,13 @@ Chart context:
 
 ${advancedSmcGuidance}
 
-Use multi-strategy confluence including:
+Use any relevant visible evidence, including but not limited to:
 - Market structure (HH, HL, LH, LL)
-- Supply & Demand
-- Fair Value Gaps (FVG)
-- Liquidity (equal highs/lows, stop hunts)
-- Momentum / displacement
-- Price behavior inside zones
+- Support/resistance and supply/demand
+- Liquidity, stop runs, equal highs/lows
+- Momentum, displacement, compression, expansion
+- Chart patterns, breakouts, retests, pullbacks, reversals
+- Price behavior around important zones
 
 COUNTER-TREND RULES
 - The main HTF-aligned setup remains the priority.
@@ -1617,7 +1625,7 @@ STEP 5 - TRADE EXECUTION RULES
 - Minimum risk-to-reward = 1:3
 - Do NOT force trades
 - If the setup is not clear, clean, and high probability, return NO TRADE
-- You are a filter, not a signal generator
+- You are a market analyst, not a strategy-template matcher
 - When two logical downside or upside targets exist, take_profit_1 should be the nearer structure target and take_profit_2 the next liquidity sweep objective
 - Prefer entries from the retest of the POI, not from chasing the impulse candle after confirmation
 
@@ -1626,7 +1634,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
 ========================================
 {
   "market_condition": "trending | ranging | breakout | consolidation",
-  "primary_strategy": "SMC | Supply & Demand | S&R | Pattern",
+  "primary_strategy": "Market Read | SMC | Supply & Demand | S&R | Pattern",
   "confirmations": ["max 3 short bullet points"],
   "trend": "bullish | bearish | ranging",
   "structure": {
