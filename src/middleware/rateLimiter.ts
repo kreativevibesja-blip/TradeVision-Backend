@@ -8,6 +8,14 @@ export const analysisLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+export const aiCompareLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 6,
+  message: { error: 'Too many AI Compare requests, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 export const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
