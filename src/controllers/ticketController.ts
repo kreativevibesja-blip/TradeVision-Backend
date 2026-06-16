@@ -13,6 +13,7 @@ import {
   type TicketPriority,
   type TicketStatus,
 } from '../lib/supabase';
+import { supabase } from '../lib/supabase';
 import { EmailDeliveryError, sendTicketReplyEmail } from '../services/emailService';
 
 const TICKET_CATEGORIES: TicketCategory[] = ['ACCOUNT', 'BILLING', 'ANALYSIS', 'BUG', 'FEATURE', 'GENERAL'];
@@ -29,6 +30,70 @@ const mapTicket = (ticket: Awaited<ReturnType<typeof createTicketRecord>>) => {
     ...rest,
     canReplyByEmail: Boolean(ticket.userEmail),
   };
+};
+
+const sendSupportInboxMessage = async (adminUserId: string, customerUserId: string, message: string) => {
+  const participantKey = [adminUserId, customerUserId].sort().join(':');
+
+  const { data: existingConversation, error: lookupError } = await supabase
+    .from('direct_conversations')
+    .select('id')
+    .eq('participant_key', participantKey)
+    .eq('is_support', true)
+    .maybeSingle();
+
+  if (lookupError) {
+    throw lookupError;
+  }
+
+  let conversationId = existingConversation?.id as string | undefined;
+
+  if (!conversationId) {
+    const { data: insertedConversation, error: conversationError } = await supabase
+      .from('direct_conversations')
+      .insert({
+        participant_key: participantKey,
+        created_by: adminUserId,
+        is_support: true,
+        display_title: 'Support',
+      })
+      .select('id')
+      .single();
+
+    if (conversationError || !insertedConversation) {
+      throw conversationError || new Error('Could not create support inbox conversation');
+    }
+
+    conversationId = insertedConversation.id;
+  }
+
+  const { error: participantsError } = await supabase
+    .from('direct_conversation_participants')
+    .upsert([
+      { conversation_id: conversationId, user_id: adminUserId },
+      { conversation_id: conversationId, user_id: customerUserId },
+    ]);
+
+  if (participantsError) {
+    throw participantsError;
+  }
+
+  const { error: messageError } = await supabase.from('direct_messages').insert({
+    conversation_id: conversationId,
+    sender_id: adminUserId,
+    body: message,
+    sender_display_name: 'Support',
+    sender_is_verified: true,
+  });
+
+  if (messageError) {
+    throw messageError;
+  }
+
+  await supabase
+    .from('direct_conversations')
+    .update({ updated_at: new Date().toISOString(), is_support: true, display_title: 'Support' })
+    .eq('id', conversationId);
 };
 
 export const getOpenTicketCount = async (_req: AuthRequest, res: Response) => {
@@ -234,17 +299,26 @@ export const replyToTicket = async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Ticket not found' });
     }
 
-    if (!ticket.userEmail) {
-      return res.status(400).json({ error: 'Ticket has no email address' });
-    }
+    await sendSupportInboxMessage(req.user!.id, ticket.userId, message);
 
-    const emailResult = await sendTicketReplyEmail({
-      to: ticket.userEmail,
-      name: ticket.userName,
-      ticketNumber: ticket.ticketNumber,
-      subject: ticket.subject,
-      message,
-    });
+    let emailSent = false;
+    if (ticket.userEmail) {
+      try {
+        await sendTicketReplyEmail({
+          to: ticket.userEmail,
+          name: ticket.userName,
+          ticketNumber: ticket.ticketNumber,
+          subject: ticket.subject,
+          message,
+        });
+        emailSent = true;
+      } catch (error) {
+        if (!(error instanceof EmailDeliveryError)) {
+          throw error;
+        }
+        console.warn('Support inbox message sent, but ticket email delivery failed:', error.message);
+      }
+    }
 
     const updated = await updateTicketRecord(ticket.id, {
       adminResponse: message,
@@ -252,7 +326,7 @@ export const replyToTicket = async (req: AuthRequest, res: Response) => {
       status: ticket.status === 'OPEN' ? 'IN_PROGRESS' : ticket.status,
     });
 
-    return res.json({ ticket: mapTicket(updated), emailSent: true });
+    return res.json({ ticket: mapTicket(updated), emailSent, inboxSent: true });
   } catch (error) {
     console.error('Reply to ticket error:', error);
     if (error instanceof EmailDeliveryError) {
