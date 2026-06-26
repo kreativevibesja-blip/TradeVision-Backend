@@ -600,7 +600,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
   "take_profit_1": number | null,
   "take_profit_2": number | null,
   "take_profit_3": number | null,
-  "reasoning": "Concise explanation in 2-4 short sentences",
+  "reasoning": "Concise explanation in 6-10 short sentences",
   "visible_price_range": {
     "min": number,
     "max": number

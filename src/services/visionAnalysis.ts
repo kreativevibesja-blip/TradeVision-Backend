@@ -853,7 +853,7 @@ export async function analyzeVisionStructure(
   "final_verdict": {
     "action": "enter | wait | avoid"
   },
-  "reasoning": "Concise independent explanation of what the chart shows",
+  "reasoning": "Concise independent explanation in 6-10 short sentences explaining what the chart shows",
   "visible_price_range": {
     "min": "lowest price number visible on the right-side Y-axis",
     "max": "highest price number visible on the right-side Y-axis"
@@ -885,7 +885,7 @@ GOAL
 ========================================
 
 Provide a useful overview of the chart's market structure and key levels.
-Keep reasoning concise in 2-3 short sentences.
+Give 6-10 concise short sentences in the reasoning field.
 Do not include stop loss or take profit levels.
 
 You may also include an optional counter_trend_plan object only when a clean aggressive support/resistance rejection setup exists against the main trend.
@@ -1131,7 +1131,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
   "take_profit_1": number | null,
   "take_profit_2": number | null,
   "take_profit_3": number | null,
-  "reasoning": "Concise explanation in 2-3 short sentences",
+  "reasoning": "Concise explanation in 6-10 short sentences",
   "visible_price_range": {
     "min": "lowest price number visible on the right-side Y-axis",
     "max": "highest price number visible on the right-side Y-axis"
@@ -1152,7 +1152,7 @@ STRICT RULES
 - Do NOT force trades
 - If no strong setup exists, return a no-trade outcome using wait or avoid with bias = none
 - setup_rating must be A+ for strong confluence, B for valid but weaker confirmation, otherwise avoid
-- Be concise and structured
+- Keep reasoning concise and structured
 - Read the Y-axis carefully for visible_price_range
 - Supply and demand zones must be tight and justified
 - stop_loss must align with structural invalidation, not a random distance
@@ -1404,7 +1404,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
   "take_profit_1": null,
   "take_profit_2": null,
   "take_profit_3": null,
-  "reasoning": "Concise higher timeframe explanation in 2-3 short sentences",
+  "reasoning": "Concise higher timeframe explanation in 6-10 short sentences",
   "visible_price_range": {
     "min": "lowest price on right Y-axis",
     "max": "highest price on right Y-axis"
@@ -1717,7 +1717,7 @@ OUTPUT FORMAT (STRICT JSON ONLY)
   "take_profit_1": number | null,
   "take_profit_2": number | null,
   "take_profit_3": number | null,
-  "reasoning": "Concise execution explanation in 2-3 short sentences",
+  "reasoning": "Concise execution explanation in 6-10 short sentences",
   "visible_price_range": {
     "min": "lowest price on right Y-axis",
     "max": "highest price on right Y-axis"
@@ -1735,7 +1735,7 @@ STRICT RULES:
 - Do NOT validate BOS or CHoCH from wick-only breaks
 - If no strong setup exists, return wait or avoid with bias = none
 - setup_rating must be A+ for strong confluence, B for valid but weaker confirmation, otherwise avoid
-- Be concise and structured
+- Keep reasoning concise and structured
 - stop_loss must align with structural invalidation and take_profit_1 should only be set when at least 3R is realistic
 - If price is already at the extreme high of a bullish push or extreme low of a bearish push, return wait/avoid and prefer a pullback first
 - counter_trend_plan, when present, must be explicitly warned as aggressive and should use nearer exits than the main trend trade
