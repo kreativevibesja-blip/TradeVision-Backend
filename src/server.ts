@@ -18,10 +18,12 @@ import notificationRoutes from './routes/notificationRoutes';
 import commandCenterRoutes from './routes/commandCenterRoutes';
 import radarRoutes from './routes/radarRoutes';
 import communityRoutes from './routes/communityRoutes';
+import attachmentRoutes from './routes/attachmentRoutes';
 import goldxRoutes from './routes/goldx';
 import goldxPulseRoutes from './routes/goldxPulseRoutes';
 import debugRoutes from './routes/debugRoutes';
 import findTradeRoutes from './routes/findTradeRoutes';
+import instantSignalRoutes from './routes/instantSignalRoutes';
 import { startQueueWorker } from './workers/queueWorker';
 import { startSystem } from './server/start';
 import { startRadarTracker } from './services/radarTracker';
@@ -115,10 +117,12 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api', commandCenterRoutes);
 app.use('/api/radar', radarRoutes);
 app.use('/api/community', communityRoutes);
+app.use('/api', attachmentRoutes);
 app.use('/api/goldx', goldxRoutes);
 app.use('/api/goldx-pulse', goldxPulseRoutes);
 app.use('/api/debug', debugRoutes);
 app.use('/api', findTradeRoutes);
+app.use('/api/signals', instantSignalRoutes);
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });

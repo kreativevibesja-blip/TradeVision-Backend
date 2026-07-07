@@ -34,6 +34,7 @@ import {
   getPaidSubscribers,
   sendSubscriptionRenewalReminder,
 } from '../controllers/adminController';
+import { adminUpdateInstantSignal, getAdminInstantSignals } from '../controllers/instantSignalController';
 import { getAdminTickets, getOpenTicketCount, updateAdminTicket, replyToTicket, createAdminTicket } from '../controllers/ticketController';
 import { getCoupons, createCoupon, toggleCoupon, deleteCoupon } from '../controllers/couponController';
 import {
@@ -74,6 +75,8 @@ router.get('/subscribers', getPaidSubscribers);
 router.post('/subscribers/:userId/send-renewal', sendSubscriptionRenewalReminder);
 router.get('/analyses', getAnalysisLogs);
 router.get('/analyses/:id', getAdminAnalysisById);
+router.get('/instant-signals', getAdminInstantSignals);
+router.patch('/instant-signals/:id', adminUpdateInstantSignal);
 router.get('/payments', getPayments);
 router.get('/policies', getPolicyAcceptances);
 router.patch('/payments/:id', updatePaymentStatus);
