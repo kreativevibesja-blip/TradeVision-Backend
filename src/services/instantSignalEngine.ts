@@ -114,9 +114,21 @@ export function generateInstantSignal(input: InstantSignalEngineInput): InstantS
   const choppy = averageRange <= 0 || Math.abs(shortSma - longSma) < averageRange * 0.18;
   const recentBearishCount = recent.filter(isBearish).length;
   const recentBullishCount = recent.filter(isBullish).length;
+  const lastTen = candles.slice(-10);
+  const prior = candles[candles.length - 2];
+  const pullbackBearishCount = lastTen.slice(0, -1).filter(isBearish).length;
+  const pullbackBullishCount = lastTen.slice(0, -1).filter(isBullish).length;
   const hasTwoSidedAuction = recentBearishCount >= 3 && recentBullishCount >= 3;
-  const hasBuyStructure = hasTwoSidedAuction && nearLow && (sweptLow || rejectionBuy) && bullishReaction;
-  const hasSellStructure = hasTwoSidedAuction && nearHigh && (sweptHigh || rejectionSell) && bearishReaction;
+  const notOneWayMove = hasTwoSidedAuction || (pullbackBearishCount >= 2 && pullbackBullishCount >= 2);
+  const distanceFromShortSma = Math.abs(currentPrice - shortSma);
+  const buyPullbackRetest = trendUp && notOneWayMove && pullbackBearishCount >= 2 && distanceFromShortSma <= averageRange * 1.25 && bullishReaction && last.low <= shortSma + averageRange * 0.5;
+  const sellPullbackRetest = trendDown && notOneWayMove && pullbackBullishCount >= 2 && distanceFromShortSma <= averageRange * 1.25 && bearishReaction && last.high >= shortSma - averageRange * 0.5;
+  const buyBreakoutRetest = notOneWayMove && prior && prior.close <= previousHigh && last.low <= previousHigh + averageRange * 0.45 && last.close > previousHigh && bullishReaction;
+  const sellBreakoutRetest = notOneWayMove && prior && prior.close >= previousLow && last.high >= previousLow - averageRange * 0.45 && last.close < previousLow && bearishReaction;
+  const buySweepRejection = hasTwoSidedAuction && nearLow && (sweptLow || rejectionBuy) && bullishReaction;
+  const sellSweepRejection = hasTwoSidedAuction && nearHigh && (sweptHigh || rejectionSell) && bearishReaction;
+  const hasBuyStructure = buySweepRejection || buyPullbackRetest || buyBreakoutRetest;
+  const hasSellStructure = sellSweepRejection || sellPullbackRetest || sellBreakoutRetest;
 
   const buyScore =
     (trendUp ? 18 : 0) +
@@ -124,6 +136,8 @@ export function generateInstantSignal(input: InstantSignalEngineInput): InstantS
     (rejectionBuy ? 18 : 0) +
     (nearLow ? 12 : 0) +
     (bullishReaction ? 18 : 0) +
+    (buyPullbackRetest ? 18 : 0) +
+    (buyBreakoutRetest ? 16 : 0) +
     (momentumUp ? 12 : 0) +
     (last.close > shortSma ? 8 : 0) -
     (sweptHigh ? 18 : 0) -
@@ -135,12 +149,20 @@ export function generateInstantSignal(input: InstantSignalEngineInput): InstantS
     (rejectionSell ? 18 : 0) +
     (nearHigh ? 12 : 0) +
     (bearishReaction ? 18 : 0) +
+    (sellPullbackRetest ? 18 : 0) +
+    (sellBreakoutRetest ? 16 : 0) +
     (momentumDown ? 12 : 0) +
     (last.close < shortSma ? 8 : 0) -
     (sweptLow ? 18 : 0) -
     (choppy ? 12 : 0);
 
-  const direction: InstantSignalDirection = buyScore >= sellScore ? 'buy' : 'sell';
+  const direction: InstantSignalDirection = hasBuyStructure && hasSellStructure
+    ? buyScore >= sellScore ? 'buy' : 'sell'
+    : hasBuyStructure
+      ? 'buy'
+      : hasSellStructure
+        ? 'sell'
+        : buyScore >= sellScore ? 'buy' : 'sell';
   const score = direction === 'buy' ? buyScore : sellScore;
   const validStructure = direction === 'buy' ? hasBuyStructure : hasSellStructure;
   const contradiction = direction === 'buy' ? trendDown && sweptHigh : trendUp && sweptLow;
@@ -151,7 +173,7 @@ export function generateInstantSignal(input: InstantSignalEngineInput): InstantS
   const riskReward = Number((Math.abs(takeProfit - entry) / Math.max(Math.abs(entry - stopLoss), Number.EPSILON)).toFixed(2));
   const confidence = clamp(Math.round(52 + score * 0.55 + (riskReward >= 1.8 ? 8 : 0)), 35, 92);
 
-  if (contradiction || riskReward < 1.5 || confidence < 65 || choppy || !validStructure) {
+  if (contradiction || riskReward < 1.35 || confidence < 62 || choppy || !validStructure) {
     return noSignal(
       clamp(confidence, 35, 64),
       !validStructure
@@ -162,9 +184,9 @@ export function generateInstantSignal(input: InstantSignalEngineInput): InstantS
     );
   }
 
-  const entryNow = confidence >= 70 && validStructure;
+  const entryNow = confidence >= 62 && validStructure;
   if (!entryNow) {
-    return noSignal(clamp(confidence, 35, 69), 'No immediate entry signal from the current rejection structure.');
+    return noSignal(clamp(confidence, 35, 61), 'No immediate structural trade is clean enough right now.');
   }
 
   const expiresAt = new Date(Date.now() + getExpiryMinutes(input.assetClass, input.timeframe) * 60 * 1000).toISOString();
@@ -182,8 +204,8 @@ export function generateInstantSignal(input: InstantSignalEngineInput): InstantS
     confidence,
     confirmationRequired: 0,
     confirmationText: direction === 'buy'
-      ? 'Enter now: bullish rejection from a valid demand/liquidity level.'
-      : 'Enter now: bearish rejection from a valid supply/liquidity level.',
+      ? `Enter now: ${buySweepRejection ? 'bullish rejection from demand/liquidity' : buyPullbackRetest ? 'bullish pullback retest in trend' : 'bullish breakout retest'} with valid structure.`
+      : `Enter now: ${sellSweepRejection ? 'bearish rejection from supply/liquidity' : sellPullbackRetest ? 'bearish pullback retest in trend' : 'bearish breakout retest'} with valid structure.`,
     expiresAt,
   };
 }
