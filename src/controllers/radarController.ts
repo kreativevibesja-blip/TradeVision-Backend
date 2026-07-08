@@ -34,6 +34,36 @@ function extractTradeData(analysis: any): {
   conditions: string[];
 } | null {
   const raw = analysis.rawResponse && typeof analysis.rawResponse === 'object' ? analysis.rawResponse : {};
+  const tradingAnalysis = raw.tradingAnalysis && typeof raw.tradingAnalysis === 'object' ? raw.tradingAnalysis as Record<string, any> : null;
+
+  if (tradingAnalysis) {
+    const directionRaw = String(tradingAnalysis.direction ?? 'none').toLowerCase();
+    const direction = directionRaw === 'buy' || directionRaw === 'sell' ? directionRaw as 'buy' | 'sell' : null;
+    const entryZone = tradingAnalysis.entryZone && typeof tradingAnalysis.entryZone === 'object'
+      ? tradingAnalysis.entryZone as Record<string, unknown>
+      : {};
+    const entryZoneMin = toNum(entryZone.from);
+    const entryZoneMax = toNum(entryZone.to);
+    const stopLoss = toNum(tradingAnalysis.stopLoss);
+    const takeProfit1 = Array.isArray(tradingAnalysis.takeProfits) ? toNum(tradingAnalysis.takeProfits[0]) : null;
+
+    if (direction && entryZoneMin !== null && entryZoneMax !== null && stopLoss !== null && takeProfit1 !== null) {
+      return {
+        symbol: analysis.pair || '',
+        direction,
+        entryZoneMin: Math.min(entryZoneMin, entryZoneMax),
+        entryZoneMax: Math.max(entryZoneMin, entryZoneMax),
+        stopLoss,
+        takeProfit1,
+        confidence: Math.max(0, Math.min(10, (toNum(tradingAnalysis.confidence) ?? 0) / 10)),
+        conditions: [
+          String(tradingAnalysis.marketBias ?? 'market bias'),
+          String(tradingAnalysis.setupType ?? 'setup'),
+          String(tradingAnalysis.whatToWaitFor ?? 'Wait for confirmation'),
+        ].filter(Boolean),
+      };
+    }
+  }
 
   // --- Direction: try many sources ---
   const dirRaw = (

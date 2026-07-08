@@ -135,6 +135,24 @@ const getUploadFailureMessage = (errorType: UploadErrorType) => {
   }
 };
 
+const getAnalysisFailureMessage = (error: unknown) => {
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error ?? '').toLowerCase();
+
+  if (message.includes('empty_image') || message.includes('blank') || message.includes('unclear') || message.includes('low quality')) {
+    return 'The chart image is not clear enough for reliable analysis. Please upload a higher-quality screenshot.';
+  }
+
+  if (message.includes('unsupported') || message.includes('could not identify') || message.includes('not enough market data')) {
+    return 'Orion could not identify enough market data from this image.';
+  }
+
+  if (message.includes('gemini') || message.includes('ai') || message.includes('vision') || message.includes('json') || message.includes('model')) {
+    return 'Orion could not complete the chart analysis. Please try again.';
+  }
+
+  return 'Orion could not complete the chart analysis. Please try again.';
+};
+
 const readUploadedChartFile = async (filename: string, mimeType?: string | null) => {
   try {
     const fileBuffer = await fs.readFile(path.join(process.cwd(), config.upload.dir, filename));
@@ -511,7 +529,7 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
       }
     }
 
-    return res.status(500).json({ error: 'Failed to analyze chart' });
+    return res.status(500).json({ error: getAnalysisFailureMessage(error) });
   }
 };
 

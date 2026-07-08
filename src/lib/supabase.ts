@@ -236,6 +236,18 @@ export interface AnalysisRecord {
   explanation: string | null;
   analysisText: string | null;
   strategy: string | null;
+  marketBias?: string | null;
+  marketCondition?: string | null;
+  setupType?: string | null;
+  entryReadiness?: string | null;
+  setupQuality?: string | null;
+  direction?: string | null;
+  entryZone?: unknown;
+  keyLevels?: unknown;
+  whatToWaitFor?: string | null;
+  tradeRadarRecommendation?: unknown;
+  internalPlaybook?: string | null;
+  rawAiJson?: unknown;
   structure: unknown;
   waitConditions: string | null;
   rawResponse: unknown;
