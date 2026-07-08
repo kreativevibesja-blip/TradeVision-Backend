@@ -4,6 +4,8 @@ import { generateFinalSignal } from '../signalEngine';
 import { drawChartMarkup, drawHTFChartMarkup, drawLTFChartMarkup, isChartMarkupEnabledForPlan } from '../chartMarkup';
 import type { SubscriptionTier } from '../../lib/supabase';
 import type { VisionAnalysisResult, VisionModelMetadata } from '../visionAnalysis';
+import type { TradingAnalysis } from '../../lib/ai/validators/tradingAnalysisValidator';
+import { classifySetup } from '../../lib/ai/playbooks/classifySetup';
 
 interface SecondaryChartInput {
   base64Image: string;
@@ -42,6 +44,65 @@ const extractVisionMetadataFromError = (error: unknown) => {
 
   const metadata = error.metadata;
   return isRecord(metadata) ? metadata : null;
+};
+
+const deriveTradingAnalysis = (vision: VisionAnalysisResult): TradingAnalysis => {
+  const direction = vision.entryPlan.bias;
+  const entryReadiness = direction === 'none'
+    ? 'no_trade'
+    : vision.finalVerdict.action === 'enter'
+      ? 'ready'
+      : 'waiting';
+  const setupType = entryReadiness === 'no_trade'
+    ? 'no_trade'
+    : vision.entryPlan.entryType === 'confirmation'
+      ? 'pullback'
+      : vision.structure.choch !== 'none'
+        ? 'reversal'
+        : vision.structure.bos !== 'none'
+          ? 'continuation'
+          : 'range';
+  const entryZone = vision.entryPlan.entryZone;
+  const takeProfits = [vision.takeProfit1, vision.takeProfit2, vision.takeProfit3].filter((value): value is number => value !== null);
+  const keyLevels: TradingAnalysis['keyLevels'] = [];
+
+  if (vision.zones.supply) {
+    keyLevels.push({ type: 'supply', price: vision.zones.supply.max, description: vision.zones.supply.reason });
+  }
+  if (vision.zones.demand) {
+    keyLevels.push({ type: 'demand', price: vision.zones.demand.min, description: vision.zones.demand.reason });
+  }
+  if (vision.liquidity.type !== 'none') {
+    keyLevels.push({ type: 'liquidity', price: null, description: vision.liquidity.description });
+  }
+
+  return {
+    marketBias: vision.trend === 'bullish' || vision.trend === 'bearish' ? vision.trend : 'neutral',
+    marketCondition: vision.marketCondition === 'trending' || vision.marketCondition === 'ranging' ? vision.marketCondition : 'unclear',
+    setupType,
+    entryReadiness,
+    confidence: vision.quality.confidence,
+    setupQuality: vision.quality.setupRating === 'A+' ? 'A+' : vision.quality.setupRating === 'B' ? 'B' : 'avoid',
+    direction,
+    entryZone: {
+      from: entryZone?.min ?? null,
+      to: entryZone?.max ?? null,
+    },
+    stopLoss: vision.stopLoss,
+    takeProfits,
+    invalidation: vision.riskManagement.invalidationReason,
+    riskReward: null,
+    keyLevels,
+    whatToWaitFor: vision.finalVerdict.message,
+    tradeRadarRecommendation: {
+      sendToRadar: entryReadiness === 'waiting' && direction !== 'none',
+      reason: entryReadiness === 'waiting'
+        ? 'Setup has a condition to monitor before entry.'
+        : 'No waiting setup is ready for monitoring.',
+    },
+    summary: vision.reasoning,
+    mentorNotes: vision.confirmations?.length ? vision.confirmations : [vision.entryPlan.reason],
+  };
 };
 
 export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe, subscription, currentPrice, chartMinPrice, chartMaxPrice, imageUrl, base64Image, mimeType, secondaryChart }: RunAnalysisPipelineInput) {
@@ -197,8 +258,11 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
       }
     }
 
+    const tradingAnalysis = signal.tradingAnalysis ?? deriveTradingAnalysis(vision);
     const enrichedSignal = {
       ...signal,
+      tradingAnalysis,
+      internalPlaybook: signal.internalPlaybook ?? classifySetup(tradingAnalysis),
       analysisMeta,
       originalImageUrl: imageUrl,
       markedImageUrl: markup.markedImageUrl,
@@ -234,6 +298,18 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
       explanation: enrichedSignal.reasoning,
       analysisText: enrichedSignal.reasoning,
       rawResponse: enrichedSignal,
+      marketBias: enrichedSignal.tradingAnalysis?.marketBias ?? null,
+      marketCondition: enrichedSignal.tradingAnalysis?.marketCondition ?? enrichedSignal.marketCondition ?? null,
+      setupType: enrichedSignal.tradingAnalysis?.setupType ?? null,
+      entryReadiness: enrichedSignal.tradingAnalysis?.entryReadiness ?? null,
+      setupQuality: enrichedSignal.tradingAnalysis?.setupQuality ?? enrichedSignal.setupQuality ?? null,
+      direction: enrichedSignal.tradingAnalysis?.direction ?? enrichedSignal.entryPlan?.bias ?? null,
+      entryZone: enrichedSignal.tradingAnalysis?.entryZone ?? enrichedSignal.entryZone ?? null,
+      keyLevels: enrichedSignal.tradingAnalysis?.keyLevels ?? null,
+      whatToWaitFor: enrichedSignal.tradingAnalysis?.whatToWaitFor ?? enrichedSignal.message,
+      tradeRadarRecommendation: enrichedSignal.tradingAnalysis?.tradeRadarRecommendation ?? null,
+      internalPlaybook: enrichedSignal.internalPlaybook ?? null,
+      rawAiJson: enrichedSignal.rawAiJson ?? null,
       structure: enrichedSignal.structure,
       strategy: enrichedSignal.primaryStrategy ?? 'Market Read',
       waitConditions: enrichedSignal.message,

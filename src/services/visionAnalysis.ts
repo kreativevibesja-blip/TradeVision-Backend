@@ -1,6 +1,9 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { config } from '../config';
 import { getSystemSetting, type SubscriptionTier } from '../lib/supabase';
+import { buildTradingChartAnalystPrompt } from '../lib/ai/prompts/tradingChartAnalystPrompt';
+import { validateTradingAnalysisResponse, type TradingAnalysis } from '../lib/ai/validators/tradingAnalysisValidator';
+import { classifySetup, type InternalPlaybook } from '../lib/ai/playbooks/classifySetup';
 
 export interface SMCZone {
   min: number | null;
@@ -98,6 +101,9 @@ export interface VisionAnalysisResult {
   takeProfit1: number | null;
   takeProfit2: number | null;
   takeProfit3: number | null;
+  tradingAnalysis?: TradingAnalysis;
+  internalPlaybook?: InternalPlaybook;
+  rawAiJson?: Record<string, unknown>;
   analysisMeta?: VisionAnalysisMetadata;
 }
 
@@ -476,6 +482,132 @@ const normalizeVisiblePriceRange = (value: unknown): { min: number; max: number 
   return { min, max };
 };
 
+const normalizeTradingMarketCondition = (value: TradingAnalysis['marketCondition']): MarketCondition => {
+  if (value === 'trending' || value === 'ranging') {
+    return value;
+  }
+
+  if (value === 'volatile') {
+    return 'breakout';
+  }
+
+  return 'consolidation';
+};
+
+const setupQualityToLegacyRating = (value: TradingAnalysis['setupQuality']): SMCQuality['setupRating'] => {
+  if (value === 'A+' || value === 'A') {
+    return 'A+';
+  }
+
+  if (value === 'B') {
+    return 'B';
+  }
+
+  return 'avoid';
+};
+
+const tradingKeyLevelToZone = (
+  analysis: TradingAnalysis,
+  types: Array<TradingAnalysis['keyLevels'][number]['type']>
+): SMCQualifiedZone | null => {
+  const level = analysis.keyLevels.find((item) => types.includes(item.type) && item.price !== null);
+  if (!level || level.price === null) {
+    return null;
+  }
+
+  const entryFrom = analysis.entryZone.from;
+  const entryTo = analysis.entryZone.to;
+  const zoneSize = entryFrom !== null && entryTo !== null
+    ? Math.abs(entryTo - entryFrom)
+    : Math.max(Math.abs(level.price) * 0.001, 0.0001);
+
+  return {
+    min: level.price - zoneSize / 2,
+    max: level.price + zoneSize / 2,
+    reason: level.type === 'fvg' ? 'imbalance' : 'previous structure',
+  };
+};
+
+const tradingAnalysisToVisionResult = (
+  analysis: TradingAnalysis,
+  parsed: Record<string, unknown>
+): Omit<VisionAnalysisResult, 'analysisMeta'> => {
+  const direction = analysis.direction;
+  const entryType: SMCEntryPlan['entryType'] = direction === 'none'
+    ? 'none'
+    : analysis.entryReadiness === 'ready'
+      ? 'instant'
+      : 'confirmation';
+  const entryZone = analysis.entryZone.from !== null && analysis.entryZone.to !== null
+    ? { min: analysis.entryZone.from, max: analysis.entryZone.to }
+    : null;
+  const demand = tradingKeyLevelToZone(analysis, ['demand', 'support', 'range_low']);
+  const supply = tradingKeyLevelToZone(analysis, ['supply', 'resistance', 'range_high']);
+  const trend: VisionAnalysisResult['trend'] = analysis.marketBias === 'bullish' || analysis.marketBias === 'bearish'
+    ? analysis.marketBias
+    : 'ranging';
+  const confirmation = analysis.setupType === 'reversal'
+    ? 'CHoCH'
+    : analysis.setupType === 'breakout' || analysis.setupType === 'continuation'
+      ? 'BOS'
+      : direction === 'none'
+        ? 'none'
+        : 'rejection';
+
+  return {
+    trend,
+    marketCondition: normalizeTradingMarketCondition(analysis.marketCondition),
+    primaryStrategy: 'Market Read',
+    confirmations: analysis.mentorNotes.slice(0, 3),
+    structure: {
+      state: trend === 'bullish' ? 'higher highs' : trend === 'bearish' ? 'lower lows' : 'transition',
+      bos: analysis.setupType === 'breakout' || analysis.setupType === 'continuation' ? trend === 'ranging' ? 'none' : trend : 'none',
+      choch: analysis.setupType === 'reversal' ? trend === 'ranging' ? 'none' : trend : 'none',
+    },
+    liquidity: {
+      type: analysis.keyLevels.some((level) => level.type === 'liquidity' && /sell|low|below/i.test(level.description)) ? 'sell-side'
+        : analysis.keyLevels.some((level) => level.type === 'liquidity') ? 'buy-side'
+        : 'none',
+      description: analysis.keyLevels.find((level) => level.type === 'liquidity')?.description ?? 'No dominant liquidity event was confirmed.',
+    },
+    zones: { supply, demand },
+    pricePosition: {
+      location: direction === 'sell' ? 'premium' : direction === 'buy' ? 'discount' : 'equilibrium',
+      explanation: analysis.summary,
+    },
+    entryPlan: {
+      bias: direction,
+      entryType,
+      entryZone,
+      confirmation,
+      reason: analysis.summary,
+    },
+    counterTrendPlan: null,
+    leftSidePlan: null,
+    riskManagement: {
+      invalidationLevel: analysis.stopLoss,
+      invalidationReason: analysis.invalidation,
+    },
+    quality: {
+      setupRating: setupQualityToLegacyRating(analysis.setupQuality),
+      confidence: analysis.confidence,
+    },
+    finalVerdict: {
+      action: analysis.entryReadiness === 'ready' ? 'enter' : analysis.entryReadiness === 'waiting' ? 'wait' : 'avoid',
+      message: analysis.whatToWaitFor,
+    },
+    reasoning: analysis.summary,
+    visiblePriceRange: null,
+    stopLoss: analysis.stopLoss,
+    takeProfit1: analysis.takeProfits[0] ?? null,
+    takeProfit2: analysis.takeProfits[1] ?? null,
+    takeProfit3: analysis.takeProfits[2] ?? null,
+    tradingAnalysis: analysis,
+    internalPlaybook: classifySetup(analysis),
+    rawAiJson: parsed,
+  };
+};
+
 const normalizeGeminiModelName = (modelName: string) => {
   const normalized = modelName.trim();
   const withoutPrefix = normalized.replace(/^models\//i, '');
@@ -774,6 +906,12 @@ export async function analyzeVisionStructure(
   timeframe: string,
   subscription: SubscriptionTier
 ): Promise<VisionAnalysisResult> {
+  const aiFirstPrompt = buildTradingChartAnalystPrompt({
+    symbol: pair,
+    timeframe,
+    source: 'uploaded image',
+    extraContext: 'Analyze the uploaded chart screenshot only. Ignore browser chrome, platform UI, colors, layout, device frame, and non-chart details. Decide the setup/playbook internally from the visible market context.',
+  });
   const freeJsonSchema = `
 {
   "trend": "bullish | bearish | ranging",
@@ -1165,12 +1303,18 @@ STRICT RULES
 
 Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 
-  const prompt = isPaidSubscription(subscription)
+  const legacyPrompt = isPaidSubscription(subscription)
     ? proPrompt
     : `${freePromptHeader}\n\n========================================\nOUTPUT FORMAT (STRICT JSON ONLY)\n========================================\n${freeJsonSchema}\n${freeRules}\n${freeGoal}`;
+  const modeSetting = await getSystemSetting('ai_analysis_mode').catch(() => null);
+  const prompt = modeSetting?.value === 'legacy_strategy_selection' ? legacyPrompt : aiFirstPrompt;
 
   try {
     const { parsed, metadata } = await executeVisionJsonGeneration('single', subscription, prompt, base64Image, mimeType);
+    if ('marketBias' in parsed || 'entryReadiness' in parsed || 'setupType' in parsed) {
+      return withVisionModelMetadata(tradingAnalysisToVisionResult(validateTradingAnalysisResponse(parsed), parsed), metadata);
+    }
+
     const structure = parsed.structure as Record<string, unknown> | undefined;
     const liquidity = parsed.liquidity as Record<string, unknown> | undefined;
     const zones = parsed.zones as Record<string, unknown> | undefined;

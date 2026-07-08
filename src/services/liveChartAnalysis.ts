@@ -1,6 +1,9 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { config } from '../config';
 import { getSystemSetting, type SubscriptionTier } from '../lib/supabase';
+import { buildTradingChartAnalystPrompt } from '../lib/ai/prompts/tradingChartAnalystPrompt';
+import { validateTradingAnalysisResponse, type TradingAnalysis } from '../lib/ai/validators/tradingAnalysisValidator';
+import { classifySetup } from '../lib/ai/playbooks/classifySetup';
 import type { MarketCandle } from './marketData';
 import type { VisionAnalysisResult, VisionModelMetadata } from './visionAnalysis';
 
@@ -251,6 +254,100 @@ const normalizeVisiblePriceRange = (value: unknown) => {
   return { min, max };
 };
 
+const normalizeTradingMarketCondition = (value: TradingAnalysis['marketCondition']): VisionAnalysisResult['marketCondition'] => {
+  if (value === 'trending' || value === 'ranging') {
+    return value;
+  }
+  if (value === 'volatile') {
+    return 'breakout';
+  }
+  return 'consolidation';
+};
+
+const tradingAnalysisToVisionResult = (
+  analysis: TradingAnalysis,
+  parsed: Record<string, unknown>
+): Omit<VisionAnalysisResult, 'analysisMeta'> => {
+  const trend: VisionAnalysisResult['trend'] = analysis.marketBias === 'bullish' || analysis.marketBias === 'bearish'
+    ? analysis.marketBias
+    : 'ranging';
+  const entryZone = analysis.entryZone.from !== null && analysis.entryZone.to !== null
+    ? { min: analysis.entryZone.from, max: analysis.entryZone.to }
+    : null;
+  const zoneSize = entryZone ? Math.abs(entryZone.max - entryZone.min) : 0;
+  const makeZone = (type: 'supply' | 'demand' | 'resistance' | 'support' | 'range_high' | 'range_low') => {
+    const level = analysis.keyLevels.find((item) => item.type === type && item.price !== null);
+    if (!level || level.price === null) {
+      return null;
+    }
+    const buffer = zoneSize > 0 ? zoneSize / 2 : Math.max(Math.abs(level.price) * 0.001, 0.0001);
+    return { min: level.price - buffer, max: level.price + buffer, reason: 'previous structure' as const };
+  };
+  const confirmation = analysis.direction === 'none'
+    ? 'none'
+    : analysis.setupType === 'reversal'
+      ? 'CHoCH'
+      : analysis.setupType === 'breakout' || analysis.setupType === 'continuation'
+        ? 'BOS'
+        : 'rejection';
+
+  return {
+    trend,
+    marketCondition: normalizeTradingMarketCondition(analysis.marketCondition),
+    primaryStrategy: 'Market Read',
+    confirmations: analysis.mentorNotes.slice(0, 3),
+    structure: {
+      state: trend === 'bullish' ? 'higher highs' : trend === 'bearish' ? 'lower lows' : 'transition',
+      bos: confirmation === 'BOS' && trend !== 'ranging' ? trend : 'none',
+      choch: confirmation === 'CHoCH' && trend !== 'ranging' ? trend : 'none',
+    },
+    liquidity: {
+      type: analysis.keyLevels.some((level) => level.type === 'liquidity' && /sell|low|below/i.test(level.description)) ? 'sell-side'
+        : analysis.keyLevels.some((level) => level.type === 'liquidity') ? 'buy-side'
+        : 'none',
+      description: analysis.keyLevels.find((level) => level.type === 'liquidity')?.description ?? 'No dominant liquidity event was confirmed.',
+    },
+    zones: {
+      supply: makeZone('supply') ?? makeZone('resistance') ?? makeZone('range_high'),
+      demand: makeZone('demand') ?? makeZone('support') ?? makeZone('range_low'),
+    },
+    pricePosition: {
+      location: analysis.direction === 'sell' ? 'premium' : analysis.direction === 'buy' ? 'discount' : 'equilibrium',
+      explanation: analysis.summary,
+    },
+    entryPlan: {
+      bias: analysis.direction,
+      entryType: analysis.direction === 'none' ? 'none' : analysis.entryReadiness === 'ready' ? 'instant' : 'confirmation',
+      entryZone,
+      confirmation,
+      reason: analysis.summary,
+    },
+    counterTrendPlan: null,
+    leftSidePlan: null,
+    riskManagement: {
+      invalidationLevel: analysis.stopLoss,
+      invalidationReason: analysis.invalidation,
+    },
+    quality: {
+      setupRating: analysis.setupQuality === 'A+' || analysis.setupQuality === 'A' ? 'A+' : analysis.setupQuality === 'B' ? 'B' : 'avoid',
+      confidence: analysis.confidence,
+    },
+    finalVerdict: {
+      action: analysis.entryReadiness === 'ready' ? 'enter' : analysis.entryReadiness === 'waiting' ? 'wait' : 'avoid',
+      message: analysis.whatToWaitFor,
+    },
+    reasoning: analysis.summary,
+    visiblePriceRange: null,
+    stopLoss: analysis.stopLoss,
+    takeProfit1: analysis.takeProfits[0] ?? null,
+    takeProfit2: analysis.takeProfits[1] ?? null,
+    takeProfit3: analysis.takeProfits[2] ?? null,
+    tradingAnalysis: analysis,
+    internalPlaybook: classifySetup(analysis),
+    rawAiJson: parsed,
+  };
+};
+
 const parseBooleanSetting = (value: unknown, fallback: boolean) => {
   if (typeof value === 'boolean') {
     return value;
@@ -379,7 +476,7 @@ HOUSE MODEL FROM CONFIRMED WINNING SETUPS
 - Do not reward random momentum candles unless they begin from a meaningful area of interest.
 - Treat these as execution models: reaction at area, confirmation, displacement, then continuation into clean liquidity.`;
 
-const buildPrompt = (symbol: string, timeframe: string, candles: MarketCandle[]) => {
+const buildPrompt = (symbol: string, timeframe: string, candles: MarketCandle[], aiFirst = true) => {
   const recentCandles = candles.slice(-120).map((candle) => ({
     t: candle.timestamp,
     o: candle.open,
@@ -387,6 +484,24 @@ const buildPrompt = (symbol: string, timeframe: string, candles: MarketCandle[])
     l: candle.low,
     c: candle.close,
   }));
+
+  if (aiFirst) {
+    return buildTradingChartAnalystPrompt({
+      symbol,
+      timeframe,
+      source: 'live candles',
+      extraContext: `Use ONLY the OHLC candle data below. Do not invent levels outside the candle range. Analyze the market first, then infer the most relevant internal playbook without asking the user to choose a strategy.
+
+Dataset summary:
+- Candle count: ${recentCandles.length}
+- Latest close: ${recentCandles[recentCandles.length - 1]?.c ?? 'N/A'}
+- Oldest included candle: ${recentCandles[0]?.t ?? 'N/A'}
+- Latest included candle: ${recentCandles[recentCandles.length - 1]?.t ?? 'N/A'}
+
+Candles JSON:
+${JSON.stringify(recentCandles)}`,
+    });
+  }
 
   return `You are Orion, an advanced independent market analyst for TradeVision.
 
@@ -641,7 +756,8 @@ export const analyzeLiveChartCandles = async (
   timeframe: string,
   candles: MarketCandle[]
 ): Promise<VisionAnalysisResult> => {
-  const prompt = buildPrompt(symbol, timeframe, candles);
+  const modeSetting = await getSystemSetting('ai_analysis_mode').catch(() => null);
+  const prompt = buildPrompt(symbol, timeframe, candles, modeSetting?.value !== 'legacy_strategy_selection');
   const candidates = await getProviderCandidates('PRO');
   const primaryModel = candidates[0].modelName;
   const fallbackModel = candidates[1]?.modelName ?? null;
@@ -655,6 +771,13 @@ export const analyzeLiveChartCandles = async (
         : await generateOpenAiResponse(candidate.modelName, prompt);
 
       const parsed = parseJsonObject(rawText);
+      if ('marketBias' in parsed || 'entryReadiness' in parsed || 'setupType' in parsed) {
+        return {
+          ...tradingAnalysisToVisionResult(validateTradingAnalysisResponse(parsed), parsed),
+          analysisMeta: createMetadata(primaryModel, fallbackModel, candidate.modelName, candidate.provider),
+        };
+      }
+
       const structure = parsed.structure as Record<string, unknown> | undefined;
       const liquidity = parsed.liquidity as Record<string, unknown> | undefined;
       const zones = parsed.zones as Record<string, unknown> | undefined;

@@ -53,6 +53,9 @@ export interface TradeSignalResult {
   takeProfit1: number | null;
   takeProfit2: number | null;
   takeProfit3: number | null;
+  tradingAnalysis?: VisionAnalysisResult['tradingAnalysis'];
+  internalPlaybook?: VisionAnalysisResult['internalPlaybook'];
+  rawAiJson?: VisionAnalysisResult['rawAiJson'];
   provider: 'tradevision';
 }
 
@@ -307,6 +310,9 @@ export function generateFinalSignal(aiData: VisionAnalysisResult, currentPrice: 
     takeProfit1: aiData.takeProfit1,
     takeProfit2: aiData.takeProfit2,
     takeProfit3: aiData.takeProfit3,
+    tradingAnalysis: aiData.tradingAnalysis,
+    internalPlaybook: aiData.internalPlaybook,
+    rawAiJson: aiData.rawAiJson,
     provider: 'tradevision',
   };
 }
