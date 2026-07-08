@@ -4,7 +4,7 @@ import { AuthRequest } from '../middleware/auth';
 import { sendPushToUser } from '../services/pushService';
 import { generateInstantSignal, InstantSignalAssetClass, InstantSignalCandle } from '../services/instantSignalEngine';
 
-const ACTIVE_STATUSES = ['entry_now', 'wait_confirmation', 'active'];
+const ACTIVE_STATUSES = ['entry_now', 'active'];
 const FINAL_STATUSES = ['tp_hit', 'sl_hit', 'expired', 'cancelled'];
 
 const toCamelSignal = (row: any) => ({
@@ -144,7 +144,7 @@ const createInstantSignal = async (req: AuthRequest, res: Response, assetClass: 
       throw new Error(error.message);
     }
 
-    await notifyUser(req.user!.id, 'Instant signal generated', `${symbol} ${signal.direction === 'none' ? 'no signal' : `${signal.direction} signal ${signal.status === 'entry_now' ? 'active' : 'waiting'}`}`);
+      await notifyUser(req.user!.id, 'Instant signal generated', `${symbol} ${signal.direction === 'none' ? 'no signal' : `${signal.direction} signal active`}`);
     return res.status(201).json({ signal: toCamelSignal(data) });
   } catch (error: any) {
     console.error('[instant-signal] create failed:', error);
@@ -270,9 +270,6 @@ const updateSignalLifecycle = async (userId: string, prices: Record<string, numb
     }
 
     let patch: Record<string, unknown> | null = null;
-    if (signal.status === 'wait_confirmation') {
-      patch = { status: 'active', updated_at: new Date().toISOString() };
-    }
     if (signal.take_profit != null && hitTarget(signal.direction, price, Number(signal.take_profit))) {
       patch = { status: 'tp_hit', result: 'win', result_price: price, result_at: new Date().toISOString(), updated_at: new Date().toISOString() };
     } else if (signal.stop_loss != null && hitStop(signal.direction, price, Number(signal.stop_loss))) {
@@ -283,7 +280,6 @@ const updateSignalLifecycle = async (userId: string, prices: Record<string, numb
       const { data: updated, error: updateError } = await supabase.from('instant_signals').update(patch).eq('id', signal.id).select('*').single();
       if (updateError) throw new Error(updateError.message);
       updates.push(toCamelSignal(updated));
-      if (patch.status === 'active') await notifyUser(userId, 'Confirmation triggered', `${signal.market} confirmation triggered`);
       if (patch.status === 'tp_hit') await notifyUser(userId, 'TP hit', `${signal.market} signal hit take profit`);
       if (patch.status === 'sl_hit') await notifyUser(userId, 'SL hit', `${signal.market} signal hit stop loss`);
     }
