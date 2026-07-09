@@ -517,9 +517,12 @@ const tradingKeyLevelToZone = (
 
   const entryFrom = analysis.entryZone.from;
   const entryTo = analysis.entryZone.to;
-  const zoneSize = entryFrom !== null && entryTo !== null
+  const entryZoneSize = entryFrom !== null && entryTo !== null
     ? Math.abs(entryTo - entryFrom)
     : Math.max(Math.abs(level.price) * 0.001, 0.0001);
+  const minZoneSize = Math.max(Math.abs(level.price) * 0.0002, 0.0001);
+  const maxZoneSize = Math.max(Math.abs(level.price) * 0.002, minZoneSize);
+  const zoneSize = Math.max(minZoneSize, Math.min(maxZoneSize, entryZoneSize));
 
   return {
     min: level.price - zoneSize / 2,

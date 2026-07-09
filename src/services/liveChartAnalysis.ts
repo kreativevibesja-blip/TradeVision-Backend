@@ -280,7 +280,10 @@ const tradingAnalysisToVisionResult = (
     if (!level || level.price === null) {
       return null;
     }
-    const buffer = zoneSize > 0 ? zoneSize / 2 : Math.max(Math.abs(level.price) * 0.001, 0.0001);
+    const minZoneSize = Math.max(Math.abs(level.price) * 0.0002, 0.0001);
+    const maxZoneSize = Math.max(Math.abs(level.price) * 0.002, minZoneSize);
+    const boundedZoneSize = zoneSize > 0 ? Math.max(minZoneSize, Math.min(maxZoneSize, zoneSize)) : Math.max(Math.abs(level.price) * 0.001, minZoneSize);
+    const buffer = boundedZoneSize / 2;
     return { min: level.price - buffer, max: level.price + buffer, reason: 'previous structure' as const };
   };
   const confirmation = analysis.direction === 'none'

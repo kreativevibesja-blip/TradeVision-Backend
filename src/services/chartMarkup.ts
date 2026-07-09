@@ -25,6 +25,10 @@ interface MarkupAnalysis {
     description?: string;
   };
   invalidationLevel?: number | null;
+  stopLoss?: number | null;
+  takeProfit1?: number | null;
+  takeProfit2?: number | null;
+  takeProfit3?: number | null;
   currentPrice?: number;
   visiblePriceRange?: { min: number; max: number } | null;
 }
@@ -108,6 +112,10 @@ const inferChartBounds = (analysis: MarkupAnalysis, input: ChartBoundsInput): Ch
     ...collectZoneNumbers(analysis.entryPlan?.entryZone),
     ...collectZoneNumbers(analysis.entryZone),
     analysis.invalidationLevel,
+    analysis.stopLoss,
+    analysis.takeProfit1,
+    analysis.takeProfit2,
+    analysis.takeProfit3,
     analysis.currentPrice,
   ].filter(isFiniteNumber);
 
@@ -156,10 +164,10 @@ const escapeXml = (value: string) =>
     .replace(/'/g, '&apos;');
 
 const inferPlotArea = (width: number, height: number) => {
-  const left = Math.round(width * 0.005);
-  const right = Math.round(width * 0.905);
-  const top = Math.round(height * 0.06);
-  const bottom = Math.round(height * 0.925);
+  const left = Math.round(width * 0.008);
+  const right = Math.round(width * 0.94);
+  const top = Math.round(height * 0.018);
+  const bottom = Math.round(height * 0.9);
 
   return {
     left,
@@ -207,10 +215,9 @@ const drawZone = (context: DrawContext, zone: NumericZone | null | undefined, co
 
   const rawTop = Math.min(y1, y2);
   const rawHeight = Math.abs(y2 - y1);
-  const maxHeight = context.plotArea.height * 0.12;
-  const height = clamp(Math.min(rawHeight, maxHeight), 2, context.plotArea.height);
+  const height = clamp(rawHeight, 2, context.plotArea.height);
   const center = rawTop + rawHeight / 2;
-  const top = clamp(center - height / 2, context.plotArea.top, context.plotArea.bottom - height);
+  const top = clamp(rawTop, context.plotArea.top, context.plotArea.bottom - height);
 
   if (height < 2) {
     return '';
@@ -226,6 +233,84 @@ const drawZone = (context: DrawContext, zone: NumericZone | null | undefined, co
     <line x1="${anchorX}" y1="${anchorY}" x2="${tagX}" y2="${tagY + 14}" stroke="${color}" stroke-width="1" stroke-dasharray="4 3" opacity="0.6" />
     <circle cx="${anchorX}" cy="${anchorY}" r="2.5" fill="${color}" />
     ${drawTag(tagX, tagY, color, label)}
+  `;
+};
+
+const normalizeZone = (zone: NumericZone | null | undefined) => {
+  if (!zone || !isFiniteNumber(zone.min) || !isFiniteNumber(zone.max)) {
+    return null;
+  }
+
+  return {
+    low: Math.min(zone.min, zone.max),
+    high: Math.max(zone.min, zone.max),
+  };
+};
+
+const firstFinite = (...values: Array<number | null | undefined>) => values.find(isFiniteNumber) ?? null;
+
+const drawPositionTool = (
+  context: DrawContext,
+  analysis: MarkupAnalysis & { stopLoss?: number | null; takeProfit1?: number | null; takeProfit2?: number | null; takeProfit3?: number | null }
+) => {
+  const entryZone = normalizeZone(analysis.entryPlan?.entryZone ?? analysis.entryZone);
+  const stopLoss = firstFinite(analysis.stopLoss, analysis.invalidationLevel);
+  const takeProfit = firstFinite(analysis.takeProfit1, analysis.takeProfit2, analysis.takeProfit3);
+
+  if (!entryZone || !isFiniteNumber(stopLoss) || !isFiniteNumber(takeProfit)) {
+    return '';
+  }
+
+  const entry = (entryZone.low + entryZone.high) / 2;
+  if (![entry, stopLoss, takeProfit].every((price) => isPriceWithinBounds(price, context))) {
+    return '';
+  }
+
+  const yEntry = priceToY(entry, context);
+  const ySl = priceToY(stopLoss, context);
+  const yTp = priceToY(takeProfit, context);
+  if (!isFiniteNumber(yEntry) || !isFiniteNumber(ySl) || !isFiniteNumber(yTp)) {
+    return '';
+  }
+
+  const isLong = takeProfit > entry && stopLoss < entry;
+  const isShort = takeProfit < entry && stopLoss > entry;
+  if (!isLong && !isShort) {
+    return '';
+  }
+
+  const toolWidth = clamp(context.plotArea.width * 0.24, 190, 320);
+  const x = clamp(context.plotArea.right - toolWidth - context.plotArea.width * 0.04, context.plotArea.left + 16, context.plotArea.right - toolWidth - 8);
+  const right = x + toolWidth;
+  const yTopReward = Math.min(yTp, yEntry);
+  const yBottomReward = Math.max(yTp, yEntry);
+  const yTopRisk = Math.min(ySl, yEntry);
+  const yBottomRisk = Math.max(ySl, yEntry);
+  const risk = Math.abs(entry - stopLoss);
+  const reward = Math.abs(takeProfit - entry);
+  const rr = risk > 0 ? reward / risk : null;
+  const directionLabel = isLong ? 'Long Position' : 'Short Position';
+  const labelX = x + 8;
+  const priceLabelX = right - 96;
+
+  return `
+    <g>
+      <rect x="${x}" y="${yTopReward}" width="${toolWidth}" height="${Math.max(2, yBottomReward - yTopReward)}" fill="rgba(34,197,94,0.16)" stroke="#22c55e" stroke-width="1" rx="2" />
+      <rect x="${x}" y="${yTopRisk}" width="${toolWidth}" height="${Math.max(2, yBottomRisk - yTopRisk)}" fill="rgba(239,68,68,0.16)" stroke="#ef4444" stroke-width="1" rx="2" />
+      <line x1="${x}" y1="${yEntry}" x2="${right}" y2="${yEntry}" stroke="#3b82f6" stroke-width="2" />
+      <line x1="${x}" y1="${yTp}" x2="${right}" y2="${yTp}" stroke="#22c55e" stroke-width="1.5" />
+      <line x1="${x}" y1="${ySl}" x2="${right}" y2="${ySl}" stroke="#ef4444" stroke-width="1.5" />
+      <line x1="${x + toolWidth / 2}" y1="${Math.min(yTp, ySl)}" x2="${x + toolWidth / 2}" y2="${Math.max(yTp, ySl)}" stroke="rgba(226,232,240,0.55)" stroke-width="1" stroke-dasharray="4 4" />
+      <rect x="${x}" y="${clamp(Math.min(yTp, ySl) - 24, context.plotArea.top + 4, context.plotArea.bottom - 24)}" width="${toolWidth}" height="22" fill="rgba(10,14,23,0.92)" stroke="#64748b" stroke-width="1" rx="4" />
+      <text x="${labelX}" y="${clamp(Math.min(yTp, ySl) - 9, context.plotArea.top + 19, context.plotArea.bottom - 9)}" fill="#f8fafc" font-size="10" font-family="${FONT_STACK}" font-weight="700">${directionLabel}</text>
+      ${rr ? `<text x="${right - 54}" y="${clamp(Math.min(yTp, ySl) - 9, context.plotArea.top + 19, context.plotArea.bottom - 9)}" fill="#cbd5e1" font-size="10" font-family="${FONT_STACK}" font-weight="700">RR ${rr.toFixed(2)}</text>` : ''}
+      <rect x="${priceLabelX}" y="${clamp(yTp - 10, context.plotArea.top + 2, context.plotArea.bottom - 20)}" width="96" height="20" fill="rgba(15,23,42,0.94)" stroke="#22c55e" stroke-width="1" rx="3" />
+      <text x="${priceLabelX + 7}" y="${clamp(yTp + 4, context.plotArea.top + 16, context.plotArea.bottom - 6)}" fill="#22c55e" font-size="9" font-family="${FONT_STACK}" font-weight="700">TP ${formatMarkupPrice(takeProfit)}</text>
+      <rect x="${priceLabelX}" y="${clamp(yEntry - 10, context.plotArea.top + 2, context.plotArea.bottom - 20)}" width="96" height="20" fill="rgba(15,23,42,0.94)" stroke="#3b82f6" stroke-width="1" rx="3" />
+      <text x="${priceLabelX + 7}" y="${clamp(yEntry + 4, context.plotArea.top + 16, context.plotArea.bottom - 6)}" fill="#60a5fa" font-size="9" font-family="${FONT_STACK}" font-weight="700">Entry ${formatMarkupPrice(entry)}</text>
+      <rect x="${priceLabelX}" y="${clamp(ySl - 10, context.plotArea.top + 2, context.plotArea.bottom - 20)}" width="96" height="20" fill="rgba(15,23,42,0.94)" stroke="#ef4444" stroke-width="1" rx="3" />
+      <text x="${priceLabelX + 7}" y="${clamp(ySl + 4, context.plotArea.top + 16, context.plotArea.bottom - 6)}" fill="#f87171" font-size="9" font-family="${FONT_STACK}" font-weight="700">SL ${formatMarkupPrice(stopLoss)}</text>
+    </g>
   `;
 };
 
@@ -320,7 +405,7 @@ const buildOverlay = (context: DrawContext, analysis: MarkupAnalysis) => {
     drawLegendBadges(context, analysis),
     drawZone(context, analysis.zones?.supplyZone, '#ef4444', 'Resistance zone'),
     drawZone(context, analysis.zones?.demandZone, '#22c55e', 'Support zone'),
-    drawZone(context, analysis.entryPlan?.entryZone ?? analysis.entryZone, '#3b82f6', 'Entry zone'),
+    drawPositionTool(context, analysis),
     drawLiquidityMarker(context, analysis),
   ].filter(Boolean);
 
@@ -466,9 +551,7 @@ const buildLTFOverlay = (context: DrawContext, analysis: MarkupAnalysis & { stop
     badgesSvg,
     drawZone(context, analysis.zones?.supplyZone, '#f97316', 'Internal resistance'),
     drawZone(context, analysis.zones?.demandZone, '#06b6d4', 'Internal support'),
-    drawZone(context, analysis.entryPlan?.entryZone ?? analysis.entryZone, '#3b82f6', 'Entry zone'),
-    drawPriceLevel(context, analysis.stopLoss, '#ef4444', 'Stop Loss'),
-    ...safeExits.map((exit) => drawPriceLevel(context, exit.price, exit.color, exit.label)),
+    drawPositionTool(context, analysis),
     drawLiquidityMarker(context, analysis),
   ].filter(Boolean);
 
