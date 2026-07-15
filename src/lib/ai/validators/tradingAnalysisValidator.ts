@@ -2,6 +2,10 @@ export type MarketBias = 'bullish' | 'bearish' | 'neutral' | 'unclear';
 export type MarketCondition = 'trending' | 'ranging' | 'corrective' | 'volatile' | 'unclear';
 export type SetupType = 'continuation' | 'reversal' | 'breakout' | 'pullback' | 'range' | 'no_trade';
 export type EntryReadiness = 'ready' | 'waiting' | 'no_trade';
+export type AnalysisMode = 'conservative' | 'balanced' | 'institutional';
+export type EntryTiming = 'ENTER NOW' | 'WAIT 1 CANDLE' | 'WAIT 2 CANDLES' | 'WAIT FOR RETEST' | 'WATCH ONLY';
+export type TradeQuality = 'Excellent' | 'Strong' | 'Moderate' | 'Weak';
+export type RiskLevel = 'low' | 'medium' | 'high';
 export type SetupQuality = 'A+' | 'A' | 'B' | 'C' | 'avoid';
 export type TradeDirection = 'buy' | 'sell' | 'none';
 export type KeyLevelType = 'support' | 'resistance' | 'supply' | 'demand' | 'liquidity' | 'fvg' | 'range_high' | 'range_low';
@@ -17,8 +21,12 @@ export interface TradingAnalysis {
   marketCondition: MarketCondition;
   setupType: SetupType;
   entryReadiness: EntryReadiness;
+  analysisMode: AnalysisMode;
+  entryTiming: EntryTiming;
   confidence: number;
   setupQuality: SetupQuality;
+  tradeQuality: TradeQuality;
+  riskLevel: RiskLevel;
   direction: TradeDirection;
   entryZone: {
     from: number | null;
@@ -43,8 +51,12 @@ export const SAFE_TRADING_ANALYSIS_FALLBACK: TradingAnalysis = {
   marketCondition: 'unclear',
   setupType: 'no_trade',
   entryReadiness: 'no_trade',
+  analysisMode: 'conservative',
+  entryTiming: 'WATCH ONLY',
   confidence: 0,
   setupQuality: 'avoid',
+  tradeQuality: 'Weak',
+  riskLevel: 'high',
   direction: 'none',
   entryZone: { from: null, to: null },
   stopLoss: null,
@@ -98,6 +110,13 @@ const normalizeSetupQuality = (value: unknown): SetupQuality => {
   return 'avoid';
 };
 
+const tradeQualityFromConfidence = (confidence: number): TradeQuality => {
+  if (confidence >= 85) return 'Excellent';
+  if (confidence >= 75) return 'Strong';
+  if (confidence >= 60) return 'Moderate';
+  return 'Weak';
+};
+
 const normalizeKeyLevels = (value: unknown): TradingKeyLevel[] => {
   if (!Array.isArray(value)) {
     return [];
@@ -145,8 +164,12 @@ export const validateTradingAnalysisResponse = (input: unknown): TradingAnalysis
     marketCondition: normalizeEnum(record.marketCondition, ['trending', 'ranging', 'corrective', 'volatile', 'unclear'] as const, 'unclear'),
     setupType: normalizeEnum(record.setupType, ['continuation', 'reversal', 'breakout', 'pullback', 'range', 'no_trade'] as const, 'no_trade'),
     entryReadiness: normalizeEnum(record.entryReadiness, ['ready', 'waiting', 'no_trade'] as const, 'no_trade'),
+    analysisMode: normalizeEnum(record.analysisMode, ['conservative', 'balanced', 'institutional'] as const, 'conservative'),
+    entryTiming: normalizeEnum(record.entryTiming, ['ENTER NOW', 'WAIT 1 CANDLE', 'WAIT 2 CANDLES', 'WAIT FOR RETEST', 'WATCH ONLY'] as const, 'WATCH ONLY'),
     confidence: normalizeConfidence(record.confidence),
     setupQuality: normalizeSetupQuality(record.setupQuality),
+    tradeQuality: 'Weak',
+    riskLevel: normalizeEnum(record.riskLevel, ['low', 'medium', 'high'] as const, 'high'),
     direction: normalizeEnum(record.direction, ['buy', 'sell', 'none'] as const, 'none'),
     entryZone: {
       from: normalizeNumber(entryZoneRecord.from),
@@ -167,6 +190,7 @@ export const validateTradingAnalysisResponse = (input: unknown): TradingAnalysis
       ? record.mentorNotes.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).slice(0, 6)
       : [],
   };
+  result = { ...result, tradeQuality: tradeQualityFromConfidence(result.confidence) };
 
   if (result.direction === 'none') {
     result = {
@@ -175,6 +199,7 @@ export const validateTradingAnalysisResponse = (input: unknown): TradingAnalysis
       stopLoss: null,
       takeProfits: [],
       riskReward: null,
+      entryTiming: 'WATCH ONLY',
     };
   }
 

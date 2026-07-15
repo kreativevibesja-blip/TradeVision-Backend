@@ -35,6 +35,14 @@ import { scanSignalsMarket, type SignalScanTarget } from '../services/signalsMon
 import { runLiveChartAnalysisPipeline } from '../services/analysis/runLiveChartAnalysisPipeline';
 import { buildConfidenceThermometer, buildReactionChallengeResult, buildTradeReplay } from '../services/analysisInteractive';
 import { checkFeatureAccess } from '../middleware/checkFeatureAccess';
+import type { AnalysisMode } from '../lib/ai/validators/tradingAnalysisValidator';
+
+const resolveAnalysisMode = (requested: unknown, subscription: string): AnalysisMode => {
+  const mode = typeof requested === 'string' ? requested.trim().toLowerCase() : '';
+  if (mode === 'institutional' && hasTopTierAccess(subscription)) return 'institutional';
+  if (mode === 'balanced' && subscription !== 'FREE') return 'balanced';
+  return 'conservative';
+};
 
 const parseCurrentPrice = (value: unknown) => {
   if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
@@ -254,6 +262,7 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
         timeframe: input.timeframe,
         currentPrice: input.currentPrice,
         candles: input.candles,
+        analysisMode,
       });
 
       return res.json({ analysis: serializeAnalysis(analysis) });
@@ -267,6 +276,7 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
+    const analysisMode = resolveAnalysisMode(req.body.analysisMode, user.subscription);
 
     if (liveChartSource) {
       if (user.subscription === 'FREE') {
@@ -303,12 +313,14 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
             pair,
             timeframe,
             candles: derivCandles!,
+            analysisMode,
           }
         : {
             source: 'tradingview-live' as const,
             analysisId,
             pair,
             timeframe,
+            analysisMode,
           };
 
       try {
@@ -449,6 +461,7 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
         imageUrl,
         ...primaryImage,
         secondaryChart: secondaryImage,
+        analysisMode,
       });
 
       return res.json({ analysis: serializeAnalysis(analysis) });
@@ -494,6 +507,7 @@ export const analyzeChart = async (req: AuthRequest, res: Response) => {
         base64Image: primaryImage.base64Image,
         mimeType: primaryImage.mimeType,
         secondaryChart: secondaryImage,
+        analysisMode,
       },
     });
 

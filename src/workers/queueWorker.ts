@@ -72,6 +72,7 @@ async function processJob(job: QueueJobRecord) {
             timeframe: input.timeframe,
             currentPrice: resolvedMarketData.currentPrice,
             candles: resolvedMarketData.candles,
+            analysisMode: input.analysisMode,
           });
         })()
       : await runAnalysisPipeline({
@@ -87,6 +88,7 @@ async function processJob(job: QueueJobRecord) {
           base64Image: input.base64Image,
           mimeType: input.mimeType,
           secondaryChart: input.secondaryChart ?? null,
+          analysisMode: input.analysisMode,
         });
 
     const latestJob = await getQueueJobById(job.id);
