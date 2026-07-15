@@ -2,7 +2,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import { config } from '../config';
 import { getSystemSetting, type SubscriptionTier } from '../lib/supabase';
 import { buildTradingChartAnalystPrompt } from '../lib/ai/prompts/tradingChartAnalystPrompt';
-import { validateTradingAnalysisResponse, type TradingAnalysis } from '../lib/ai/validators/tradingAnalysisValidator';
+import { validateTradingAnalysisResponse, type AnalysisMode, type TradingAnalysis } from '../lib/ai/validators/tradingAnalysisValidator';
 import { classifySetup } from '../lib/ai/playbooks/classifySetup';
 import type { MarketCandle } from './marketData';
 import type { VisionAnalysisResult, VisionModelMetadata } from './visionAnalysis';
@@ -479,7 +479,7 @@ HOUSE MODEL FROM CONFIRMED WINNING SETUPS
 - Do not reward random momentum candles unless they begin from a meaningful area of interest.
 - Treat these as execution models: reaction at area, confirmation, displacement, then continuation into clean liquidity.`;
 
-const buildPrompt = (symbol: string, timeframe: string, candles: MarketCandle[], aiFirst = true) => {
+const buildPrompt = (symbol: string, timeframe: string, candles: MarketCandle[], aiFirst = true, analysisMode: AnalysisMode = 'balanced') => {
   const recentCandles = candles.slice(-120).map((candle) => ({
     t: candle.timestamp,
     o: candle.open,
@@ -493,6 +493,7 @@ const buildPrompt = (symbol: string, timeframe: string, candles: MarketCandle[],
       symbol,
       timeframe,
       source: 'live candles',
+      analysisMode,
       extraContext: `Use ONLY the OHLC candle data below. Do not invent levels outside the candle range. Analyze the market first, then infer the most relevant internal playbook without asking the user to choose a strategy.
 
 Dataset summary:
@@ -757,10 +758,11 @@ Return STRICT JSON ONLY. No markdown. No commentary outside JSON.`;
 export const analyzeLiveChartCandles = async (
   symbol: string,
   timeframe: string,
-  candles: MarketCandle[]
+  candles: MarketCandle[],
+  analysisMode: AnalysisMode = 'balanced'
 ): Promise<VisionAnalysisResult> => {
   const modeSetting = await getSystemSetting('ai_analysis_mode').catch(() => null);
-  const prompt = buildPrompt(symbol, timeframe, candles, modeSetting?.value !== 'legacy_strategy_selection');
+  const prompt = buildPrompt(symbol, timeframe, candles, modeSetting?.value !== 'legacy_strategy_selection', analysisMode);
   const candidates = await getProviderCandidates('PRO');
   const primaryModel = candidates[0].modelName;
   const fallbackModel = candidates[1]?.modelName ?? null;

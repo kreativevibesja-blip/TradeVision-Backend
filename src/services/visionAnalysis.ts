@@ -2,7 +2,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import { config } from '../config';
 import { getSystemSetting, type SubscriptionTier } from '../lib/supabase';
 import { buildTradingChartAnalystPrompt } from '../lib/ai/prompts/tradingChartAnalystPrompt';
-import { validateTradingAnalysisResponse, type TradingAnalysis } from '../lib/ai/validators/tradingAnalysisValidator';
+import { validateTradingAnalysisResponse, type AnalysisMode, type TradingAnalysis } from '../lib/ai/validators/tradingAnalysisValidator';
 import { classifySetup, type InternalPlaybook } from '../lib/ai/playbooks/classifySetup';
 
 export interface SMCZone {
@@ -907,12 +907,14 @@ export async function analyzeVisionStructure(
   mimeType: string,
   pair: string,
   timeframe: string,
-  subscription: SubscriptionTier
+  subscription: SubscriptionTier,
+  analysisMode: AnalysisMode = 'conservative'
 ): Promise<VisionAnalysisResult> {
   const aiFirstPrompt = buildTradingChartAnalystPrompt({
     symbol: pair,
     timeframe,
     source: 'uploaded image',
+    analysisMode,
     extraContext: 'Analyze the uploaded chart screenshot only. Ignore browser chrome, platform UI, colors, layout, device frame, and non-chart details. Decide the setup/playbook internally from the visible market context.',
   });
   const freeJsonSchema = `

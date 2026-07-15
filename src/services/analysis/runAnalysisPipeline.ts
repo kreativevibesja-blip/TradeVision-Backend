@@ -5,6 +5,7 @@ import { drawChartMarkup, drawHTFChartMarkup, drawLTFChartMarkup, isChartMarkupE
 import type { SubscriptionTier } from '../../lib/supabase';
 import type { VisionAnalysisResult, VisionModelMetadata } from '../visionAnalysis';
 import type { TradingAnalysis } from '../../lib/ai/validators/tradingAnalysisValidator';
+import type { AnalysisMode } from '../../lib/ai/validators/tradingAnalysisValidator';
 import { classifySetup } from '../../lib/ai/playbooks/classifySetup';
 
 interface SecondaryChartInput {
@@ -27,6 +28,7 @@ interface RunAnalysisPipelineInput {
   base64Image: string;
   mimeType: string;
   secondaryChart: SecondaryChartInput | null;
+  analysisMode?: AnalysisMode;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null;
@@ -81,8 +83,12 @@ const deriveTradingAnalysis = (vision: VisionAnalysisResult): TradingAnalysis =>
     marketCondition: vision.marketCondition === 'trending' || vision.marketCondition === 'ranging' ? vision.marketCondition : 'unclear',
     setupType,
     entryReadiness,
+    analysisMode: 'conservative',
+    entryTiming: entryReadiness === 'ready' ? 'ENTER NOW' : entryReadiness === 'waiting' ? 'WAIT 1 CANDLE' : 'WATCH ONLY',
     confidence: vision.quality.confidence,
     setupQuality: vision.quality.setupRating === 'A+' ? 'A+' : vision.quality.setupRating === 'B' ? 'B' : 'avoid',
+    tradeQuality: vision.quality.confidence >= 85 ? 'Excellent' : vision.quality.confidence >= 75 ? 'Strong' : vision.quality.confidence >= 60 ? 'Moderate' : 'Weak',
+    riskLevel: vision.marketCondition === 'ranging' ? 'high' : vision.quality.confidence >= 80 ? 'low' : 'medium',
     direction,
     entryZone: {
       from: entryZone?.min ?? null,
@@ -105,7 +111,7 @@ const deriveTradingAnalysis = (vision: VisionAnalysisResult): TradingAnalysis =>
   };
 };
 
-export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe, subscription, currentPrice, chartMinPrice, chartMaxPrice, imageUrl, base64Image, mimeType, secondaryChart }: RunAnalysisPipelineInput) {
+export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe, subscription, currentPrice, chartMinPrice, chartMaxPrice, imageUrl, base64Image, mimeType, secondaryChart, analysisMode = 'conservative' }: RunAnalysisPipelineInput) {
   try {
     const isDualChart = secondaryChart !== null;
     let analysisMeta: Record<string, unknown> | null = null;
@@ -185,7 +191,7 @@ export async function runAnalysisPipeline({ analysisId, userId, pair, timeframe,
       analysisMeta = isRecord(vision.analysisMeta) ? vision.analysisMeta : null;
     } else {
       // Single chart mode (existing flow)
-      vision = await analyzeVisionStructure(base64Image, mimeType, pair, timeframe, subscription);
+      vision = await analyzeVisionStructure(base64Image, mimeType, pair, timeframe, subscription, analysisMode);
       analysisMeta = isRecord(vision.analysisMeta) ? vision.analysisMeta : null;
     }
 

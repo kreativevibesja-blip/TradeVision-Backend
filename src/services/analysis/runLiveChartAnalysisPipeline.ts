@@ -5,6 +5,7 @@ import type { MarketCandle } from '../marketData';
 import { analyzeLiveChartCandles } from '../liveChartAnalysis';
 import type { VisionAnalysisResult } from '../visionAnalysis';
 import type { TradingAnalysis } from '../../lib/ai/validators/tradingAnalysisValidator';
+import type { AnalysisMode } from '../../lib/ai/validators/tradingAnalysisValidator';
 import { classifySetup } from '../../lib/ai/playbooks/classifySetup';
 
 interface RunLiveChartAnalysisPipelineInput {
@@ -13,6 +14,7 @@ interface RunLiveChartAnalysisPipelineInput {
   timeframe: string;
   currentPrice: number;
   candles: MarketCandle[];
+  analysisMode?: AnalysisMode;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null;
@@ -53,8 +55,12 @@ const deriveTradingAnalysis = (vision: VisionAnalysisResult): TradingAnalysis =>
     marketCondition: vision.marketCondition === 'trending' || vision.marketCondition === 'ranging' ? vision.marketCondition : 'unclear',
     setupType,
     entryReadiness,
+    analysisMode: 'balanced',
+    entryTiming: entryReadiness === 'ready' ? 'ENTER NOW' : entryReadiness === 'waiting' ? 'WAIT 1 CANDLE' : 'WATCH ONLY',
     confidence: vision.quality.confidence,
     setupQuality: vision.quality.setupRating === 'A+' ? 'A+' : vision.quality.setupRating === 'B' ? 'B' : 'avoid',
+    tradeQuality: vision.quality.confidence >= 85 ? 'Excellent' : vision.quality.confidence >= 75 ? 'Strong' : vision.quality.confidence >= 60 ? 'Moderate' : 'Weak',
+    riskLevel: vision.marketCondition === 'ranging' ? 'high' : vision.quality.confidence >= 80 ? 'low' : 'medium',
     direction,
     entryZone: { from: vision.entryPlan.entryZone?.min ?? null, to: vision.entryPlan.entryZone?.max ?? null },
     stopLoss: vision.stopLoss,
@@ -72,7 +78,7 @@ const deriveTradingAnalysis = (vision: VisionAnalysisResult): TradingAnalysis =>
   };
 };
 
-export async function runLiveChartAnalysisPipeline({ analysisId, pair, timeframe, currentPrice, candles }: RunLiveChartAnalysisPipelineInput) {
+export async function runLiveChartAnalysisPipeline({ analysisId, pair, timeframe, currentPrice, candles, analysisMode = 'balanced' }: RunLiveChartAnalysisPipelineInput) {
   await updateAnalysis(analysisId, {
     status: 'PROCESSING',
     progress: 10,
@@ -80,7 +86,7 @@ export async function runLiveChartAnalysisPipeline({ analysisId, pair, timeframe
     errorMessage: null,
   });
 
-  const vision = await analyzeLiveChartCandles(pair, timeframe, candles);
+  const vision = await analyzeLiveChartCandles(pair, timeframe, candles, analysisMode);
   const metadata = isVisionModelMetadata(vision.analysisMeta) ? vision.analysisMeta : null;
 
   await updateAnalysis(analysisId, {
