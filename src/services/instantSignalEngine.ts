@@ -32,7 +32,7 @@ export interface InstantSignalEngineOutput {
   confidence: number;
   confirmationRequired: number;
   confirmationText: string | null;
-  expiresAt: string;
+  expiresAt: string | null;
 }
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
@@ -44,14 +44,6 @@ const roundToMarket = (value: number, reference: number) => {
 };
 
 const sma = (values: number[]) => values.reduce((total, value) => total + value, 0) / Math.max(values.length, 1);
-
-const getExpiryMinutes = (assetClass: InstantSignalAssetClass, timeframe: string) => {
-  if (assetClass === 'deriv' && (timeframe === '1m' || timeframe === '5m')) {
-    return 30;
-  }
-
-  return 90;
-};
 
 const isBullish = (candle: InstantSignalCandle) => candle.close > candle.open;
 const isBearish = (candle: InstantSignalCandle) => candle.close < candle.open;
@@ -78,7 +70,7 @@ export function generateInstantSignal(input: InstantSignalEngineInput): InstantS
     confidence,
     confirmationRequired: 0,
     confirmationText,
-    expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+    expiresAt: null,
   });
 
   if (candles.length < 30 || !last || !Number.isFinite(currentPrice)) {
@@ -189,8 +181,6 @@ export function generateInstantSignal(input: InstantSignalEngineInput): InstantS
     return noSignal(clamp(confidence, 35, 61), 'No immediate structural trade is clean enough right now.');
   }
 
-  const expiresAt = new Date(Date.now() + getExpiryMinutes(input.assetClass, input.timeframe) * 60 * 1000).toISOString();
-
   return {
     market: input.market,
     assetClass: input.assetClass,
@@ -206,6 +196,6 @@ export function generateInstantSignal(input: InstantSignalEngineInput): InstantS
     confirmationText: direction === 'buy'
       ? `Enter now: ${buySweepRejection ? 'bullish rejection from demand/liquidity' : buyPullbackRetest ? 'bullish pullback retest in trend' : 'bullish breakout retest'} with valid structure.`
       : `Enter now: ${sellSweepRejection ? 'bearish rejection from supply/liquidity' : sellPullbackRetest ? 'bearish pullback retest in trend' : 'bearish breakout retest'} with valid structure.`,
-    expiresAt,
+    expiresAt: null,
   };
 }

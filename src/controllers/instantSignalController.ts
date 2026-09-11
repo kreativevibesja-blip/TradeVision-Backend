@@ -27,7 +27,7 @@ const toCamelSignal = (row: any) => ({
   result: row.result,
   resultPrice: row.result_price == null ? null : Number(row.result_price),
   resultAt: row.result_at,
-  expiresAt: row.expires_at,
+  expiresAt: row.expires_at ?? null,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
   user: row.User ?? row.user ?? null,
@@ -277,8 +277,16 @@ const updateSignalLifecycle = async (userId: string, prices: Record<string, numb
     }
 
     if (patch) {
-      const { data: updated, error: updateError } = await supabase.from('instant_signals').update(patch).eq('id', signal.id).select('*').single();
+      const { data: updated, error: updateError } = await supabase
+        .from('instant_signals')
+        .update(patch)
+        .eq('id', signal.id)
+        .is('result', null)
+        .in('status', ACTIVE_STATUSES)
+        .select('*')
+        .maybeSingle();
       if (updateError) throw new Error(updateError.message);
+      if (!updated) continue;
       updates.push(toCamelSignal(updated));
       if (patch.status === 'tp_hit') await notifyUser(userId, 'TP hit', `${signal.market} signal hit take profit`);
       if (patch.status === 'sl_hit') await notifyUser(userId, 'SL hit', `${signal.market} signal hit stop loss`);
