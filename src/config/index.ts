@@ -81,7 +81,7 @@ export const config = {
     oauthRedirectUri: process.env.DERIV_REDIRECT_URI || '',
     apiBaseUrl: process.env.DERIV_API_BASE_URL || 'https://api.derivws.com',
     tokenEncryptionKey: process.env.DERIV_TOKEN_ENCRYPTION_KEY || '',
-    botEnabled: process.env.DERIV_BOT_ENABLED === 'true',
+      botEnabled: process.env.DERIV_BOT_ENABLED !== 'false',
     minDiffersPayoutRate: Number(process.env.MIN_DIFFERS_PAYOUT_RATE || '95'),
     botTickWindow: parseInt(process.env.DERIV_BOT_TICK_WINDOW || '10', 10),
     botMinSample: parseInt(process.env.DERIV_BOT_MIN_SAMPLE || '100', 10),
