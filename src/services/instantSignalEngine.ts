@@ -1,6 +1,6 @@
 export type InstantSignalAssetClass = 'forex' | 'deriv';
 export type InstantSignalDirection = 'buy' | 'sell' | 'none';
-export type InstantSignalStatus = 'entry_now' | 'no_signal';
+export type InstantSignalStatus = 'entry_now' | 'wait_confirmation' | 'no_signal';
 
 export interface InstantSignalCandle {
   time?: number;
@@ -73,6 +73,22 @@ export function generateInstantSignal(input: InstantSignalEngineInput): InstantS
     expiresAt: null,
   });
 
+  const waitForConfirmation = (direction: Exclude<InstantSignalDirection, 'none'>, confidence: number, confirmationText: string): InstantSignalEngineOutput => ({
+    market: input.market,
+    assetClass: input.assetClass,
+    timeframe: input.timeframe,
+    direction,
+    status: 'wait_confirmation',
+    entry: null,
+    stopLoss: null,
+    takeProfit: null,
+    riskReward: null,
+    confidence,
+    confirmationRequired: 1,
+    confirmationText,
+    expiresAt: null,
+  });
+
   if (candles.length < 30 || !last || !Number.isFinite(currentPrice)) {
     return noSignal(35, 'Not enough visible candles to produce an actionable signal.');
   }
@@ -121,6 +137,8 @@ export function generateInstantSignal(input: InstantSignalEngineInput): InstantS
   const sellSweepRejection = hasTwoSidedAuction && nearHigh && (sweptHigh || rejectionSell) && bearishReaction;
   const hasBuyStructure = buySweepRejection || buyPullbackRetest || buyBreakoutRetest;
   const hasSellStructure = sellSweepRejection || sellPullbackRetest || sellBreakoutRetest;
+  const buyInterest = trendUp && nearLow && !sweptHigh;
+  const sellInterest = trendDown && nearHigh && !sweptLow;
 
   const buyScore =
     (trendUp ? 18 : 0) +
@@ -158,27 +176,37 @@ export function generateInstantSignal(input: InstantSignalEngineInput): InstantS
   const score = direction === 'buy' ? buyScore : sellScore;
   const validStructure = direction === 'buy' ? hasBuyStructure : hasSellStructure;
   const contradiction = direction === 'buy' ? trendDown && sweptHigh : trendUp && sweptLow;
-  const stopDistance = Math.max(averageRange * 1.35, Math.abs(currentPrice - (direction === 'buy' ? recentLow : recentHigh)) + averageRange * 0.25);
+  const structuralStop = direction === 'buy'
+    ? recentLow - averageRange * 0.2
+    : recentHigh + averageRange * 0.2;
+  const stopDistance = Math.abs(currentPrice - structuralStop);
   const entry = roundToMarket(currentPrice, currentPrice);
-  const stopLoss = roundToMarket(direction === 'buy' ? currentPrice - stopDistance : currentPrice + stopDistance, currentPrice);
-  const takeProfit = roundToMarket(direction === 'buy' ? currentPrice + stopDistance * 2 : currentPrice - stopDistance * 2, currentPrice);
+  const stopLoss = roundToMarket(structuralStop, currentPrice);
+  const structuralTarget = direction === 'buy' ? previousHigh : previousLow;
+  const targetDistance = direction === 'buy'
+    ? structuralTarget - currentPrice
+    : currentPrice - structuralTarget;
+  const takeProfit = roundToMarket(structuralTarget, currentPrice);
   const riskReward = Number((Math.abs(takeProfit - entry) / Math.max(Math.abs(entry - stopLoss), Number.EPSILON)).toFixed(2));
   const confidence = clamp(Math.round(52 + score * 0.55 + (riskReward >= 1.8 ? 8 : 0)), 35, 92);
 
-  if (contradiction || riskReward < 1.35 || confidence < 62 || choppy || !validStructure) {
+  if (contradiction || choppy) {
     return noSignal(
       clamp(confidence, 35, 64),
-      !validStructure
-        ? 'No valid rejection structure at a clean level.'
-        : choppy
-          ? 'Market is too choppy for a clean instant signal.'
-          : 'Risk reward or directional confluence is not clean enough.',
+      choppy ? 'Market is too choppy for a clean instant signal.' : 'Recent price action is conflicting; no directional edge is clean enough.',
     );
   }
 
-  const entryNow = confidence >= 62 && validStructure;
-  if (!entryNow) {
-    return noSignal(clamp(confidence, 35, 61), 'No immediate structural trade is clean enough right now.');
+  if (!validStructure || riskReward < 1.35 || confidence < 62) {
+    if (buyInterest && !sellInterest) {
+      return waitForConfirmation('buy', clamp(confidence, 35, 61), 'Bullish context is near a meaningful area, but wait for rejection, displacement, or a close-confirmed local structure break before entry.');
+    }
+    if (sellInterest && !buyInterest) {
+      return waitForConfirmation('sell', clamp(confidence, 35, 61), 'Bearish context is near a meaningful area, but wait for rejection, displacement, or a close-confirmed local structure break before entry.');
+    }
+    return noSignal(clamp(confidence, 35, 61), !validStructure
+      ? 'No confirmed structure at a clean level. Wait for a meaningful reaction before considering risk.'
+      : 'Risk/reward or directional confluence is not clean enough for an immediate signal.');
   }
 
   return {
