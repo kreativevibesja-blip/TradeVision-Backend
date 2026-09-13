@@ -24,8 +24,12 @@ const OAUTH_ATTEMPT_TTL_MS = 10 * 60 * 1000;
 
 function requireBotConfig() {
   if (!config.deriv.botEnabled) throw new Error('Deriv Bot is not enabled.');
-  if (!config.deriv.oauthClientId || !config.deriv.oauthRedirectUri) throw new Error('Deriv OAuth is not configured.');
-  if (!config.deriv.tokenEncryptionKey) throw new Error('Deriv token encryption is not configured.');
+  const missing = [
+    !config.deriv.oauthClientId ? 'DERIV_CLIENT_ID' : null,
+    !config.deriv.oauthRedirectUri ? 'DERIV_REDIRECT_URI' : null,
+    !config.deriv.tokenEncryptionKey ? 'DERIV_TOKEN_ENCRYPTION_KEY' : null,
+  ].filter((name): name is string => Boolean(name));
+  if (missing.length) throw new Error(`Deriv OAuth is not configured. Missing backend environment variable(s): ${missing.join(', ')}.`);
 }
 
 function encryptionKey() {
