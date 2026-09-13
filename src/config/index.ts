@@ -77,6 +77,14 @@ export const config = {
     wsUrl: process.env.DERIV_WS_URL || 'wss://ws.derivws.com/websockets/v3',
     appId: process.env.DERIV_WS_APP_ID || '1089',
     reconnectDelayMs: parseInt(process.env.DERIV_RECONNECT_DELAY_MS || '5000', 10),
+    oauthClientId: process.env.DERIV_CLIENT_ID || '',
+    oauthRedirectUri: process.env.DERIV_REDIRECT_URI || '',
+    apiBaseUrl: process.env.DERIV_API_BASE_URL || 'https://api.derivws.com',
+    tokenEncryptionKey: process.env.DERIV_TOKEN_ENCRYPTION_KEY || '',
+    botEnabled: process.env.DERIV_BOT_ENABLED === 'true',
+    minDiffersPayoutRate: Number(process.env.MIN_DIFFERS_PAYOUT_RATE || '95'),
+    botTickWindow: parseInt(process.env.DERIV_BOT_TICK_WINDOW || '10', 10),
+    botMinSample: parseInt(process.env.DERIV_BOT_MIN_SAMPLE || '100', 10),
   },
   
   paypal: {
