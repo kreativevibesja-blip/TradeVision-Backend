@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { authenticate } from '../middleware/auth';
+import { authenticate, requirePaidSubscription } from '../middleware/auth';
 import {
   connectDerivBot,
   derivBotCallback,
@@ -16,16 +16,18 @@ import {
 
 const router = Router();
 
-router.get('/auth/connect', authenticate, connectDerivBot);
 router.get('/auth/callback', derivBotCallback);
-router.get('/accounts', authenticate, getDerivBotAccounts);
-router.post('/account/select', authenticate, selectDerivBotAccountHandler);
-router.get('/session', authenticate, getDerivBotSessionHandler);
-router.post('/scan', authenticate, scanDerivBotHandler);
-router.post('/proposal', authenticate, getDerivBotProposalHandler);
-router.post('/trade', authenticate, tradeDerivBotHandler);
-router.get('/trades', authenticate, getDerivBotTradeHistoryHandler);
-router.post('/disconnect', authenticate, disconnectDerivBot);
-router.post('/session/disconnect', authenticate, disconnectDerivBotSessionHandler);
+router.use(authenticate, requirePaidSubscription);
+
+router.get('/auth/connect', connectDerivBot);
+router.get('/accounts', getDerivBotAccounts);
+router.post('/account/select', selectDerivBotAccountHandler);
+router.get('/session', getDerivBotSessionHandler);
+router.post('/scan', scanDerivBotHandler);
+router.post('/proposal', getDerivBotProposalHandler);
+router.post('/trade', tradeDerivBotHandler);
+router.get('/trades', getDerivBotTradeHistoryHandler);
+router.post('/disconnect', disconnectDerivBot);
+router.post('/session/disconnect', disconnectDerivBotSessionHandler);
 
 export default router;

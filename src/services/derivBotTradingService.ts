@@ -93,8 +93,9 @@ function extractDigit(quote: unknown, pipSize: unknown) {
   const numericQuote = Number(quote);
   if (!Number.isFinite(numericQuote)) return null;
   const precision = Number.isFinite(Number(pipSize)) ? Math.max(0, Math.round(-Math.log10(Number(pipSize)))) : 2;
-  const fixed = numericQuote.toFixed(precision);
-  const digit = Number(fixed.at(-1));
+  if (precision === 0) return Math.abs(Math.trunc(numericQuote)) % 10;
+  const decimals = numericQuote.toFixed(Math.max(precision, 8)).split('.')[1] ?? '';
+  const digit = Number(decimals[precision - 1]);
   return Number.isInteger(digit) ? digit : null;
 }
 

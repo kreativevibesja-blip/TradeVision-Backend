@@ -174,6 +174,13 @@ export const requireTopTier = (req: AuthRequest, res: Response, next: NextFuncti
   next();
 };
 
+export const requirePaidSubscription = (req: AuthRequest, res: Response, next: NextFunction) => {
+  if (req.user?.subscription !== 'PRO' && req.user?.subscription !== 'TOP_TIER' && req.user?.subscription !== 'VIP_AUTO_TRADER') {
+    return res.status(403).json({ error: 'A Pro or higher plan is required to use Deriv Bot.' });
+  }
+  next();
+};
+
 export const requireGoldxPulseAccess = async (req: AuthRequest, res: Response, next: NextFunction) => {
   if (!req.user) {
     return res.status(401).json({ error: 'Authentication required' });
