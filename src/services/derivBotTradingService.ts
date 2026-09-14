@@ -283,7 +283,7 @@ export async function scanDerivBot(userId: string, accountId: string, stake: num
   if (!session || session.status !== 'connected' || !session.symbol) throw new Error('Select a connected Deriv account and symbol first.');
   const ticks = session.ticks.slice(-500);
   const relevantTicks = ticks.slice(-Math.max(10, config.deriv.botTickWindow));
-  if (ticks.length < config.deriv.botMinSample) return { symbol: session.symbol, targetDigit: null, payoutRate: null, sampleSize: ticks.length, targetOccurrences: 0, setupScore: null, status: 'no_trade', reason: `Insufficient tick sample. Need ${config.deriv.botMinSample} ticks.`, proposal: null };
+  if (!ticks.length) return { symbol: session.symbol, targetDigit: null, payoutRate: null, sampleSize: 0, targetOccurrences: 0, setupScore: null, status: 'no_trade', reason: 'Waiting for the first live tick.', proposal: null };
 
   const counts = Array.from({ length: 10 }, () => 0);
   ticks.forEach((tick) => { counts[tick.digit] += 1; });
@@ -314,6 +314,35 @@ export async function placeDerivBotTrade(userId: string, accountId: string, cont
   const { error } = await supabase.from('deriv_bot_trades').insert(trade);
   if (error) throw new Error(error.message);
   return { ...trade, proposal };
+}
+
+export async function placeDerivBotTradeBurst(userId: string, accountId: string, contractType: DerivBotContractType, digit: number, stake: number, duration: number, requestedTrades: number) {
+  if (!Number.isInteger(digit) || digit < 0 || digit > 9) throw new Error('Digit must be between 0 and 9.');
+  if (!Number.isFinite(stake) || stake <= 0) throw new Error('Stake must be positive.');
+  if (!Number.isInteger(requestedTrades) || requestedTrades < 1 || requestedTrades > 100) throw new Error('Total trades must be between 1 and 100.');
+  const session = sessions.get(sessionKey(userId, accountId));
+  if (!session || session.status !== 'connected' || !session.symbol) throw new Error('Select a connected Deriv account and symbol first.');
+
+  const balanceResponse = await sendRequest(session, { balance: 1 });
+  let availableBalance = Number(balanceResponse.balance?.balance ?? session.balance);
+  if (!Number.isFinite(availableBalance)) throw new Error('Deriv balance is not available yet.');
+  const trades: Array<Record<string, unknown>> = [];
+
+  for (let index = 0; index < requestedTrades; index += 1) {
+    const proposal = await requestProposal(session, contractType, digit, stake, duration);
+    if (!proposal.id || proposal.askPrice > availableBalance) break;
+    const buyResponse = await sendRequest(session, { buy: proposal.id, price: proposal.askPrice });
+    const contractId = String(buyResponse.buy?.contract_id ?? '');
+    if (!contractId) break;
+    await sendRequest(session, { proposal_open_contract: 1, contract_id: contractId, subscribe: 1 });
+    const trade = { id: randomUUID(), user_id: userId, account_id: accountId, symbol: session.symbol, contract_type: contractType, digit, stake, payout: proposal.payout, payout_rate: proposal.payoutRate, proposal_id: proposal.id, contract_id: contractId, result: 'open', duration, account_type: session.accountType, created_at: new Date().toISOString() };
+    const { error } = await supabase.from('deriv_bot_trades').insert(trade);
+    if (error) throw new Error(error.message);
+    trades.push(trade);
+    availableBalance -= proposal.askPrice;
+  }
+
+  return { requestedTrades, executedTrades: trades.length, remainingBalance: availableBalance, trades };
 }
 
 async function persistCompletedTrade(session: BotSession, contract: Record<string, unknown>) {
