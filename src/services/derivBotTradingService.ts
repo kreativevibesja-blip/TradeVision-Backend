@@ -277,8 +277,7 @@ export async function scanDerivBot(userId: string, accountId: string, stake: num
   const occurrences = relevantTicks.filter((tick) => tick.digit === candidate.digit).length;
   const score = Math.max(0, Math.min(100, Math.round(50 + (0.1 - candidate.count / ticks.length) * 250)));
   if (occurrences > 1) return { symbol: session.symbol, targetDigit: candidate.digit, payoutRate: proposal.payoutRate, sampleSize: ticks.length, targetOccurrences: occurrences, setupScore: score, status: 'target_repeated', reason: 'Target digit repeated in the configured recent tick window. Scan again.', proposal };
-  if (proposal.payoutRate == null || proposal.payoutRate < config.deriv.minDiffersPayoutRate) return { symbol: session.symbol, targetDigit: candidate.digit, payoutRate: proposal.payoutRate, sampleSize: ticks.length, targetOccurrences: occurrences, setupScore: score, status: 'below_threshold', reason: `Current Differs payout is below the ${config.deriv.minDiffersPayoutRate}% requirement.`, proposal };
-  return { symbol: session.symbol, targetDigit: candidate.digit, payoutRate: proposal.payoutRate, sampleSize: ticks.length, targetOccurrences: occurrences, setupScore: score, status: 'eligible', reason: 'Statistical setup passed the sample, repetition, and actual proposal payout checks.', proposal };
+  return { symbol: session.symbol, targetDigit: candidate.digit, payoutRate: proposal.payoutRate, sampleSize: ticks.length, targetOccurrences: occurrences, setupScore: score, status: 'eligible', reason: 'Scan selected the least-occurring digit. Payout is displayed for information and does not block manual execution.', proposal };
 }
 
 export async function placeDerivBotTrade(userId: string, accountId: string, contractType: DerivBotContractType, digit: number, stake: number, duration: number) {
@@ -291,7 +290,6 @@ export async function placeDerivBotTrade(userId: string, accountId: string, cont
   if (activeTrade) throw new Error('An active contract already exists for this account and symbol.');
   const proposal = await requestProposal(session, contractType, digit, stake, duration);
   if (!proposal.id) throw new Error('Deriv returned no proposal ID.');
-  if (contractType === 'DIGITDIFF' && (proposal.payoutRate == null || proposal.payoutRate < config.deriv.minDiffersPayoutRate)) throw new Error(`Current Differs payout is ${proposal.payoutRate ?? 'unavailable'}%. TradeVision requires ${config.deriv.minDiffersPayoutRate}%+.`);
   const buyResponse = await sendRequest(session, { buy: proposal.id, price: proposal.askPrice });
   const contractId = String(buyResponse.buy?.contract_id ?? '');
   if (!contractId) throw new Error('Deriv returned no contract ID.');
