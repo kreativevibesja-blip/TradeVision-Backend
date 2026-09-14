@@ -106,10 +106,9 @@ function getSession(userId: string, accountId: string, accountType: 'demo' | 're
 function extractDigit(quote: unknown, pipSize: unknown) {
   const numericQuote = Number(quote);
   if (!Number.isFinite(numericQuote)) return null;
-  const precision = Number.isFinite(Number(pipSize)) ? Math.max(0, Math.round(-Math.log10(Number(pipSize)))) : 2;
-  if (precision === 0) return Math.abs(Math.trunc(numericQuote)) % 10;
-  const decimals = numericQuote.toFixed(Math.max(precision, 8)).split('.')[1] ?? '';
-  const digit = Number(decimals[precision - 1]);
+  const normalizedQuote = String(quote).trim();
+  const digits = normalizedQuote.replace(/[^0-9]/g, '');
+  const digit = Number(digits.at(-1));
   return Number.isInteger(digit) ? digit : null;
 }
 
