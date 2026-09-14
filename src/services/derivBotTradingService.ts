@@ -56,9 +56,21 @@ interface BotSession {
   symbol: string | null;
   ticks: DerivBotTick[];
   lastError: string | null;
+  lastClientActivityAt: number;
 }
 
 const sessions = new Map<string, BotSession>();
+const CLIENT_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+
+setInterval(() => {
+  const cutoff = Date.now() - CLIENT_IDLE_TIMEOUT_MS;
+  for (const [key, session] of sessions) {
+    if (session.lastClientActivityAt < cutoff) {
+      session.ws?.close();
+      sessions.delete(key);
+    }
+  }
+}, 60 * 1000).unref();
 
 function sessionKey(userId: string, accountId: string) {
   return `${userId}:${accountId}`;
@@ -83,6 +95,7 @@ function getSession(userId: string, accountId: string, accountType: 'demo' | 're
       symbol: null,
       ticks: [],
       lastError: null,
+      lastClientActivityAt: Date.now(),
     };
     sessions.set(key, session);
   }
@@ -202,6 +215,7 @@ async function subscribeDerivBotTicks(session: BotSession, symbol: string) {
 export function getDerivBotSession(userId: string, accountId: string) {
   const session = sessions.get(sessionKey(userId, accountId));
   if (!session) return { status: 'disconnected' as const, symbol: null, ticks: [], lastError: null };
+  session.lastClientActivityAt = Date.now();
   return { status: session.status, symbol: session.symbol, balance: session.balance, currency: session.currency, accountType: session.accountType, ticks: session.ticks.slice(-500), lastError: session.lastError };
 }
 
