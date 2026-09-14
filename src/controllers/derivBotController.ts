@@ -12,6 +12,7 @@ import {
   getDerivBotProposal,
   getDerivBotTradeHistory,
   placeDerivBotTrade,
+  placeDerivBotTradeBurst,
   scanDerivBot,
   selectDerivBotAccount,
   type DerivBotContractType,
@@ -131,6 +132,18 @@ export async function tradeDerivBotHandler(req: AuthRequest, res: Response) {
     return res.status(201).json({ trade });
   } catch (error) {
     return res.status(400).json({ error: error instanceof Error ? error.message : 'Unable to place Deriv trade.' });
+  }
+}
+
+export async function burstTradeDerivBotHandler(req: AuthRequest, res: Response) {
+  try {
+    const user = requireUser(req);
+    const contractType = req.body?.contractType as DerivBotContractType;
+    if (contractType !== 'DIGITMATCH' && contractType !== 'DIGITDIFF') return res.status(400).json({ error: 'Unsupported contract type.' });
+    const result = await placeDerivBotTradeBurst(user.id, String(req.body?.accountId ?? ''), contractType, Number(req.body?.digit), Number(req.body?.stake), Number(req.body?.duration ?? 1), Number(req.body?.totalTrades));
+    return res.status(201).json(result);
+  } catch (error) {
+    return res.status(400).json({ error: error instanceof Error ? error.message : 'Unable to place the Deriv burst.' });
   }
 }
 

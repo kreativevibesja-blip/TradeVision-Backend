@@ -11,6 +11,7 @@ import {
   getDerivBotProposalHandler,
   getDerivBotTradeHistoryHandler,
   tradeDerivBotHandler,
+  burstTradeDerivBotHandler,
   disconnectDerivBotSessionHandler,
 } from '../controllers/derivBotController';
 
@@ -26,6 +27,7 @@ router.get('/session', getDerivBotSessionHandler);
 router.post('/scan', scanDerivBotHandler);
 router.post('/proposal', getDerivBotProposalHandler);
 router.post('/trade', tradeDerivBotHandler);
+router.post('/trade/burst', burstTradeDerivBotHandler);
 router.get('/trades', getDerivBotTradeHistoryHandler);
 router.post('/disconnect', disconnectDerivBot);
 router.post('/session/disconnect', disconnectDerivBotSessionHandler);
