@@ -11,6 +11,7 @@ export interface DerivBotTick {
   quote: number;
   digit: number;
   epoch: number;
+  pipSize: number | null;
 }
 
 export interface DerivBotProposal {
@@ -142,7 +143,8 @@ function attachHandlers(session: BotSession) {
     if (tick && String(tick.symbol ?? '') === session.symbol) {
       const digit = extractDigit(tick.quote, tick.pip_size);
       if (digit != null) {
-        session.ticks.push({ quote: Number(tick.quote), digit, epoch: Number(tick.epoch) });
+        const pipSize = Number(tick.pip_size);
+        session.ticks.push({ quote: Number(tick.quote), digit, epoch: Number(tick.epoch), pipSize: Number.isFinite(pipSize) && pipSize > 0 ? pipSize : null });
         session.ticks = session.ticks.slice(-500);
       }
     }
