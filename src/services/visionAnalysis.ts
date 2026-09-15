@@ -2,6 +2,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import { config } from '../config';
 import { getSystemSetting, type SubscriptionTier } from '../lib/supabase';
 import { buildTradingChartAnalystPrompt } from '../lib/ai/prompts/tradingChartAnalystPrompt';
+import { formatMarketContext } from '../lib/ai/marketContext';
 import { validateTradingAnalysisResponse, type AnalysisMode, type TradingAnalysis } from '../lib/ai/validators/tradingAnalysisValidator';
 import { classifySetup, type InternalPlaybook } from '../lib/ai/playbooks/classifySetup';
 
@@ -915,7 +916,7 @@ export async function analyzeVisionStructure(
     timeframe,
     source: 'uploaded image',
     analysisMode,
-    extraContext: 'Analyze the uploaded chart screenshot only. Ignore browser chrome, platform UI, colors, layout, device frame, and non-chart details. Decide the setup/playbook internally from the visible market context.',
+    extraContext: `Analyze the uploaded chart screenshot only. Ignore browser chrome, platform UI, colors, layout, device frame, and non-chart details. Decide the setup/playbook internally from the visible market context. If the selected market is Other or does not identify a specific symbol, inspect the chart title, symbol label, watermark, exchange/platform label, and price formatting to identify the pair or index before analyzing it. If the symbol cannot be verified from the image, say so and lower confidence rather than inventing one.\n${formatMarketContext(pair)}`,
   });
   const freeJsonSchema = `
 {
@@ -1436,6 +1437,8 @@ Do NOT mix roles.
 
 Using ONLY Image 1 (${timeframe}) on ${pair}:
 
+${formatMarketContext(pair)}
+
 ================================
 STEP 1 - DETERMINE CONTEXT
 ================================
@@ -1677,6 +1680,7 @@ Do NOT mix roles.
 
 Chart context:
 - Trading pair/index: ${pair}
+${formatMarketContext(pair)}
 - Higher timeframe directional bias: ${context.higherTimeframeBias}
 - Higher timeframe supply zone: ${formatZoneRange(context.higherTimeframeSupplyZone)}
 - Higher timeframe demand zone: ${formatZoneRange(context.higherTimeframeDemandZone)}

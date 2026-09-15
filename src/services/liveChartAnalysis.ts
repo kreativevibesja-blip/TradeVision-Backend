@@ -2,6 +2,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import { config } from '../config';
 import { getSystemSetting, type SubscriptionTier } from '../lib/supabase';
 import { buildTradingChartAnalystPrompt } from '../lib/ai/prompts/tradingChartAnalystPrompt';
+import { formatMarketContext } from '../lib/ai/marketContext';
 import { validateTradingAnalysisResponse, type AnalysisMode, type TradingAnalysis } from '../lib/ai/validators/tradingAnalysisValidator';
 import { classifySetup } from '../lib/ai/playbooks/classifySetup';
 import type { MarketCandle } from './marketData';
@@ -515,6 +516,8 @@ Use named concepts only when they are clearly visible and helpful.
 If the market is unclear, ranging, noisy, or not offering an obvious edge, say that directly.
 
 Analyze this live market dataset for ${symbol} on ${timeframe}.
+
+${formatMarketContext(symbol)}
 
 CRITICAL DATA RULES:
 - Use ONLY the provided OHLC candle data.

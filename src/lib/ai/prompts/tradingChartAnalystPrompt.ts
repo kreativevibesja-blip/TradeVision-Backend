@@ -1,3 +1,5 @@
+import { formatMarketContext } from '../marketContext';
+
 export const TRADING_ANALYSIS_SCHEMA_TEXT = `{
   "marketBias": "bullish | bearish | neutral | unclear",
   "marketCondition": "trending | ranging | corrective | volatile | unclear",
@@ -109,6 +111,7 @@ Chart context:
 - Timeframe: ${context.timeframe}
 - Source: ${context.source}
 - Analysis mode: ${context.analysisMode ?? 'conservative'}
+${formatMarketContext(context.symbol)}
 ${context.extraContext?.trim() ? `\nAdditional context:\n${context.extraContext.trim()}\n` : ''}
 Return JSON matching this exact schema:
 ${TRADING_ANALYSIS_SCHEMA_TEXT}
